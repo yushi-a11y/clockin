@@ -1,0 +1,42 @@
+# OS / 编辑器
+.DS_Store
+
+# Canvas / QoderWork 运行时元数据
+.canvas-meta.json
+.design-state.json
+.design.json
+.server.log
+.server.pid
+.tmp_check.js
+
+# Python / Node 虚拟环境与缓存
+.venv*/
+.vite/
+__pycache__/
+*.pyc
+
+# 测试产物（截图、日志）
+test_outputs/
+
+# 部署包与解压目录（可由 index.html + outputs/version.txt + outputs/_headers 重建）
+*.zip
+outputs/clockin-deploy*/
+
+# 历史备份文件（由 git 承担版本保留职责）
+index.html.bak.*
+
+# 排班/人事数据文件（含员工信息，不入库）
+*.xlsx
+
+# 团队配置备份（可能含密码哈希，禁止入库）
+outputs/team-config*.json
+
+# 上传与临时资源
+uploads/
+
+# 二进制 CLI 与压缩包（supabase CLI 等）
+outputs/bin/
+*.tar.gz
+
+# 截图类产物
+outputs/*.png

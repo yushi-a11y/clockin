@@ -1,0 +1,146 @@
+// ============================================================
+// Supabase Edge Function: dingtalk-faq
+// 处理钉钉群聊 outgoing 机器人回调，回复小二端（员工端）常见问题。
+// 未匹配问题写入 faq_feedback 表，供管理员后续扩充知识库。
+//
+// 部署命令：
+//   supabase functions deploy dingtalk-faq --no-verify-jwt
+// ============================================================
+
+import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
+
+const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
+const SERVICE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
+
+// ===== 小二端 FAQ 单一真相源（与 index.html 保持一致） =====
+const FAQ_CATEGORIES = [
+  { id: "punch", name: "打卡", icon: "⏰" },
+  { id: "pick", name: "选班", icon: "📅" },
+  { id: "count", name: "选班情况", icon: "📊" },
+  { id: "month", name: "月度", icon: "📈" },
+  { id: "swap", name: "换班", icon: "🔄" },
+  { id: "makeup", name: "补卡", icon: "📝" },
+  { id: "leave", name: "请假", icon: "🏥" },
+  { id: "account", name: "账号与安全", icon: "🔐" },
+  { id: "rule", name: "通用规则", icon: "📋" },
+] as const;
+
+const FAQ_ENTRIES = [
+  { id: "punch-chain", category: "punch", title: "为什么点了一次上班卡，系统把下一个连续班次也打了？", keywords: ["连班", "连续", "下一个班次", "一起打卡", "链", "共用"], answer: "这是「连班链」机制。如果两个班次首尾相接（前班结束时间 = 后班开始时间），系统会合并为一条链，链中中间交接处只需打一次卡，不需要分别打下班卡和上班卡。这样可以减少重复操作。如果想每个班次单独打卡，请让管理员把班次之间留出间隔。" },
+  { id: "punch-window", category: "punch", title: "为什么打卡按钮是灰色的/点不了？", keywords: ["打卡", "按钮", "灰色", "点不了", "不能打卡", "提前", "窗口"], answer: "每个班次只能在管理后台配置的「容忍窗口」内打卡。提前到达或过了窗口期，按钮都会变灰。请在自己的班次开始/结束前后规定时间内打卡。另外，只能对「今天」执行实际打卡，历史/未来日期仅用于预览。" },
+  { id: "punch-remind", category: "punch", title: "打卡提醒不弹出怎么办？", keywords: ["提醒", "通知", "不弹", "打卡提醒", "浏览器通知"], answer: "请先在浏览器地址栏左侧点击锁形/信息图标，允许本站发送通知；然后回到打卡页，打开「班次开始/结束前 5 分钟提醒我打卡」的开关。每个班次每天只会提醒一次。" },
+  { id: "punch-history", category: "punch", title: "可以补打今天之前的卡吗？", keywords: ["补卡", "昨天", "之前", "漏打", "历史"], answer: "不能直接在打卡页补打历史班次。如果已缺卡，请到「补卡」标签提交补卡申请，管理员审批通过后系统会自动写入一条打卡记录，缺卡状态会变为「已补」。" },
+  { id: "pick-open", category: "pick", title: "选班什么时候开放？", keywords: ["选班", "开放", "几点", "周五", "14:00", "开放时间"], answer: "默认每周五 14:00 开放下一周期的选班。管理员可在后台调整「开放星期」和「开放小时」。在开放前只能查看排班表，不能选择或修改。" },
+  { id: "pick-lock", category: "pick", title: "选班为什么被锁定/保存后改不了？", keywords: ["锁定", "保存", "改不了", "不能修改", "冻结"], answer: "原因通常有几种：1）管理员在后台锁定了选班；2）该天已经过去；3）你已经保存过该天的选班，保存后员工端自动锁定，只能换班或让管理员在后台修改。" },
+  { id: "pick-limit", category: "pick", title: "每天/每周最多能选几个班？", keywords: ["上限", "最多", "7", "49", "每天", "每周", "限制"], answer: "每人每天最多选 7 个时段，每周（按系统设置的周起始日计算）合计不超过 49 个时段。同一时段每人每天只能占 1 个。14:10 后的补位、换班、捡班同样受此限制。" },
+  { id: "pick-freeze", category: "pick", title: "每周五 14:05 和 14:10 会发生什么？", keywords: ["14:05", "14:10", "冻结", "清理", "补位"], answer: "每周五 14:05 系统会冻结全表并清理超额班次：如果某天选了超过 7 个班，超额部分会被清除。14:10 之后可以自由补位空余时段，但仍受每天 7 个、每周 49 个限制。" },
+  { id: "pick-full", category: "pick", title: "某个时段点不了/显示已满，为什么？", keywords: ["已满", "点不了", "时段", "满员", "人数上限"], answer: "管理员可能给该时段设置了人数上限，当已选人数达到上限后，其他员工就无法再选。你可以 14:10 后尝试捡班，或联系管理员调整上限。" },
+  { id: "count-valid", category: "count", title: "「有效合计」是怎么算的？", keywords: ["有效合计", "怎么算", "计算", "每日", "每周"], answer: "每日最多计 7 个有效班次，每周最多计 49 个有效班次。如果某天超过 7 个，只按 7 个计入；如果某周超过 49 个，只按 49 个计入。标红的单元格表示不足当周最低有效数。" },
+  { id: "count-am-pm", category: "count", title: "什么是早补和夜补？", keywords: ["早补", "夜补", "早晚补", "定义"], answer: "早补指选中特定早班时段（默认 07:00-08:00，时段 ID 7）的天数；夜补指选中特定夜班时段（默认次日 01:00-02:00，时段 ID 25）的天数。系统按实际选班数据自动统计，用于月度汇总。" },
+  { id: "month-target", category: "month", title: "月度页面的「达标」和「未达标」是什么意思？", keywords: ["达标", "未达标", "月度", "周有效", "minValid"], answer: "当某周有效班次 ≥ 后台配置的「周最低有效」值（默认 30）时，显示为「达标」；否则显示「未达标」。这是判断本周出勤强度是否达标的依据。" },
+  { id: "swap-how", category: "swap", title: "怎么发起换班？", keywords: ["换班", "发起", "转让", "给别人"], answer: "进入「换班」标签，选择日期、要转出的班次、接收人，提交后对方会收到一条待确认请求。对方同意且双方都不超出每天 7 个/每周 49 个限制时，换班生效。" },
+  { id: "swap-expire", category: "swap", title: "换班请求多久不处理会过期？", keywords: ["换班", "过期", "多久", "48", "小时"], answer: "换班请求 48 小时未处理会自动过期。过期后班次仍归原持有人。" },
+  { id: "swap-status", category: "swap", title: "换班有哪些状态？", keywords: ["换班状态", "pending", "accepted", "rejected", "expired", "proxy"], answer: "常见状态：pending（等待确认）、accepted（已同意）、rejected（已拒绝）、cancelled（已取消）、proxy_pending（代提交待本人确认）、expired（超过 48 小时未处理自动过期）、approved（管理员后台批准）。" },
+  { id: "makeup-how", category: "makeup", title: "怎么提交补卡？", keywords: ["补卡", "提交", "缺卡", "申请"], answer: "在「补卡」页选择缺卡日期、缺卡班次、实际打卡时间并填写原因后提交。只能对已经过去的班次发起补卡。提交后管理员会在「补卡审批」中处理，通过后缺卡状态变为「已补」。" },
+  { id: "makeup-result", category: "makeup", title: "补卡申请多久有结果？", keywords: ["补卡", "多久", "结果", "审批"], answer: "补卡需要管理员在管理端审批，没有固定时长。审批通过后员工端会实时更新，你可以在补卡页查看状态。" },
+  { id: "leave-how", category: "leave", title: "怎么请假？", keywords: ["请假", "提交", "申请"], answer: "在「请假」页选择请假日期、涉及班次、填写原因后提交。管理员审批通过后，该日相关班次显示为「已请假」，不计入有效出勤。" },
+  { id: "leave-proxy", category: "leave", title: "店长可以帮我代提交请假/换班吗？", keywords: ["代提交", "店长", "管理员", "请假", "换班"], answer: "可以。店长/管理员可以在管理端替员工发起换班或请假。代提交的申请仍需要走正常确认/审批流程（换班需本人确认，请假需管理员审批）。" },
+  { id: "account-bind", category: "account", title: "为什么每天要重新输密码/设备绑定会过期？", keywords: ["绑定", "过期", "密码", "每天", "设备"], answer: "为了账号安全，设备绑定默认在次日重置时间（默认 07:00）后自动过期，过期后需要重新输入密码验证。如果管理员执行了「强制下线」，绑定也会立即失效。" },
+  { id: "account-pwd", category: "account", title: "忘记密码/密码被锁怎么办？", keywords: ["密码", "忘记", "锁定", "输错", "5 次"], answer: "连续输错密码 5 次后账号会被锁定 30 秒。如果忘记密码，请联系管理员重置；重置后密码会恢复为默认初始密码 123456，登录后建议尽快修改。" },
+  { id: "account-mobile", category: "account", title: "为什么手机/平板打不开页面？", keywords: ["手机", "平板", "移动", "打不开", "电脑"], answer: "为了保证打卡和选班体验，系统禁止在手机、平板等移动设备/触屏小屏设备上访问。请使用电脑浏览器打开。" },
+  { id: "rule-sync", category: "rule", title: "数据会实时同步吗？断网了怎么办？", keywords: ["同步", "断网", "离线", "实时"], answer: "系统使用 Supabase 作为后端，数据会实时同步。断网时页面右上角会显示「离线」，恢复网络后自动重连。本地有缓存，刷新页面后会先从本地恢复，再与云端同步。" },
+  { id: "rule-admin", category: "rule", title: "管理端和小二端有什么区别？", keywords: ["管理端", "小二端", "后台", "员工端", "区别"], answer: "小二端（员工端）用于打卡、选班、申请换班/补卡/请假；管理端用于配置班次规则、审批补卡/请假、查看出勤概览和导出报表。只有管理员能登录管理端。" },
+];
+
+function tokenizeChars(s: string): string[] {
+  if (!s) return [];
+  return String(s).toLowerCase().replace(/[^\u4e00-\u9fa5a-z0-9]/g, "").split("").filter(Boolean);
+}
+
+function scoreFaqMatch(query: string, entry: typeof FAQ_ENTRIES[number]): number {
+  if (!query) return 0;
+  const q = tokenizeChars(query);
+  if (!q.length) return 0;
+  const text = (entry.title || "") + " " + (entry.keywords || []).join(" ") + " " + (entry.answer || "");
+  const pool = new Set(tokenizeChars(text));
+  let hits = 0;
+  q.forEach((c) => { if (pool.has(c)) hits++; });
+  let score = hits / q.length;
+  (entry.keywords || []).forEach((kw) => { if (query.toLowerCase().includes(kw.toLowerCase())) score += 0.35; });
+  if (entry.title.toLowerCase().includes(query.toLowerCase())) score += 0.5;
+  return score;
+}
+
+function findBestAnswer(query: string): { entry: typeof FAQ_ENTRIES[number]; score: number } | null {
+  const q = query.trim();
+  if (!q) return null;
+  const ranked = FAQ_ENTRIES
+    .map((e) => ({ entry: e, score: scoreFaqMatch(q, e) }))
+    .filter((x) => x.score > 0.28)
+    .sort((a, b) => b.score - a.score);
+  return ranked[0] || null;
+}
+
+function categoryName(id: string): string {
+  return FAQ_CATEGORIES.find((c) => c.id === id)?.name || id;
+}
+
+// 从钉钉消息文本中去掉 @ 机器人前缀，提取用户真实问题
+function extractQuestion(raw: string, atUserIds?: string[]): string {
+  let s = raw || "";
+  // 去掉 @机器人 文本，例如 "@ ClockIn助手 怎么请假"
+  s = s.replace(/@[\s\u4e00-\u9fa5a-zA-Z0-9_-]+/g, " ");
+  return s.replace(/\s+/g, " ").trim();
+}
+
+Deno.serve(async (req) => {
+  try {
+    const body = await req.json().catch(() => ({}));
+    const msgText = body?.msg?.content?.content || body?.text?.content || "";
+    const senderNick = body?.senderNick || body?.msg?.senderNick || "同事";
+    const senderStaffId = body?.senderStaffId || body?.msg?.senderStaffId || "";
+    const question = extractQuestion(msgText, body?.atUserIds);
+
+    if (!question) {
+      return jsonResponse(
+        `你好 ${senderNick}，我是 ClockIn 小二端自助答疑助手。\n\n请直接 @我 并输入你想问的问题，例如：\n• 每天最多选几个班\n• 怎么补卡\n• 换班多久过期\n\n我只会回答员工端（小二端）功能和规则相关的问题。`,
+      );
+    }
+
+    const best = findBestAnswer(question);
+
+    // 未匹配或低置信度：记录到 faq_feedback，并给出友好提示
+    if (!best) {
+      try {
+        const supa = createClient(SUPABASE_URL, SERVICE_KEY);
+        await supa.from("faq_feedback").insert({
+          ts: Date.now(),
+          question,
+          role: "employee",
+          source: "dingtalk-bot",
+          member: { staffId: senderStaffId, name: senderNick },
+        });
+      } catch (e) {
+        console.warn("记录 faq_feedback 失败:", e);
+      }
+
+      return jsonResponse(
+        `抱歉 ${senderNick}，我没找到与你问题匹配的答案。\n\n已把你的问题记录下来，管理员会尽快补充。\n\n你也可以到员工端「帮助中心」查看所有常见问题，或联系店长/管理员咨询。`,
+      );
+    }
+
+    const cat = categoryName(best.entry.category);
+    const answer = `【${cat}】${best.entry.title}\n\n${best.entry.answer}\n\n如果还没解决，请到员工端「帮助中心」查看更多说明，或联系管理员。`;
+    return jsonResponse(answer);
+  } catch (e) {
+    console.error("dingtalk-faq error:", e);
+    return jsonResponse("服务暂时开小差了，请稍后再试。", 500);
+  }
+});
+
+function jsonResponse(text: string, status = 200) {
+  return new Response(
+    JSON.stringify({ msgtype: "text", text: { content: text } }),
+    { status, headers: { "Content-Type": "application/json" } },
+  );
+}

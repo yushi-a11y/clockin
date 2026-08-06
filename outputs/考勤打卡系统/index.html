@@ -1,0 +1,761 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1"/>
+  <meta name="canvas:aspect-ratio" content="16:9"/>
+  <title>ClockIn 考勤打卡</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com"/>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet"/>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+  <style>
+    :root{
+      --seed-bg:#f8f9fb;--seed-fg:#111827;--seed-primary:#2563eb;--seed-success:#16a34a;
+      --seed-warning:#ea580c;--seed-danger:#dc2626;--seed-surface:#ffffff;--seed-radius:10px;
+      --bg:var(--seed-bg);--fg:var(--seed-fg);--surface:var(--seed-surface);
+      --surface-alt:#f1f5f9;--border:#e2e8f0;--border-light:#f1f5f9;
+      --muted:#64748b;--muted-light:#94a3b8;
+      --primary:var(--seed-primary);--primary-soft:#dbeafe;--primary-hover:#1d4ed8;
+      --success:var(--seed-success);--success-soft:#dcfce7;
+      --warning:var(--seed-warning);--warning-soft:#fff7ed;
+      --danger:var(--seed-danger);--danger-soft:#fef2f2;
+      --radius:var(--seed-radius);--radius-sm:6px;--radius-lg:14px;--radius-xl:20px;
+      --shadow-sm:0 1px 2px var(--shadow-color-sm);--shadow-md:0 4px 12px var(--shadow-color-md);
+      --shadow-lg:0 8px 24px var(--shadow-color-lg);
+      --shadow-color-sm:rgba(0,0,0,.04);--shadow-color-md:rgba(0,0,0,.06);--shadow-color-lg:rgba(0,0,0,.08);
+      --primary-shadow:rgba(37,99,235,.3);--primary-shadow-hover:rgba(37,99,235,.35);
+      --success-shadow:rgba(22,163,74,.3);--border-opacity-12:rgba(22,163,74,.12);
+      --border-danger-12:rgba(220,38,38,.12);--border-warning-12:rgba(234,88,12,.12);
+      --primary-border-25:rgba(37,99,235,.25);--toggle-shadow:rgba(0,0,0,.15);--overlay-bg:rgba(0,0,0,.4);
+      --font-body:'Inter',-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
+      --font-mono:'JetBrains Mono','SF Mono',monospace;
+    }
+    *{margin:0;padding:0;box-sizing:border-box}
+    body{font-family:var(--font-body);font-size:15px;line-height:1.5;color:var(--fg);background:var(--bg);-webkit-font-smoothing:antialiased;font-feature-settings:"kern"}
+    button{font-family:var(--font-body);cursor:pointer}
+
+    /* ===== TOP BAR ===== */
+    .topbar{position:fixed;top:0;left:0;right:0;z-index:1000;background:var(--surface);border-bottom:1px solid var(--border);display:flex;align-items:center;justify-content:center;height:52px;gap:4px;padding:0 20px}
+    .topbar .brand{position:absolute;left:20px;font-weight:600;font-size:14px;letter-spacing:-.01em}
+    .topbar .brand em{font-style:normal;color:var(--primary)}
+    .top-btn{padding:7px 18px;border:none;background:transparent;font-size:13px;font-weight:500;color:var(--muted);border-radius:50px;transition:all .2s;letter-spacing:.01em}
+    .top-btn:hover{color:var(--fg);background:var(--surface-alt)}
+    .top-btn.active{background:var(--fg);color:var(--surface)}
+
+    .view{display:none;padding-top:52px}.view.active{display:block}
+
+    /* ===== MOBILE ===== */
+    .phone{max-width:390px;margin:0 auto;min-height:calc(100vh - 52px);background:var(--bg);position:relative}
+    .m-head{padding:20px 20px 0;display:flex;align-items:center;justify-content:space-between}
+    .m-head .greet{font-size:14px;color:var(--muted)}.m-head .uname{font-size:18px;font-weight:600;letter-spacing:-.01em;margin-top:2px}
+    .m-head .avatar{width:40px;height:40px;border-radius:50%;background:var(--primary-soft);color:var(--primary);display:flex;align-items:center;justify-content:center;font-size:14px;font-weight:600}
+
+    .clock-sec{text-align:center;padding:28px 20px 20px}
+    .clock-time{font-family:var(--font-mono);font-size:52px;font-weight:500;letter-spacing:-.02em;line-height:1}
+    .clock-date{font-size:13px;color:var(--muted);margin-top:6px}
+
+    .sum-card{margin:0 20px 16px;background:var(--surface);border-radius:var(--radius-lg);padding:14px 18px;box-shadow:var(--shadow-sm);border:1px solid var(--border-light)}
+    .sec-label{font-size:11px;font-weight:500;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);margin-bottom:10px}
+    .sum-row{display:flex;gap:10px}
+    .sum-item{flex:1;text-align:center;padding:8px 6px;border-radius:var(--radius);background:var(--surface-alt)}
+    .sum-item .n{font-size:20px;font-weight:600;letter-spacing:-.02em}.sum-item .l{font-size:11px;color:var(--muted);margin-top:1px;font-weight:500}
+    .sum-item.ok{background:var(--success-soft)}.sum-item.ok .n{color:var(--success)}
+    .sum-item.pd{background:var(--primary-soft)}.sum-item.pd .n{color:var(--primary)}
+    .sum-item.ms{background:var(--danger-soft)}.sum-item.ms .n{color:var(--danger)}
+
+    .period-list{padding:0 20px 160px}
+    .p-card{background:var(--surface);border-radius:var(--radius-lg);padding:14px 16px;margin-bottom:8px;box-shadow:var(--shadow-sm);border:1px solid var(--border-light);transition:border-color .3s}
+    .p-card.current{border-color:var(--primary-border-25)}
+    .p-head{display:flex;align-items:center;justify-content:space-between;margin-bottom:10px}
+    .p-name{font-size:15px;font-weight:600;letter-spacing:-.01em}
+    .p-range{font-family:var(--font-mono);font-size:11px;color:var(--muted);background:var(--surface-alt);padding:2px 7px;border-radius:var(--radius-sm)}
+    .badge{font-size:11px;font-weight:500;padding:2px 9px;border-radius:50px}
+    .b-ok{background:var(--success-soft);color:var(--success)}.b-warn{background:var(--warning-soft);color:var(--warning)}
+    .b-miss{background:var(--danger-soft);color:var(--danger)}.b-wait{background:var(--surface-alt);color:var(--muted)}
+    .b-active{background:var(--primary-soft);color:var(--primary)}
+
+    .checks{display:flex;gap:8px}
+    .chk{flex:1;display:flex;align-items:center;gap:8px;padding:9px 11px;border-radius:var(--radius);background:var(--surface-alt);border:1px solid transparent;transition:all .25s}
+    .chk.ok{background:var(--success-soft);border-color:var(--border-opacity-12)}
+    .chk.miss{background:var(--danger-soft);border-color:var(--border-danger-12)}
+    .chk.late{background:var(--warning-soft);border-color:var(--border-warning-12)}
+    .chk.wait{opacity:.5}
+    .chk-icon{width:18px;height:18px;border-radius:50%;display:flex;align-items:center;justify-content:center;flex-shrink:0}
+    .chk-icon svg{width:11px;height:11px}
+    .chk.ok .chk-icon{background:var(--success);color:#fff}
+    .chk.miss .chk-icon{background:var(--danger);color:#fff}
+    .chk.late .chk-icon{background:var(--warning);color:#fff}
+    .chk.wait .chk-icon{background:var(--border);color:var(--muted)}
+    .chk-info .cl{font-size:10px;color:var(--muted);font-weight:500}
+    .chk-info .ct{font-family:var(--font-mono);font-size:12px;font-weight:500;margin-top:1px}
+    .chk.miss .ct{color:var(--danger)}
+
+    /* Punch Button */
+    .punch-wrap{position:fixed;bottom:72px;left:50%;transform:translateX(-50%);width:calc(100% - 60px);max-width:330px;z-index:50}
+    .punch-btn{width:100%;padding:15px;border:none;border-radius:var(--radius-xl);background:var(--primary);color:#fff;font-size:16px;font-weight:600;box-shadow:0 4px 16px var(--primary-shadow);transition:all .2s;letter-spacing:-.01em;position:relative;overflow:hidden}
+    .punch-btn:hover{background:var(--primary-hover);transform:translateY(-1px);box-shadow:0 6px 20px var(--primary-shadow-hover)}
+    .punch-btn:active{transform:translateY(0)}
+    .punch-btn.off{background:var(--border);color:var(--muted-light);box-shadow:none;cursor:not-allowed}
+    .punch-btn .hint{font-size:12px;font-weight:400;opacity:.8;margin-top:2px}
+    .punch-btn.success{background:var(--success);box-shadow:0 4px 16px var(--success-shadow)}
+
+    /* Tabbar */
+    .tabbar{position:fixed;bottom:0;left:50%;transform:translateX(-50%);width:100%;max-width:390px;background:var(--surface);border-top:1px solid var(--border);display:flex;padding:6px 0;padding-bottom:max(6px,env(safe-area-inset-bottom));z-index:100}
+    .tbar-item{flex:1;display:flex;flex-direction:column;align-items:center;gap:2px;padding:6px 0;color:var(--muted);cursor:pointer;transition:color .15s;background:none;border:none}
+    .tbar-item.active{color:var(--primary)}
+    .tbar-item svg{width:21px;height:21px}
+    .tbar-item span{font-size:10px;font-weight:500}
+
+    /* History */
+    .hist-sec{padding:0 20px 160px}
+    .hist-date{font-size:12px;font-weight:500;color:var(--muted);margin:16px 0 6px;padding-left:2px}
+    .hist-item{background:var(--surface);border-radius:var(--radius);padding:12px 14px;margin-bottom:5px;border:1px solid var(--border-light);display:flex;align-items:center;justify-content:space-between}
+    .hist-left{display:flex;align-items:center;gap:10px}
+    .hist-dot{width:7px;height:7px;border-radius:50%;flex-shrink:0}
+    .hist-p{font-size:14px;font-weight:500}
+    .hist-t{font-family:var(--font-mono);font-size:11px;color:var(--muted);margin-top:1px}
+
+    /* ===== ADMIN ===== */
+    .admin-layout{display:grid;grid-template-columns:232px 1fr;min-height:calc(100vh - 52px)}
+    .sidebar{background:var(--surface);border-right:1px solid var(--border);padding:20px 14px;position:sticky;top:52px;height:calc(100vh - 52px);overflow-y:auto}
+    .sb-brand{display:flex;align-items:center;gap:9px;padding:0 8px;margin-bottom:24px}
+    .sb-brand-icon{width:30px;height:30px;border-radius:var(--radius);background:var(--primary);display:flex;align-items:center;justify-content:center}
+    .sb-brand-icon svg{width:16px;height:16px;color:#fff}
+    .sb-brand-text{font-size:14px;font-weight:600;letter-spacing:-.01em}
+    .sb-nav{list-style:none;display:flex;flex-direction:column;gap:1px}
+    .sb-nav a{display:flex;align-items:center;gap:9px;padding:8px 11px;border-radius:var(--radius);font-size:13px;font-weight:500;color:var(--muted);text-decoration:none;transition:all .15s}
+    .sb-nav a:hover{background:var(--surface-alt);color:var(--fg)}
+    .sb-nav a.active{background:var(--primary-soft);color:var(--primary)}
+    .sb-nav a svg{width:17px;height:17px;flex-shrink:0}
+    .sb-sec{font-size:10px;font-weight:500;text-transform:uppercase;letter-spacing:.06em;color:var(--muted-light);padding:18px 11px 6px}
+
+    .main-area{padding:22px 28px;overflow-y:auto}
+    .page-head{display:flex;align-items:center;justify-content:space-between;margin-bottom:20px}
+    .page-title{font-size:20px;font-weight:600;letter-spacing:-.02em}
+    .head-actions{display:flex;align-items:center;gap:8px}
+
+    .btn-s{padding:7px 13px;border:1px solid var(--border);background:var(--surface);border-radius:var(--radius);font-size:12.5px;font-weight:500;color:var(--fg);display:flex;align-items:center;gap:5px;transition:all .15s}
+    .btn-s:hover{background:var(--surface-alt);border-color:var(--muted-light)}
+    .btn-s svg{width:13px;height:13px}
+    .btn-p{padding:7px 14px;border:none;background:var(--primary);border-radius:var(--radius);font-size:12.5px;font-weight:500;color:#fff;transition:all .15s}
+    .btn-p:hover{background:var(--primary-hover)}
+
+    .kpi-row{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:20px}
+    .kpi{background:var(--surface);border-radius:var(--radius-lg);padding:16px 18px;border:1px solid var(--border-light);box-shadow:var(--shadow-sm)}
+    .kpi-l{font-size:11px;font-weight:500;color:var(--muted);margin-bottom:4px}
+    .kpi-v{font-size:26px;font-weight:700;letter-spacing:-.03em;line-height:1.1}
+    .kpi-d{display:inline-flex;align-items:center;font-size:11px;font-weight:500;margin-top:5px;padding:1px 6px;border-radius:var(--radius-sm)}
+    .kpi-d.up{color:var(--success);background:var(--success-soft)}.kpi-d.down{color:var(--danger);background:var(--danger-soft)}
+
+    .charts-row{display:grid;grid-template-columns:2fr 1fr;gap:12px;margin-bottom:20px}
+    .chart-card{background:var(--surface);border-radius:var(--radius-lg);padding:18px;border:1px solid var(--border-light);box-shadow:var(--shadow-sm)}
+    .chart-head{display:flex;align-items:center;justify-content:space-between;margin-bottom:14px}
+    .chart-title{font-size:13px;font-weight:600;letter-spacing:-.01em}
+    .legend{display:flex;gap:10px}
+    .legend-item{display:flex;align-items:center;gap:4px;font-size:10px;color:var(--muted)}
+    .legend-dot{width:7px;height:7px;border-radius:50%}
+    .chart-svg{width:100%;height:170px}
+
+    .tbl-card{background:var(--surface);border-radius:var(--radius-lg);border:1px solid var(--border-light);box-shadow:var(--shadow-sm);overflow:hidden}
+    .tbl-head{padding:14px 18px;display:flex;align-items:center;justify-content:space-between;border-bottom:1px solid var(--border)}
+    .tbl-title{font-size:13px;font-weight:600}
+    .tbl-search{padding:5px 10px;border:1px solid var(--border);border-radius:var(--radius);font-size:12px;outline:none;width:160px;transition:border-color .15s}
+    .tbl-search:focus{border-color:var(--primary)}
+    table{width:100%;border-collapse:collapse}
+    th{padding:9px 14px;text-align:left;font-size:10px;font-weight:500;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);background:var(--surface-alt);border-bottom:1px solid var(--border)}
+    td{padding:10px 14px;font-size:13px;border-bottom:1px solid var(--border-light);vertical-align:middle}
+    tr:last-child td{border-bottom:none}
+    .u-cell{display:flex;align-items:center;gap:9px}
+    .u-av{width:26px;height:26px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:10px;font-weight:600;flex-shrink:0}
+    .mono{font-family:var(--font-mono);font-size:11.5px}
+
+    /* Rules */
+    .rule-card{background:var(--surface);border-radius:var(--radius-lg);padding:14px 18px;border:1px solid var(--border-light);box-shadow:var(--shadow-sm);margin-bottom:8px;display:flex;align-items:center;justify-content:space-between}
+    .rule-info{display:flex;align-items:center;gap:12px}
+    .rule-icon{width:34px;height:34px;border-radius:var(--radius);display:flex;align-items:center;justify-content:center}
+    .rule-icon svg{width:16px;height:16px}
+    .rule-name{font-size:14px;font-weight:600;letter-spacing:-.01em}
+    .rule-desc{font-size:11.5px;color:var(--muted);margin-top:1px}
+    .rule-actions{display:flex;align-items:center;gap:8px}
+    .toggle{width:34px;height:19px;border-radius:10px;background:var(--border);position:relative;cursor:pointer;transition:background .2s}
+    .toggle.on{background:var(--success)}
+    .toggle::after{content:'';position:absolute;width:15px;height:15px;border-radius:50%;background:#fff;top:2px;left:2px;transition:transform .2s;box-shadow:0 1px 3px var(--toggle-shadow)}
+    .toggle.on::after{transform:translateX(15px)}
+    .r-btn{padding:5px 10px;border:1px solid var(--border);background:var(--surface);border-radius:var(--radius-sm);font-size:11.5px;font-weight:500;color:var(--muted);cursor:pointer;transition:all .15s}
+    .r-btn:hover{border-color:var(--muted-light);color:var(--fg)}
+
+    /* Import Modal */
+    .modal-overlay{position:fixed;inset:0;background:var(--overlay-bg);z-index:2000;display:none;align-items:center;justify-content:center;backdrop-filter:blur(4px)}
+    .modal-overlay.show{display:flex}
+    .modal{background:var(--surface);border-radius:var(--radius-lg);padding:24px;width:90%;max-width:520px;box-shadow:var(--shadow-lg);max-height:80vh;overflow-y:auto}
+    .modal h3{font-size:17px;font-weight:600;margin-bottom:4px;letter-spacing:-.01em}
+    .modal .sub{font-size:13px;color:var(--muted);margin-bottom:16px}
+    .drop-zone{border:2px dashed var(--border);border-radius:var(--radius-lg);padding:32px;text-align:center;cursor:pointer;transition:all .2s;margin-bottom:16px}
+    .drop-zone:hover,.drop-zone.drag{border-color:var(--primary);background:var(--primary-soft)}
+    .drop-zone svg{width:36px;height:36px;color:var(--muted);margin-bottom:8px}
+    .drop-zone .dz-title{font-size:14px;font-weight:500;color:var(--fg)}
+    .drop-zone .dz-hint{font-size:12px;color:var(--muted);margin-top:3px}
+    .import-preview{margin-top:12px}
+    .import-preview table{font-size:12px}
+    .import-preview th{font-size:10px;padding:6px 10px}
+    .import-preview td{padding:6px 10px}
+    .modal-actions{display:flex;justify-content:flex-end;gap:8px;margin-top:16px}
+    .modal-actions .btn-s{min-width:70px;justify-content:center}
+    .modal-actions .btn-p{min-width:70px;text-align:center}
+
+    .toast{position:fixed;top:62px;left:50%;transform:translateX(-50%) translateY(-16px);background:var(--fg);color:var(--surface);padding:9px 18px;border-radius:var(--radius);font-size:13px;font-weight:500;box-shadow:var(--shadow-lg);opacity:0;pointer-events:none;transition:all .3s;z-index:3000;white-space:nowrap}
+    .toast.show{opacity:1;transform:translateX(-50%) translateY(0)}
+
+    .empty-state{text-align:center;padding:40px 20px;color:var(--muted)}
+    .empty-state svg{width:40px;height:40px;margin-bottom:10px;opacity:.35}
+    .empty-state .et{font-size:14px;font-weight:500;color:var(--fg)}.empty-state .ed{font-size:12px;margin-top:3px}
+
+    .panel{display:none}.panel.active{display:block}
+
+    @media(max-width:1024px){.kpi-row{grid-template-columns:repeat(2,1fr)}.charts-row{grid-template-columns:1fr}}
+    @media(max-width:768px){.admin-layout{grid-template-columns:1fr}.sidebar{display:none}.main-area{padding:14px}.kpi-row{grid-template-columns:1fr 1fr}}
+
+    /* Animations */
+    @keyframes punchPop{0%{transform:scale(1)}50%{transform:scale(.95)}100%{transform:scale(1)}}
+    .punch-anim{animation:punchPop .25s ease}
+  </style>
+</head>
+<body>
+  <!-- Top Bar -->
+  <div class="topbar" data-component="Top Bar">
+    <span class="brand">Clock<em>In</em></span>
+    <button class="top-btn active" onclick="switchView('mobile',this)">员工打卡</button>
+    <button class="top-btn" onclick="switchView('admin',this)">管理后台</button>
+  </div>
+
+  <div class="toast" id="toast"></div>
+
+  <!-- ========== MOBILE VIEW ========== -->
+  <div class="view active" id="v-mobile">
+    <div class="phone" data-component="Mobile App">
+      <div class="panel active" id="mp-clock">
+        <header class="m-head">
+          <div><div class="greet" id="greeting"></div><div class="uname" id="userName">张明远</div></div>
+          <div class="avatar">张</div>
+        </header>
+        <section class="clock-sec" data-component="Clock Display" data-od-id="clock-display">
+          <div class="clock-time" id="liveClock">--:--:--</div>
+          <div class="clock-date" id="liveDate"></div>
+        </section>
+        <section class="sum-card" data-component="Today Status Summary" data-od-id="status-summary">
+          <div class="sec-label">今日出勤</div>
+          <div class="sum-row" id="sumRow"></div>
+        </section>
+        <section class="period-list" id="periodList" data-component="Period List" data-od-id="period-list"></section>
+        <div class="punch-wrap" id="punchWrap" data-component="Punch Button" data-od-id="punch-btn"></div>
+      </div>
+      <div class="panel" id="mp-hist">
+        <header class="m-head">
+          <div><div class="greet">打卡记录</div><div class="uname">近30天</div></div>
+          <div class="avatar">张</div>
+        </header>
+        <section class="hist-sec" id="histList" data-component="Attendance History" data-od-id="history"></section>
+      </div>
+      <div class="panel" id="mp-settings">
+        <header class="m-head">
+          <div><div class="greet">设置</div><div class="uname">个人偏好</div></div>
+          <div class="avatar">张</div>
+        </header>
+        <div style="padding:20px">
+          <div class="rule-card"><div class="rule-info"><div class="rule-icon" style="background:var(--surface-alt);color:var(--muted)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg></div><div><div class="rule-name">个人信息</div><div class="rule-desc">张明远 · 产品研发部 · 工号 A1024</div></div></div></div>
+          <div class="rule-card"><div class="rule-info"><div class="rule-icon" style="background:var(--surface-alt);color:var(--muted)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9"/></svg></div><div><div class="rule-name">打卡提醒</div><div class="rule-desc">每个时段开始前5分钟提醒</div></div></div><div class="toggle on" onclick="this.classList.toggle('on')"></div></div>
+          <div class="rule-card"><div class="rule-info"><div class="rule-icon" style="background:var(--surface-alt);color:var(--muted)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg></div><div><div class="rule-name">数据管理</div><div class="rule-desc">清除所有本地打卡数据</div></div></div><button class="r-btn" onclick="clearAllData()" style="color:var(--danger)">清除数据</button></div>
+        </div>
+      </div>
+      <nav class="tabbar">
+        <button class="tbar-item active" onclick="switchMobilePanel('clock',this)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="9"/><polyline points="12 9 12 12 14.5 14.5"/></svg><span>打卡</span></button>
+        <button class="tbar-item" onclick="switchMobilePanel('hist',this)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></svg><span>记录</span></button>
+        <button class="tbar-item" onclick="switchMobilePanel('settings',this)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg><span>我的</span></button>
+      </nav>
+    </div>
+  </div>
+
+  <!-- ========== ADMIN VIEW ========== -->
+  <div class="view" id="v-admin">
+    <div class="admin-layout" data-component="Admin Dashboard">
+      <aside class="sidebar">
+        <div class="sb-brand"><div class="sb-brand-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="9"/><polyline points="12 9 12 12 14.5 14.5"/></svg></div><span class="sb-brand-text">ClockIn 管理</span></div>
+        <ul class="sb-nav" id="sideNav">
+          <li><a href="#" class="active" onclick="switchAdminPanel('overview',this)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg>出勤概览</a></li>
+          <li><a href="#" onclick="switchAdminPanel('detail',this)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>团队明细</a></li>
+          <li><a href="#" onclick="switchAdminPanel('rules',this)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>规则配置</a></li>
+        </ul>
+        <div class="sb-sec">数据</div>
+        <ul class="sb-nav">
+          <li><a href="#" onclick="switchAdminPanel('import',this)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>导入班次</a></li>
+          <li><a href="#" onclick="exportData()"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>导出报表</a></li>
+        </ul>
+      </aside>
+      <main class="main-area">
+        <!-- Overview -->
+        <div class="panel active" id="ap-overview">
+          <div class="page-head"><h1 class="page-title">今日出勤概览</h1><div class="head-actions"><button class="btn-s" id="dateBtn"></button><button class="btn-p" onclick="exportData()">导出日报</button></div></div>
+          <div class="kpi-row" id="kpiRow" data-component="KPI Cards" data-od-id="kpi-cards"></div>
+          <div class="charts-row" id="chartsRow" data-component="Charts" data-od-id="charts"></div>
+          <div class="tbl-card" data-component="Attendance Table" data-od-id="att-table"><div class="tbl-head"><div class="tbl-title">今日出勤明细</div><input type="text" class="tbl-search" placeholder="搜索成员..." oninput="renderTable(this.value)"/></div><div id="tableBody"></div></div>
+        </div>
+        <!-- Detail -->
+        <div class="panel" id="ap-detail">
+          <div class="page-head"><h1 class="page-title">团队出勤明细</h1></div>
+          <div class="tbl-card"><div class="tbl-head"><div class="tbl-title">全部记录</div><input type="text" class="tbl-search" placeholder="搜索..." oninput="renderTable(this.value)"/></div><div id="detailTable"></div></div>
+        </div>
+        <!-- Rules -->
+        <div class="panel" id="ap-rules">
+          <div class="page-head"><h1 class="page-title">打卡规则配置</h1><div class="head-actions"><button class="btn-p" onclick="showImportModal()">导入班次表</button></div></div>
+          <div id="rulesList" data-component="Shift Rules" data-od-id="shift-rules"></div>
+          <div style="padding-top:20px"><div class="sec-label" style="margin-bottom:12px">全局设置</div><div id="globalRules"></div></div>
+        </div>
+        <!-- Import -->
+        <div class="panel" id="ap-import">
+          <div class="page-head"><h1 class="page-title">导入班次表</h1></div>
+          <div class="chart-card" style="max-width:600px">
+            <div style="margin-bottom:12px"><div style="font-size:14px;font-weight:600;margin-bottom:4px">Excel 班次表导入</div><div style="font-size:13px;color:var(--muted)">支持 .xlsx / .xls 格式，自动识别班次时段</div></div>
+            <div class="drop-zone" id="dropZone" onclick="document.getElementById('fileInput').click()">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+              <div class="dz-title">点击选择或拖拽 Excel 文件</div>
+              <div class="dz-hint">支持 .xlsx / .xls 格式</div>
+            </div>
+            <input type="file" id="fileInput" accept=".xlsx,.xls" style="display:none" onchange="handleFileSelect(event)"/>
+            <div style="padding:12px;background:var(--surface-alt);border-radius:var(--radius);font-size:12px;color:var(--muted)">
+              <div style="font-weight:500;color:var(--fg);margin-bottom:4px">Excel 格式要求</div>
+              班次表需包含以下列：班次名称、开始时间、结束时间、容差分钟数（可选）。<br/>例如：<br/>
+              <span class="mono" style="font-size:11px">早班 | 08:00 | 12:00 | 5</span><br/>
+              <span class="mono" style="font-size:11px">午班 | 13:00 | 17:00 | 5</span><br/><br/>
+              <button class="btn-s" onclick="downloadTemplate()" style="margin-top:8px"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" style="width:12px;height:12px"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>下载模板</button>
+            </div>
+            <div class="import-preview" id="importPreview"></div>
+          </div>
+        </div>
+      </main>
+    </div>
+  </div>
+
+  <!-- Import Modal -->
+  <div class="modal-overlay" id="importModal">
+    <div class="modal">
+      <h3>导入班次数据</h3>
+      <div class="sub">检测到以下班次信息，确认导入将替换当前规则。</div>
+      <div class="import-preview" id="modalPreview"></div>
+      <div class="modal-actions">
+        <button class="btn-s" onclick="closeImportModal()">取消</button>
+        <button class="btn-p" onclick="confirmImport()">确认导入</button>
+      </div>
+    </div>
+  </div>
+
+<script>
+/* ===== STATE ===== */
+const STORAGE_KEY = 'clockin_data';
+const DEFAULT_SHIFTS = [
+  {id:1,name:'早班',start:'08:00',end:'12:00',tolerance:5,enabled:true},
+  {id:2,name:'午班',start:'13:00',end:'17:00',tolerance:5,enabled:true},
+  {id:3,name:'晚班',start:'18:00',end:'21:00',tolerance:10,enabled:true},
+  {id:4,name:'夜班',start:'22:00',end:'06:00',tolerance:15,enabled:false}
+];
+const TEAM = [
+  {id:1,name:'李思远',dept:'产品研发部',color:'#dbeafe',tc:'#2563eb'},
+  {id:2,name:'王晓峰',dept:'市场运营部',color:'#fce7f3',tc:'#db2777'},
+  {id:3,name:'陈雨晴',dept:'设计部',color:'#dcfce7',tc:'#16a34a'},
+  {id:4,name:'赵子涵',dept:'客户服务部',color:'#fef3c7',tc:'#d97706'},
+  {id:5,name:'刘佳欣',dept:'人力资源部',color:'#f1f5f9',tc:'#64748b'},
+  {id:6,name:'张明远',dept:'产品研发部',color:'#dbeafe',tc:'#2563eb'},
+  {id:7,name:'孙浩然',dept:'财务部',color:'#ccfbf1',tc:'#0d9488'},
+  {id:8,name:'周雨桐',dept:'市场运营部',color:'#fce7f3',tc:'#db2777'}
+];
+const SETTINGS = {autoMark:true,lateThreshold:0,notifyOnAnomaly:true};
+
+let state = loadState();
+let pendingImport = null;
+
+function loadState(){
+  try{
+    const raw = localStorage.getItem(STORAGE_KEY);
+    if(raw){const d=JSON.parse(raw);if(d.shifts&&d.punches)return d;}
+  }catch(e){}
+  return {shifts:JSON.parse(JSON.stringify(DEFAULT_SHIFTS)),punches:{},settings:{...SETTINGS}};
+}
+function saveState(){localStorage.setItem(STORAGE_KEY,JSON.stringify(state))}
+function clearAllData(){if(confirm('确定要清除所有本地打卡数据吗？')){state.punches={};saveState();renderAll();showToast('数据已清除')}}
+
+/* ===== UTILITIES ===== */
+function todayStr(){const d=new Date();return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0')}
+function nowMinutes(){const d=new Date();return d.getHours()*60+d.getMinutes()}
+function timeToMin(t){const[h,m]=t.split(':').map(Number);return h*60+m}
+function minToTime(m){m=((m%1440)+1440)%1440;return String(Math.floor(m/60)).padStart(2,'0')+':'+String(m%60).padStart(2,'0')}
+function fmtDate(s){const d=new Date(s+'T00:00:00');const wd=['日','一','二','三','四','五','六'];return (d.getMonth()+1)+'月'+d.getDate()+'日 周'+wd[d.getDay()]}
+function showToast(msg){const t=document.getElementById('toast');t.textContent=msg;t.classList.add('show');setTimeout(()=>t.classList.remove('show'),2500)}
+
+/* ===== SHIFT LOGIC ===== */
+function getTodayPunches(){return state.punches[todayStr()]||[]}
+function getShiftStatus(shift,punches){
+  const now=nowMinutes();
+  const sMin=timeToMin(shift.start),eMin=timeToMin(shift.end);
+  const isCross=eMin<sMin;
+  const inRange=isCross?(now>=sMin||now<eMin):(now>=sMin&&now<eMin);
+  const started=isCross?(now>=sMin||now<eMin):(now>=sMin);
+  const ended=isCross?(now>=eMin&&now<sMin):(now>=eMin);
+  const startPunch=punches.find(p=>p.shiftId===shift.id&&p.type==='start');
+  const endPunch=punches.find(p=>p.shiftId===shift.id&&p.type==='end');
+  let startStatus='wait',endStatus='wait';
+  if(startPunch){
+    const pm=timeToMin(startPunch.time);
+    startStatus=pm<=sMin+shift.tolerance?'ok':'late';
+  }else if(ended){startStatus='miss'}else if(started){startStatus='wait'}
+  if(endPunch){endStatus='ok'}else if(ended){endStatus='miss'}else if(started){endStatus='wait'}
+  let overall='wait';
+  if(startStatus==='ok'&&endStatus==='ok')overall='ok';
+  else if(startStatus==='miss'||endStatus==='miss')overall='miss';
+  else if(startStatus==='late')overall='warn';
+  else if(startStatus==='ok'&&endStatus==='wait')overall='active';
+  else if(!started)overall='wait';
+  return{startStatus,endStatus,overall,started,ended,inRange,startPunch,endPunch,isCross};
+}
+
+function getNextAction(){
+  const punches=getTodayPunches();
+  const enabledShifts=state.shifts.filter(s=>s.enabled);
+  for(const shift of enabledShifts){
+    const st=getShiftStatus(shift,punches);
+    if(st.overall==='wait'&&!st.started&&timeToMin(shift.start)-15<=nowMinutes())return{shift,type:'start',label:'上班打卡',hint:shift.name+' · '+shift.start+' 开始'};
+    if(st.startStatus==='ok'&&st.endStatus==='wait')return{shift,type:'end',label:'下班打卡',hint:shift.name+' · '+shift.end+' 结束'};
+    if(st.startStatus==='wait'&&st.started)return{shift,type:'start',label:'上班打卡（迟到）',hint:shift.name+' · 已迟到'};
+  }
+  return null;
+}
+
+/* ===== PUNCH ===== */
+function doPunch(){
+  const action=getNextAction();
+  if(!action)return;
+  const now=new Date();
+  const time=String(now.getHours()).padStart(2,'0')+':'+String(now.getMinutes()).padStart(2,'0');
+  const td=todayStr();
+  if(!state.punches[td])state.punches[td]=[];
+  state.punches[td].push({shiftId:action.shift.id,type:action.type,time,ts:now.getTime()});
+  saveState();
+  const btn=document.querySelector('.punch-btn');
+  if(btn)btn.classList.add('punch-anim');
+  setTimeout(()=>{if(btn)btn.classList.remove('punch-anim')},300);
+  showToast('打卡成功 · '+time);
+  setTimeout(renderAll,300);
+}
+
+/* ===== RENDER MOBILE ===== */
+function renderMobile(){
+  const h=new Date().getHours();
+  document.getElementById('greeting').textContent=h<6?'夜深了':h<12?'早上好':h<14?'中午好':h<18?'下午好':'晚上好';
+  const punches=getTodayPunches();
+  const enabledShifts=state.shifts.filter(s=>s.enabled);
+  let okCount=0,warnCount=0,missCount=0,activeCount=0;
+  enabledShifts.forEach(s=>{const st=getShiftStatus(s,punches);if(st.overall==='ok')okCount++;else if(st.overall==='miss')missCount++;else if(st.overall==='active')activeCount++;});
+  const total=enabledShifts.length;
+  document.getElementById('sumRow').innerHTML=
+    `<div class="sum-item ok"><div class="n">${okCount}</div><div class="l">已完成</div></div>`+
+    `<div class="sum-item pd"><div class="n">${activeCount}</div><div class="l">进行中</div></div>`+
+    `<div class="sum-item ms"><div class="n">${missCount}</div><div class="l">缺卡</div></div>`;
+  let periodHTML='<div class="sec-label">时段打卡</div>';
+  enabledShifts.forEach(shift=>{
+    const st=getShiftStatus(shift,punches);
+    const badgeMap={ok:['已完成','b-ok'],miss:['有缺卡','b-miss'],warn:['有迟到','b-warn'],active:['进行中','b-active'],wait:['未开始','b-wait']};
+    const[bl,bc]=badgeMap[st.overall];
+    const cardClass=st.overall==='active'?'p-card current':'p-card';
+    const startIcon=st.startStatus==='ok'?'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="20 6 9 17 4 12"/></svg>':st.startStatus==='miss'?'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>':st.startStatus==='late'?'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><circle cx="12" cy="12" r="9"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>':'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="9"/><polyline points="12 9 12 12 14.5 14.5"/></svg>';
+    const endIcon=st.endStatus==='ok'?'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="20 6 9 17 4 12"/></svg>':st.endStatus==='miss'?'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>':'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="9"/><polyline points="12 9 12 12 14.5 14.5"/></svg>';
+    const startTime=st.startPunch?st.startPunch.time:(st.startStatus==='miss'?'缺卡':shift.start);
+    const endTime=st.endPunch?st.endPunch.time:(st.endStatus==='miss'?'缺卡':'待打卡 · '+shift.end);
+    const startLabel=st.startStatus==='late'?'上班打卡 · 迟到':'上班打卡';
+    periodHTML+=`<div class="${cardClass}"><div class="p-head"><div><div class="p-name">${shift.name}</div></div><span class="badge ${bc}">${bl}</span></div><div class="checks"><div class="chk ${st.startStatus}"><div class="chk-icon">${startIcon}</div><div class="chk-info"><div class="cl">${startLabel}</div><div class="ct">${startTime}</div></div></div><div class="chk ${st.endStatus}"><div class="chk-icon">${endIcon}</div><div class="chk-info"><div class="cl">下班打卡</div><div class="ct">${endTime}</div></div></div></div></div>`;
+  });
+  document.getElementById('periodList').innerHTML=periodHTML;
+  const action=getNextAction();
+  document.getElementById('punchWrap').innerHTML=action?
+    `<button class="punch-btn" onclick="doPunch()">${action.label}<div class="hint">${action.hint}</div></button>`:
+    `<button class="punch-btn off" disabled>暂无可打卡时段<div class="hint">所有时段已完成或未开始</div></button>`;
+}
+
+function renderHistory(){
+  const dates=Object.keys(state.punches).sort().reverse();
+  if(!dates.length){document.getElementById('histList').innerHTML='<div class="empty-state"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg><div class="et">暂无打卡记录</div><div class="ed">打卡后记录会自动出现在这里</div></div>';return}
+  let html='';
+  dates.forEach(date=>{
+    const punches=state.punches[date];
+    html+=`<div class="hist-date">${fmtDate(date)}</div>`;
+    state.shifts.filter(s=>s.enabled).forEach(shift=>{
+      const sp=punches.find(p=>p.shiftId===shift.id&&p.type==='start');
+      const ep=punches.find(p=>p.shiftId===shift.id&&p.type==='end');
+      const hasAll=sp&&ep;
+      const dotColor=hasAll?'var(--success)':(!sp&&!ep?'var(--muted-light)':'var(--warning)');
+      const statusText=hasAll?'正常':(!sp&&!ep?'未打卡':'部分打卡');
+      const badgeClass=hasAll?'b-ok':(!sp&&!ep?'b-wait':'b-warn');
+      html+=`<div class="hist-item"><div class="hist-left"><div class="hist-dot" style="background:${dotColor}"></div><div><div class="hist-p">${shift.name} ${shift.start} - ${shift.end}</div><div class="hist-t">${sp?sp.time:'--:--'} / ${ep?ep.time:'--:--'} · ${statusText}</div></div></div><span class="badge ${badgeClass}">${statusText}</span></div>`;
+    });
+  });
+  document.getElementById('histList').innerHTML=html;
+}
+
+/* ===== RENDER ADMIN ===== */
+function renderAdmin(){
+  document.getElementById('dateBtn').innerHTML='<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" style="width:13px;height:13px"><rect x="3" y="4" width="18" height="18" rx="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/></svg> '+todayStr();
+  const punches=getTodayPunches();
+  const enabledShifts=state.shifts.filter(s=>s.enabled);
+  const total=TEAM.length;
+  let normal=0,anomalies=0;
+  TEAM.forEach(member=>{
+    const mp=generateMemberPunches(member.id);
+    let isNormal=true;
+    enabledShifts.forEach(shift=>{
+      const st=getShiftStatusForPunches(shift,mp);
+      if(st.overall==='miss'||st.startStatus==='late')isNormal=false;
+    });
+    if(isNormal)normal++;else anomalies++;
+  });
+  const rate=total>0?((normal/total)*100).toFixed(1):'0';
+  document.getElementById('kpiRow').innerHTML=
+    `<div class="kpi"><div class="kpi-l">应到人数</div><div class="kpi-v">${total}</div><div class="kpi-d up">全员在岗</div></div>`+
+    `<div class="kpi"><div class="kpi-l">正常出勤</div><div class="kpi-v">${normal}</div><div class="kpi-d ${normal>=total-1?'up':'down'}">${normal>=total-1?'良好':'需关注'}</div></div>`+
+    `<div class="kpi"><div class="kpi-l">出勤率</div><div class="kpi-v">${rate}%</div><div class="kpi-d ${parseFloat(rate)>=90?'up':'down'}">${parseFloat(rate)>=90?'达标':'偏低'}</div></div>`+
+    `<div class="kpi"><div class="kpi-l">异常打卡</div><div class="kpi-v">${anomalies}</div><div class="kpi-d ${anomalies===0?'up':'down'}">${anomalies===0?'无异常':anomalies+'人异常'}</div></div>`;
+  renderCharts();
+  renderTable('');
+  renderRules();
+}
+
+function generateMemberPunches(memberId){
+  const today=todayStr();
+  const base=state.punches[today]||[];
+  if(memberId===6)return base;
+  const mock=[];
+  const enabledShifts=state.shifts.filter(s=>s.enabled);
+  enabledShifts.forEach(shift=>{
+    const seed=(memberId*7+shift.id*13)%100;
+    const sMin=timeToMin(shift.start);
+    const eMin=timeToMin(shift.end);
+    const now=nowMinutes();
+    if(now>sMin){
+      const offset=seed%8-2;
+      mock.push({shiftId:shift.id,type:'start',time:minToTime(sMin+offset)});
+    }
+    if(now>eMin){
+      const offset=(seed*3)%6-1;
+      mock.push({shiftId:shift.id,type:'end',time:minToTime(eMin+offset)});
+    }
+  });
+  return mock;
+}
+
+function getShiftStatusForPunches(shift,punches){
+  const now=nowMinutes();
+  const sMin=timeToMin(shift.start),eMin=timeToMin(shift.end);
+  const isCross=eMin<sMin;
+  const started=isCross?(now>=sMin||now<eMin):(now>=sMin);
+  const ended=isCross?(now>=eMin&&now<sMin):(now>=eMin);
+  const startPunch=punches.find(p=>p.shiftId===shift.id&&p.type==='start');
+  const endPunch=punches.find(p=>p.shiftId===shift.id&&p.type==='end');
+  let startStatus='wait',endStatus='wait';
+  if(startPunch){const pm=timeToMin(startPunch.time);startStatus=pm<=sMin+shift.tolerance?'ok':'late'}
+  else if(ended)startStatus='miss';
+  if(endPunch)endStatus='ok';else if(ended)endStatus='miss';
+  let overall='wait';
+  if(startStatus==='ok'&&endStatus==='ok')overall='ok';
+  else if(startStatus==='miss'||endStatus==='miss')overall='miss';
+  else if(startStatus==='late')overall='warn';
+  else if(startStatus==='ok'&&endStatus==='wait')overall='active';
+  return{startStatus,endStatus,overall,started,ended,startPunch,endPunch};
+}
+
+function renderCharts(){
+  const days=['周一','周二','周三','周四','周五'];
+  const rates=[96,92,97,89,parseFloat(((TEAM.length-Math.floor(Math.random()*3))/TEAM.length*100).toFixed(0))];
+  const anomalyCounts=[2,4,1,5,Math.floor(Math.random()*4)+1];
+  const maxR=100,minR=70;
+  const chartW=520,chartH=140,padL=40,padR=20,padT=10,padB=30;
+  const pw=chartW-padL-padR,ph=chartH-padT-padB;
+  const pts=rates.map((r,i)=>{const x=padL+i*(pw/(rates.length-1));const y=padT+ph-(r-minR)/(maxR-minR)*ph;return{x,y,r}});
+  const line=pts.map(p=>p.x+','+p.y).join(' ');
+  const area=`${pts[0].x},${padT+ph} ${line} ${pts[pts.length-1].x},${padT+ph}`;
+  let svg=`<svg class="chart-svg" role="img" aria-label="本周出勤趋势" viewBox="0 0 ${chartW} ${chartH+20}"><title>本周出勤趋势</title>`;
+  for(let i=0;i<=3;i++){const y=padT+i*(ph/3);const v=maxR-i*((maxR-minR)/3);svg+=`<line x1="${padL}" y1="${y}" x2="${chartW-padR}" y2="${y}" stroke="var(--border-light)" stroke-width="1"/>`;svg+=`<text x="${padL-6}" y="${y+4}" font-size="9" fill="var(--muted)" text-anchor="end" font-family="var(--font-mono)">${Math.round(v)}%</text>`}
+  svg+=`<polygon points="${area}" fill="var(--primary)" opacity=".06"/>`;
+  svg+=`<polyline points="${line}" fill="none" stroke="var(--primary)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>`;
+  pts.forEach((p,i)=>{svg+=`<circle cx="${p.x}" cy="${p.y}" r="3.5" fill="var(--surface)" stroke="var(--primary)" stroke-width="2"/>`;svg+=`<text x="${p.x}" y="${p.y-8}" font-size="9" fill="var(--primary)" text-anchor="middle" font-family="var(--font-mono)" font-weight="500">${p.r}%</text>`;svg+=`<text x="${p.x}" y="${chartH+14}" font-size="9" fill="var(--muted)" text-anchor="middle">${days[i]}</text>`});
+  anomalyCounts.forEach((c,i)=>{const bh=c*6;const bx=pts[i].x-6;svg+=`<rect x="${bx}" y="${padT+ph-bh}" width="12" height="${bh}" rx="2" fill="var(--warning)" opacity=".5"/>`});
+  svg+=`</svg>`;
+  const enabledShifts=state.shifts.filter(s=>s.enabled);
+  const barW=200,barH=160;
+  let barSvg=`<svg class="chart-svg" role="img" aria-label="时段完成率" viewBox="0 0 ${barW} ${barH+20}"><title>时段完成率</title>`;
+  const bw=30,gap=(barW-20-bw*enabledShifts.length)/(enabledShifts.length+1);
+  enabledShifts.forEach((s,i)=>{const completion=75+Math.floor(Math.random()*25);const bh=completion/100*(barH-40);const bx=10+gap+(bw+gap)*i;const by=barH-20-bh;barSvg+=`<rect x="${bx}" y="${barH-20-(barH-40)}" width="${bw}" height="${barH-40}" rx="4" fill="var(--surface-alt)"/>`;barSvg+=`<rect x="${bx}" y="${by}" width="${bw}" height="${bh}" rx="4" fill="${completion<85?'var(--warning)':'var(--primary)'}" opacity=".8"/>`;barSvg+=`<text x="${bx+bw/2}" y="${by-5}" font-size="9" fill="var(--fg)" text-anchor="middle" font-family="var(--font-mono)" font-weight="500">${completion}%</text>`;barSvg+=`<text x="${bx+bw/2}" y="${barH-4}" font-size="9" fill="var(--muted)" text-anchor="middle">${s.name}</text>`});
+  barSvg+=`</svg>`;
+  document.getElementById('chartsRow').innerHTML=
+    `<div class="chart-card"><div class="chart-head"><div class="chart-title">本周出勤趋势</div><div class="legend"><div class="legend-item"><div class="legend-dot" style="background:var(--primary)"></div>出勤率</div><div class="legend-item"><div class="legend-dot" style="background:var(--warning)"></div>异常数</div></div></div>${svg}</div>`+
+    `<div class="chart-card"><div class="chart-head"><div class="chart-title">时段完成率</div></div>${barSvg}</div>`;
+}
+
+function renderTable(filter){
+  const punches=getTodayPunches();
+  const enabledShifts=state.shifts.filter(s=>s.enabled);
+  const q=(filter||'').toLowerCase();
+  const members=TEAM.filter(m=>!q||m.name.includes(q)||m.dept.includes(q));
+  let html='<table><thead><tr><th>成员</th>';
+  enabledShifts.forEach(s=>html+=`<th>${s.name}</th>`);
+  html+='<th>状态</th></tr></thead><tbody>';
+  members.forEach(member=>{
+    const mp=generateMemberPunches(member.id);
+    html+=`<tr><td><div class="u-cell"><div class="u-av" style="background:${member.color};color:${member.tc}">${member.name[0]}</div><div><div style="font-weight:500">${member.name}</div><div style="font-size:11px;color:var(--muted)">${member.dept}</div></div></div></td>`;
+    let allOk=true,hasMiss=false;
+    enabledShifts.forEach(shift=>{
+      const st=getShiftStatusForPunches(shift,mp);
+      const sTime=st.startPunch?st.startPunch.time:'--:--';
+      const eTime=st.endPunch?st.endPunch.time:'--:--';
+      if(st.overall!=='ok'&&st.overall!=='wait')allOk=false;
+      if(st.overall==='miss')hasMiss=true;
+      const cls=st.startStatus==='late'||st.overall==='miss'?'style="color:var(--warning)"':'';
+      html+=`<td class="mono" ${cls}>${sTime} / ${eTime}</td>`;
+    });
+    const badge=allOk?'<span class="badge b-ok">正常</span>':hasMiss?'<span class="badge b-miss">缺卡</span>':'<span class="badge b-warn">异常</span>';
+    html+=`<td>${badge}</td></tr>`;
+  });
+  html+='</tbody></table>';
+  document.getElementById('tableBody').innerHTML=html;
+  const dt=document.getElementById('detailTable');
+  if(dt)dt.innerHTML=html;
+}
+
+function renderRules(){
+  let html='';
+  const icons=['var(--primary-soft)','var(--success-soft)','var(--warning-soft)','var(--surface-alt)'];
+  const iconColors=['var(--primary)','var(--success)','var(--warning)','var(--muted)'];
+  state.shifts.forEach((shift,i)=>{
+    html+=`<div class="rule-card"><div class="rule-info"><div class="rule-icon" style="background:${icons[i%4]};color:${iconColors[i%4]}"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="9"/><polyline points="12 7 12 12 15 15"/></svg></div><div><div class="rule-name">${shift.name}</div><div class="rule-desc">${shift.start} — ${shift.end} · 打卡2次 · 容差${shift.tolerance}分钟</div></div></div><div class="rule-actions"><div class="toggle ${shift.enabled?'on':''}" onclick="toggleShift(${shift.id})"></div><button class="r-btn" onclick="removeShift(${shift.id})">删除</button></div></div>`;
+  });
+  document.getElementById('rulesList').innerHTML=html;
+  document.getElementById('globalRules').innerHTML=
+    `<div class="rule-card"><div class="rule-info"><div class="rule-icon" style="background:var(--surface-alt);color:var(--muted)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg></div><div><div class="rule-name">缺卡自动标记</div><div class="rule-desc">时段结束后未打卡自动标记为缺卡</div></div></div><div class="toggle ${state.settings.autoMark?'on':''}" onclick="state.settings.autoMark=!state.settings.autoMark;this.classList.toggle('on');saveState()"></div></div>`+
+    `<div class="rule-card"><div class="rule-info"><div class="rule-icon" style="background:var(--surface-alt);color:var(--muted)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="9"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg></div><div><div class="rule-name">迟到阈值</div><div class="rule-desc">超过时段开始时间 + 容差即视为迟到</div></div></div><button class="r-btn" onclick="adjustTolerance()">全局设置</button></div>`+
+    `<div class="rule-card"><div class="rule-info"><div class="rule-icon" style="background:var(--surface-alt);color:var(--muted)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z"/><polyline points="22,6 12,13 2,6"/></svg></div><div><div class="rule-name">异常通知</div><div class="rule-desc">缺卡或迟到超过15分钟时通知主管</div></div></div><div class="toggle ${state.settings.notifyOnAnomaly?'on':''}" onclick="state.settings.notifyOnAnomaly=!state.settings.notifyOnAnomaly;this.classList.toggle('on');saveState()"></div></div>`;
+}
+
+function toggleShift(id){const s=state.shifts.find(s=>s.id===id);if(s){s.enabled=!s.enabled;saveState();renderAll()}}
+function removeShift(id){if(confirm('确定删除此时段？')){state.shifts=state.shifts.filter(s=>s.id!==id);saveState();renderAll()}}
+function adjustTolerance(){const v=prompt('设置全局容差分钟数（所有时段生效）：','5');if(v!==null&&!isNaN(v)){const n=parseInt(v);state.shifts.forEach(s=>s.tolerance=n);saveState();renderAll();showToast('容差已更新为 '+n+' 分钟')}}
+
+/* ===== EXCEL IMPORT ===== */
+function showImportModal(){document.getElementById('fileInput').click()}
+function closeImportModal(){document.getElementById('importModal').classList.remove('show');pendingImport=null;document.getElementById('importPreview').innerHTML='';document.getElementById('modalPreview').innerHTML=''}
+
+function handleFileSelect(e){
+  const file=e.target.files[0];
+  if(!file)return;
+  const reader=new FileReader();
+  reader.onload=function(ev){
+    try{
+      const data=new Uint8Array(ev.target.result);
+      const wb=XLSX.read(data,{type:'array'});
+      const ws=wb.Sheets[wb.SheetNames[0]];
+      const json=XLSX.utils.sheet_to_json(ws,{defval:''});
+      if(!json.length){showToast('文件为空或格式不正确');return}
+      const shifts=[];
+      json.forEach((row,i)=>{
+        const keys=Object.keys(row);
+        let name='',start='',end='',tol=5;
+        keys.forEach(k=>{
+          const v=String(row[k]).trim();
+          const kl=k.toLowerCase();
+          if(kl.includes('名称')||kl.includes('班次')||kl.includes('name')||kl==='a'||(!name&&keys.indexOf(k)===0))name=v;
+          if(kl.includes('开始')||kl.includes('start')||kl.includes('上班'))start=v;
+          if(kl.includes('结束')||kl.includes('end')||kl.includes('下班'))end=v;
+          if(kl.includes('容差')||kl.includes('tolerance')||kl.includes('分钟'))tol=parseInt(v)||5;
+        });
+        if(name&&start&&end){
+          const cleanTime=t=>{if(typeof t==='number'){const d=XLSX.SSF.parse_date_code(t);if(d)return String(d.H||0).padStart(2,'0')+':'+String(d.m||0).padStart(2,'0')}return String(t).substring(0,5)};
+          shifts.push({id:Date.now()+i,name,start:cleanTime(start),end:cleanTime(end),tolerance:tol,enabled:true});
+        }
+      });
+      if(!shifts.length){showToast('未识别到有效班次数据，请检查格式');return}
+      pendingImport=shifts;
+      let preview='<table><thead><tr><th>班次名称</th><th>开始</th><th>结束</th><th>容差</th></tr></thead><tbody>';
+      shifts.forEach(s=>preview+=`<tr><td>${s.name}</td><td class="mono">${s.start}</td><td class="mono">${s.end}</td><td>${s.tolerance}分钟</td></tr>`);
+      preview+='</tbody></table>';
+      document.getElementById('importPreview').innerHTML=preview;
+      document.getElementById('modalPreview').innerHTML=preview;
+      document.getElementById('importModal').classList.add('show');
+    }catch(err){showToast('文件解析失败：'+err.message)}
+  };
+  reader.readAsArrayBuffer(file);
+  e.target.value='';
+}
+
+function confirmImport(){
+  if(!pendingImport||!pendingImport.length)return;
+  state.shifts=pendingImport;
+  saveState();
+  closeImportModal();
+  renderAll();
+  showToast('成功导入 '+pendingImport.length+' 个班次');
+}
+
+function downloadTemplate(){
+  const wb=XLSX.utils.book_new();
+  const data=[['班次名称','开始时间','结束时间','容差分钟数'],['早班','08:00','12:00',5],['午班','13:00','17:00',5],['晚班','18:00','21:00',10]];
+  const ws=XLSX.utils.aoa_to_sheet(data);
+  ws['!cols']=[{wch:12},{wch:10},{wch:10},{wch:12}];
+  XLSX.utils.book_append_sheet(wb,ws,'班次表');
+  XLSX.writeFile(wb,'班次导入模板.xlsx');
+}
+
+function exportData(){
+  const wb=XLSX.utils.book_new();
+  const data=[['日期','成员','部门','班次','上班打卡','下班打卡','状态']];
+  const dates=Object.keys(state.punches).sort().reverse();
+  if(!dates.length)dates.push(todayStr());
+  dates.forEach(date=>{
+    TEAM.forEach(member=>{
+      const mp=generateMemberPunches(member.id);
+      state.shifts.filter(s=>s.enabled).forEach(shift=>{
+        const sp=mp.find(p=>p.shiftId===shift.id&&p.type==='start');
+        const ep=mp.find(p=>p.shiftId===shift.id&&p.type==='end');
+        const status=(sp&&ep)?'正常':(!sp&&!ep)?'未打卡':'部分打卡';
+        data.push([date,member.name,member.dept,shift.name,sp?sp.time:'',ep?ep.time:'',status]);
+      });
+    });
+  });
+  const ws=XLSX.utils.aoa_to_sheet(data);
+  ws['!cols']=[{wch:12},{wch:8},{wch:12},{wch:8},{wch:10},{wch:10},{wch:8}];
+  XLSX.utils.book_append_sheet(wb,ws,'考勤报表');
+  XLSX.writeFile(wb,'考勤报表_'+todayStr()+'.xlsx');
+  showToast('报表已导出');
+}
+
+/* ===== DRAG & DROP ===== */
+const dz=document.getElementById('dropZone');
+if(dz){
+  dz.addEventListener('dragover',e=>{e.preventDefault();dz.classList.add('drag')});
+  dz.addEventListener('dragleave',()=>dz.classList.remove('drag'));
+  dz.addEventListener('drop',e=>{e.preventDefault();dz.classList.remove('drag');const f=e.dataTransfer.files[0];if(f){const inp=document.getElementById('fileInput');const dt=new DataTransfer();dt.items.add(f);inp.files=dt.files;handleFileSelect({target:inp})}});
+}
+
+/* ===== NAVIGATION ===== */
+function switchView(v,btn){document.querySelectorAll('.view').forEach(x=>x.classList.remove('active'));document.querySelectorAll('.top-btn').forEach(b=>b.classList.remove('active'));document.getElementById('v-'+v).classList.add('active');btn.classList.add('active');renderAll()}
+function switchMobilePanel(p,btn){document.querySelectorAll('.phone .panel').forEach(x=>x.classList.remove('active'));document.querySelectorAll('.tbar-item').forEach(b=>b.classList.remove('active'));document.getElementById('mp-'+p).classList.add('active');btn.classList.add('active');if(p==='hist')renderHistory()}
+function switchAdminPanel(p,link){document.querySelectorAll('.main-area .panel').forEach(x=>x.classList.remove('active'));document.querySelectorAll('.sb-nav a').forEach(a=>a.classList.remove('active'));document.getElementById('ap-'+p).classList.add('active');if(link)link.classList.add('active')}
+
+/* ===== CLOCK & RENDER ===== */
+function updateClock(){
+  const now=new Date();
+  document.getElementById('liveClock').textContent=String(now.getHours()).padStart(2,'0')+':'+String(now.getMinutes()).padStart(2,'0')+':'+String(now.getSeconds()).padStart(2,'0');
+  const wd=['日','一','二','三','四','五','六'];
+  document.getElementById('liveDate').textContent=now.getFullYear()+'年'+(now.getMonth()+1)+'月'+now.getDate()+'日 星期'+wd[now.getDay()];
+}
+function renderAll(){renderMobile();renderAdmin();renderHistory()}
+updateClock();
+setInterval(updateClock,1000);
+setInterval(()=>{renderMobile()},30000);
+renderAll();
+</script>
+</body>
+</html>
