@@ -3144,12 +3144,20 @@ async function acceptMakeup(id){
     const ok=await fbPunch(rec);
     if(!ok){syncOk=false;queueOfflinePunches([rec])}
   }
+  // 关键修复：在线模式下，仅当所有打卡记录都成功同步到 Supabase 时，才标记补卡为已通过
+  // 否则员工端（其他设备）从 Supabase 查不到记录，仍会显示缺卡
+  // 离线模式（fbReady=false）下允许本地生效，联网后自动同步
+  if(!syncOk&&fbReady){
+    showToast(' 云端同步失败，补卡暂未生效。请检查网络后重试审批');
+    logSecurityEvent('makeup_sync_failed',`补卡审批云端同步失败：${m.name} ${m.date} ${shiftNameOf(m.sid)}`);
+    return; // 不标记为 accepted，保持 pending 状态供重试
+  }
   m.status='accepted';m.decidedTs=Date.now();m.decidedBy=adminDisplayName();svMakeups();await syncMakeups();
   // 补卡通过后，从 Supabase 重新拉取该日期的打卡记录，确保多端/多标签页同步
   if(fbReady){try{const {data:rows}=await supa.from('punches').select('*').eq('date',punchDate);if(rows&&rows.length)mergeFbPunches(rows)}catch(e){}}
   const isHandover=recs.length>1;
-  logEvent('批准补卡',`管理员批准 ${m.name} 在 ${m.date} ${shiftNameOf(m.sid)} 的${m.t==='s'?'上班':'下班'}卡（${m.time}）${isHandover?' · 连班交接同步补卡':''}${syncOk?'':' · 远端同步待恢复'}`);
-  showToast(syncOk?`已批准，打卡记录已补上${isHandover?'（连班交接同步）':''}`:`已批准并本地生效，云端同步失败，联网后将自动补同步${isHandover?'（连班交接同步）':''}`);renderMakeupAdmin();updateMakeupAdminBadge();renderAll();
+  logEvent('批准补卡',`管理员批准 ${m.name} 在 ${m.date} ${shiftNameOf(m.sid)} 的${m.t==='s'?'上班':'下班'}卡（${m.time}）${isHandover?' · 连班交接同步补卡':''}${syncOk?'':' · 离线模式，联网后自动同步'}`);
+  showToast(`已批准，打卡记录已补上${isHandover?'（连班交接同步）':''}${syncOk?'':' · 离线模式'}`);renderMakeupAdmin();updateMakeupAdminBadge();renderAll();
 }
 async function rejectMakeup(id){
   const m=makeups.find(x=>x.id===id);if(!m||m.status!=='pending')return;
@@ -5199,7 +5207,7 @@ function renderAll(){renderEmp();if(document.getElementById('pg-admin').classLis
 
 tick();setInterval(tick,1000);setInterval(renderEmp,3e4);
 // ===== 新版本检测：部署新版后自动提醒用户刷新，避免大家一直跑旧代码 =====
-const APP_VERSION='v2026.08.07.22';
+const APP_VERSION='v2026.08.07.23';
 let _newVerNotified=false;
 async function checkAppVersion(){
   if(_newVerNotified)return;
