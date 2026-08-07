@@ -727,12 +727,34 @@ function verifyAdminToken(){
   }
   return true;
 }
+// 7b) Server-side admin auth integration (v2026.08.07.19)
+//     双轨模式：优先走服务端 admin_verify / admin_token_valid RPC；
+//     若 RPC 不可用（SQL 尚未执行）则自动降级到本地哈希校验 + 设备指纹 token。
+const CS6_SRV='cs6srv',CS6_STK='cs6stk',CS6_SRV_FLAG='cs6srvFlag';
+function isSrvAdminMode(){return localStorage.getItem(CS6_SRV)==='1'}
+// 解析服务端 now() 时间戳（UTC，无时区后缀）为毫秒；
+// Supabase docker 默认 UTC → now() 输出 '2026-08-07T14:30:00' 即 UTC。
+function _parseSrvTs(s){if(!s)return 0;try{return Date.parse(s.endsWith('Z')?s:s+'Z')||0}catch(e){return 0}}
 // Override isAdminNow to include token verification
 function isAdminNow(){
   const s=localStorage.getItem('cs6');
   const tk=localStorage.getItem('cs6tk');
   if(!s||!tk||Date.now()>=+s)return false;
-  // New tokens have fingerprint binding
+  // 服务端 token 模式：校验服务端 HMAC 令牌过期
+  if(isSrvAdminMode()){
+    const expText=localStorage.getItem('cs6exp')||'';
+    if(!expText)return false;
+    const expMs=_parseSrvTs(expText);
+    // 60s 宽限：覆盖客户端 UTC 解析与服务器 now() 之间的轻微时钟偏差
+    if(expMs&&Date.now()>expMs+60000){
+      logSecurityEvent('server_token_expired','Admin server-side HMAC token expired');
+      localStorage.removeItem('cs6');localStorage.removeItem('cs6tk');
+      localStorage.removeItem(CS6_SRV);localStorage.removeItem('cs6exp');localStorage.removeItem(CS6_STK);
+      return false;
+    }
+    return true;
+  }
+  // 本地 token 模式：设备指纹绑定
   if(tk.includes('.')){return verifyAdminToken()}
   // v2026.08.06: 无指纹绑定的旧格式 token 不再信任，强制重新登录（关闭遗留后门）
   logSecurityEvent('legacy_token_rejected','Admin legacy token (no fingerprint binding) rejected; re-login required');
@@ -771,6 +793,43 @@ let _securityChecksPassed=false;
   }catch(e){}
   _securityChecksPassed=true;
 })();
+// 8) Server-side token validation for sensitive admin operations
+//    在关键写操作前调用：验证服务端 HMAC 令牌仍然有效。
+//    双轨兼容：本地模式直接放行；服务端模式尝试验证，RPC 不可达时放行（不阻塞操作）。
+async function ensureAdminToken(){
+  if(!isSrvAdminMode())return true;
+  const token=localStorage.getItem(CS6_STK)||localStorage.getItem('cs6tk');
+  const expText=localStorage.getItem('cs6exp')||'';
+  if(!token||!expText)return false;
+  // 客户端快速过期检查
+  const expMs=_parseSrvTs(expText);
+  if(expMs&&Date.now()>expMs+60000){
+    logSecurityEvent('server_token_expired','Token expired before admin operation');
+    localStorage.removeItem('cs6');localStorage.removeItem('cs6tk');
+    localStorage.removeItem(CS6_SRV);localStorage.removeItem('cs6exp');localStorage.removeItem(CS6_STK);
+    return false;
+  }
+  // 尽力服务端校验（RPC 不可达时不阻塞操作）
+  if(!fbReady)return true;
+  try{
+    const {data:valid,error:rpcErr}=await supa.rpc('admin_token_valid',token,expText);
+    if(rpcErr){
+      // RPC 不存在或其他错误 → 不阻塞（降级模式）
+      return true;
+    }
+    if(valid===false){
+      // 服务端明确判定令牌无效
+      logSecurityEvent('server_token_invalid','Server rejected admin token during operation');
+      localStorage.removeItem('cs6');localStorage.removeItem('cs6tk');
+      localStorage.removeItem(CS6_SRV);localStorage.removeItem('cs6exp');localStorage.removeItem(CS6_STK);
+      showToast('管理员会话已失效，请重新登录');
+      return false;
+    }
+    return true;
+  }catch(e){
+    return true; // 网络异常不阻塞
+  }
+}
 // ====== END SECURITY MODULE ======
 
 const COLORS=[{bg:'#dbeafe',fg:'#2563eb'},{bg:'#fce7f3',fg:'#db2777'},{bg:'#dcfce7',fg:'#16a34a'},{bg:'#fef3c7',fg:'#d97706'},{bg:'#f1f5f9',fg:'#64748b'},{bg:'#ccfbf1',fg:'#0d9488'},{bg:'#ede9fe',fg:'#7c3aed'},{bg:'#fee2e2',fg:'#dc2626'}];
@@ -1149,7 +1208,7 @@ async function atomicAddPickCap(dateStr,mid,sid,isAdmin){
 function prunePicks(){const days=Math.max(7,+selCfg.retainDays||60);const cutoff=ymd(addDays(new Date(),-days));Object.keys(picks).forEach(d=>{if(d<cutoff)delete picks[d]})}
 
 // Supabase sync
-async function syncToFB(){if(!fbReady)return;try{await supa.from('config').upsert({id:'shifts',data:state.shifts,updated_at:Date.now()},{onConflict:'id'});await supa.from('config').upsert({id:'team',data:TEAM,updated_at:Date.now()},{onConflict:'id'})}catch(e){console.warn('Sync error:',e)}}
+async function syncToFB(){if(!fbReady)return;try{await supa.from('config').upsert({id:'shifts',data:state.shifts,updated_at:Date.now()},{onConflict:'id'});const teamUpload=isSrvAdminMode()?TEAM.map(m=>{const{pwd,...r}=m;return r}):TEAM;await supa.from('config').upsert({id:'team',data:teamUpload,updated_at:Date.now()},{onConflict:'id'})}catch(e){console.warn('Sync error:',e)}}
 // 单独同步选班数据 / 选班规则（避免每次都推送全部 config）
 let picksLocalVer=0; // 本地 picks 最后写入时间（0=尚未写过，首次拉取直接应用）
 async function syncPicks(){
@@ -3038,6 +3097,7 @@ function renderMakeupAdmin(){
 }
 async function acceptMakeup(id){
   const m=makeups.find(x=>x.id===id);if(!m||m.status!=='pending')return;
+  if(!await ensureAdminToken())return;
   if(!confirm(`批准 ${m.name} 在 ${m.date} ${shiftNameOf(m.sid)} 的${m.t==='s'?'上班':'下班'}补卡（${m.time}）？`))return;
   // 写入 punches：使用实际打卡日历日期（跨午夜班次的下班卡落在次日），并盖上实例身份 sd=选班日期
   const punchDate=m.punchDate||makeupPunchDate(m.date,m.sid,m.t,m.mid);
@@ -3087,6 +3147,7 @@ async function acceptMakeup(id){
 }
 async function rejectMakeup(id){
   const m=makeups.find(x=>x.id===id);if(!m||m.status!=='pending')return;
+  if(!await ensureAdminToken())return;
   const reason=prompt(`驳回 ${m.name} 的补卡申请？请填写原因（可选，将告知员工）：`);
   if(reason===null)return;
   m.status='rejected';m.decidedTs=Date.now();m.decidedBy=adminDisplayName();m.rejectReason=(reason||'').trim();svMakeups();await syncMakeups();
@@ -4136,11 +4197,49 @@ async function getAdminPwdHash(){const h=localStorage.getItem(ADMIN_PWD_KEY);if(
 async function verifyAdminPwd(input){const stored=await getAdminPwdHash();if(isHash(stored)){return stored===(await sha256(input))}return input===stored}
 async function changeAdminPwd(){
   const oldP=prompt('请输入当前管理员密码：');if(oldP===null)return;
-  if(!(await verifyAdminPwd(oldP))){showToast('当前密码错误');return}
   const newP=prompt('请输入新管理员密码（留空重置为默认）：');if(newP===null)return;
   const plain=newP.trim()||ADMIN_PWD_DEFAULT;
-  const hash=await sha256(plain);
-  if(hash)localStorage.setItem(ADMIN_PWD_KEY,hash);
+  const newHash=await sha256(plain);
+  if(!newHash){showToast('哈希计算失败');return}
+  // ① 服务端模式：通过 admin_set_pwd RPC 修改
+  if(isSrvAdminMode()){
+    const token=localStorage.getItem(CS6_STK)||localStorage.getItem('cs6tk');
+    const expText=localStorage.getItem('cs6exp')||'';
+    try{
+      const {data:rpcResult,error:rpcErr}=await supa.rpc('admin_set_pwd',token,expText,newHash);
+      if(rpcErr){
+        console.warn('[admin_auth] admin_set_pwd RPC error:',rpcErr);
+        showToast('服务端修改失败（'+((rpcErr.message||'')+'').slice(0,40)+'），已降级为本地存储');
+        // 降级到本地
+        localStorage.setItem(ADMIN_PWD_KEY,newHash);
+        showToast('管理员密码已修改（本地存储）');
+        return;
+      }
+      if(rpcResult&&rpcResult.ok){
+        // 服务端修改成功：清除本地密码哈希（服务端为权威来源）
+        localStorage.removeItem(ADMIN_PWD_KEY);
+        showToast('管理员密码已修改（服务端存储）');
+        return;
+      }
+      // 服务端拒绝（token 无效等）
+      const reason=rpcResult?.reason||'';
+      if(reason==='bad_token'){
+        showToast('会话已过期，请重新登录后再修改密码');
+        adminLogout();
+      }else{
+        showToast('修改失败：'+(reason||'未知错误'));
+      }
+      return;
+    }catch(e){
+      console.warn('[admin_auth] admin_set_pwd error:',e);
+      showToast('服务端通信失败，已降级为本地存储');
+      localStorage.setItem(ADMIN_PWD_KEY,newHash);
+      return;
+    }
+  }
+  // ② 本地模式：验证旧密码后写入本地
+  if(!(await verifyAdminPwd(oldP))){showToast('当前密码错误');return}
+  localStorage.setItem(ADMIN_PWD_KEY,newHash);
   showToast('管理员密码已修改（哈希存储）');
 }
 // 审批具名化（v2026.08.07，报告 A-2）：审批记录写入管理员显示名，便于员工申诉与责任追溯
@@ -4209,15 +4308,67 @@ async function doLogin(){
   if(remain>0){i.classList.add('error');setTimeout(()=>i.classList.remove('error'),400);showToast(`登录过于频繁，请 ${Math.ceil(remain/1000)} 秒后重试`);i.value='';return}
   // Additional rate limit: max 3 login attempts per minute
   if(!checkSensitiveRate('admin_login')){return}
+  const inputHash=await sha256(inputVal);
+  if(!inputHash){showToast('哈希计算失败');return}
+  let serverOk=false,serverToken='',serverExp='';
+  // ① 尝试服务端 admin_verify RPC（双轨：仅在 fbReady 且未被标记为"不支持"时尝试）
+  if(fbReady&&localStorage.getItem(CS6_SRV_FLAG)!=='0'){
+    try{
+      const {data:rpcResult,error:rpcErr}=await supa.rpc('admin_verify',inputHash);
+      if(rpcErr){
+        // 函数不存在（SQL 尚未执行）→ 标记降级，后续不再尝试
+        const em=String(rpcErr.message||rpcErr||'');
+        if(/does not exist|42883|undefined function|could not find/i.test(em)){
+          localStorage.setItem(CS6_SRV_FLAG,'0');
+          console.info('[admin_auth] admin_verify RPC not found, falling back to local auth');
+        }
+        // 其他 RPC 错误（网络等）→ 静默降级，不标记（下次可能恢复）
+      }else if(rpcResult&&rpcResult.ok){
+        serverOk=true;serverToken=rpcResult.token||'';serverExp=rpcResult.exp||'';
+      }else{
+        // 服务端明确拒绝（密码错误 / 限流）
+        const reason=rpcResult?.reason||'bad_credentials';
+        bfIncr('admin');
+        logSecurityEvent('admin_login_fail',`服务端拒绝：${reason}`);
+        if(reason==='rate_limited'){showToast('登录尝试过多（服务端限流），请稍后再试')}
+        else{
+          showToast('密码错误');
+          if(bfFails('admin')>=PWD_MAX_FAIL){bfLock('admin');bfResetFails('admin');showToast('密码错误次数过多，已锁定 30 秒');logSecurityEvent('admin_locked','管理员账户因多次失败已锁定30秒')}
+        }
+        i.classList.add('error');i.value='';setTimeout(()=>i.classList.remove('error'),400);
+        return;
+      }
+    }catch(e){
+      // 网络异常等 → 静默降级
+      console.warn('[admin_auth] admin_verify RPC error, falling back:',e);
+    }
+  }
+  // ② 服务端验证成功 → 写入服务端 token 会话
+  if(serverOk){
+    bfResetFails('admin');
+    localStorage.setItem('cs6',String(Date.now()+7*864e5)); // UI 过期保护（保守 7 天）
+    localStorage.setItem('cs6tk',serverToken);
+    localStorage.setItem('cs6exp',serverExp); // 服务端真实过期时间（2h）
+    localStorage.setItem(CS6_SRV,'1');
+    localStorage.setItem(CS6_STK,serverToken); // 冗余存储：供 ensureAdminToken 使用
+    localStorage.setItem(CS6_SRV_FLAG,'1'); // 确认服务端支持
+    document.getElementById('adminLink').classList.add('show');
+    closeLogin();showToast('登录成功（服务端验证）');switchPage('admin');
+    logSecurityEvent('admin_login_success','管理员登录成功（服务端 admin_verify）');
+    logEvent('管理员登录','管理员通过服务端验证登录后台');
+    return;
+  }
+  // ③ 降级：本地密码校验（SQL 未部署 / RPC 不可达）
   const ok=await verifyAdminPwd(inputVal);
   if(ok){
     bfResetFails('admin');
     const token=genAdminToken(); // device-bound token
     localStorage.setItem('cs6',String(Date.now()+7*864e5));
     localStorage.setItem('cs6tk',token);
+    localStorage.removeItem(CS6_SRV);localStorage.removeItem('cs6exp');localStorage.removeItem(CS6_STK);
     document.getElementById('adminLink').classList.add('show');
     closeLogin();showToast('登录成功');switchPage('admin');
-    logSecurityEvent('admin_login_success','管理员登录成功');
+    logSecurityEvent('admin_login_success','管理员登录成功（本地校验）');
     logEvent('管理员登录','管理员成功登录后台');
   }else{
     bfIncr('admin');
@@ -4227,11 +4378,12 @@ async function doLogin(){
   }
 }
 function closeLogin(){document.getElementById('loginOverlay').classList.remove('show');document.getElementById('loginInput').value=''}
-function adminLogout(){localStorage.removeItem('cs6');localStorage.removeItem('cs6tk');document.getElementById('adminLink').classList.remove('show');switchPage('emp');showToast('已退出')}
+function adminLogout(){localStorage.removeItem('cs6');localStorage.removeItem('cs6tk');localStorage.removeItem(CS6_SRV);localStorage.removeItem('cs6exp');localStorage.removeItem(CS6_STK);document.getElementById('adminLink').classList.remove('show');switchPage('emp');showToast('已退出')}
 async function adminClearAll(){
   // Double confirmation: first confirm dialog, then type CLEAR
   if(!confirm('⚠ 危险操作：确定清除全部数据？此操作将清除所有打卡、选班、换班、补卡、成员、时段等数据，不可恢复。'))return;
   if(!checkSensitiveRate('clear_all')){return}
+  if(!await ensureAdminToken())return;
   const confirmText=prompt('为防止误操作，请输入大写字母 CLEAR 确认清除全部数据：');
   if(confirmText!=='CLEAR'){showToast('输入不匹配，操作已取消');return}
   // 1) 清除 Supabase punches + claims + config
@@ -5041,7 +5193,7 @@ function renderAll(){renderEmp();if(document.getElementById('pg-admin').classLis
 
 tick();setInterval(tick,1000);setInterval(renderEmp,3e4);
 // ===== 新版本检测：部署新版后自动提醒用户刷新，避免大家一直跑旧代码 =====
-const APP_VERSION='v2026.08.07.18';
+const APP_VERSION='v2026.08.07.19';
 let _newVerNotified=false;
 async function checkAppVersion(){
   if(_newVerNotified)return;
