@@ -237,8 +237,8 @@ async def test_makeup_flow(page):
     # 选择日期
     await page.select_option('#empContent .swap-sel:nth-of-type(1)', yesterday)
     await page.wait_for_timeout(300)
-    # 选择班次
-    await page.select_option('#empContent .swap-sel:nth-of-type(2)', '11')
+    # 选择班次（v2026.08.07.18：选项值改为 "sid_选班日期" 的实例身份）
+    await page.select_option('#empContent .swap-sel:nth-of-type(2)', f'11_{yesterday}')
     await page.wait_for_timeout(300)
     # 填写时间
     time_input = page.locator('#empContent input[type="time"]')
