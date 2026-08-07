@@ -2784,9 +2784,13 @@ async function initiateSwap(){
   swapForm={date:'',sid:null,toId:null};
   showToast('换班请求已发送，等待对方确认');renderEmp();
 }
+let _swapBusy=false;
 async function acceptSwap(id){
+  if(_swapBusy){showToast('正在处理中，请稍候');return}
   const s=swaps.find(x=>x.id===id);if(!s||s.status!=='pending'){showToast('该请求已失效');return}
   if(!selectedMember||+s.toId!==+selectedMember.id){showToast('只有接收人可以确认');return}
+  _swapBusy=true;
+  try{
   if(s.date<tdStr()){s.status='cancelled';s.decidedTs=Date.now();svSwaps();await syncSwaps();showToast('该班次已过期，换班已作废');renderEmp();return}
   // 转出方仍需持有该班次
   const fromArr=(picks[s.date]&&picks[s.date][s.fromId])||[];
@@ -2802,13 +2806,16 @@ async function acceptSwap(id){
   // 满员校验（排除转出方，因为其将让出该班次）
   const cap=slotCapOf(s.date,s.sid);
   if(cap>0){let cnt=slotCount(s.date,s.sid,s.fromId);if(cnt>=cap){showToast('该时段已满员，无法接收');return}}
-  // 执行转让：转出方移除、接收方加入（服务器端原子写入，防并发覆盖）
-  const okSwap1=await atomicSetPick(s.date,s.fromId,fromArr.filter(x=>x!==s.sid));
-  const okSwap2=await atomicSetPick(s.date,s.toId,toArr.concat([s.sid]));
+  // 执行转让：转出方移除、接收方加入
+  // 使用原子增/删（pick_remove / pick_add）而非整体 pick_set：
+  // 服务器端基于最新行数据操作，彻底避免同一天多笔换班并发时后写覆盖先写
+  const okSwap1=await atomicRemovePick(s.date,s.fromId,s.sid);
+  const okSwap2=await atomicAddPick(s.date,s.toId,s.sid);
   if(!okSwap1||!okSwap2){showToast('换班保存失败，已刷新最新数据，请重试');try{await pullPicksSelCfg()}catch(e){};renderEmp();return}
   s.status='accepted';s.decidedTs=Date.now();svSwaps();await syncSwaps();
   logEvent('接受换班',`${s.toName} 接收了 ${s.fromName} 的 ${s.date} ${shiftNameOf(s.sid)} 班次`);
   showToast('已接受换班，班次已转到你名下');renderEmp();
+  }finally{_swapBusy=false}
 }
 async function rejectSwap(id){
   const s=swaps.find(x=>x.id===id);if(!s||s.status!=='pending')return;
@@ -2851,9 +2858,12 @@ async function initiateExchange(){
   showToast('双向换班请求已发送，等待对方确认');renderEmp();
 }
 async function acceptExchange(id){
+  if(_swapBusy){showToast('正在处理中，请稍候');return}
   const s=swaps.find(x=>x.id===id);if(!s||s.status!=='pending'||!s.exchange){showToast('该请求已失效');return}
   if(!selectedMember||+s.toId!==+selectedMember.id){showToast('只有换班对象可以确认');return}
   if(!checkOpRate('swap')){return}
+  _swapBusy=true;
+  try{
   const giveDate=s.date,giveSid=s.sid,giverId=s.fromId,takeDate=s.exchange.takeDate,takeSid=s.exchange.takeSid;
   const td=tdStr();
   if(giveDate<td||takeDate<td){s.status='cancelled';s.decidedTs=Date.now();svSwaps();await syncSwaps();showToast('请求中包含已过去的班次，换班已作废');renderEmp();return}
@@ -2881,21 +2891,22 @@ async function acceptExchange(id){
   if(capTake>0){const cnt=slotCount(takeDate,takeSid,selectedMember.id);if(cnt>=capTake){showToast('对方要接收的时段已满员，无法换班');return}}
   let ok1,ok2,ok3,ok4;
   if(sameDt){
-    const giverFinal=giverGive.filter(x=>x!==giveSid).concat(giverTake.includes(takeSid)?[]:[takeSid]);
-    const receiverFinal=receiverTake.filter(x=>x!==takeSid).concat(receiverGive.includes(giveSid)?[]:[giveSid]);
-    ok1=await atomicSetPick(giveDate,giverId,giverFinal);
-    ok2=await atomicSetPick(giveDate,selectedMember.id,receiverFinal);
-    ok3=ok2;ok4=ok1;
+    // 同日互换：各自原子增/删，避免并发覆盖
+    ok1=await atomicRemovePick(giveDate,giverId,giveSid);
+    ok2=await atomicAddPick(giveDate,giverId,takeSid);
+    ok3=await atomicRemovePick(giveDate,selectedMember.id,takeSid);
+    ok4=await atomicAddPick(giveDate,selectedMember.id,giveSid);
   }else{
-    ok1=await atomicSetPick(giveDate,giverId,giverGive.filter(x=>x!==giveSid));
-    ok2=await atomicSetPick(takeDate,giverId,giverTake.concat([takeSid]));
-    ok3=await atomicSetPick(giveDate,selectedMember.id,receiverGive.concat([giveSid]));
-    ok4=await atomicSetPick(takeDate,selectedMember.id,receiverTake.filter(x=>x!==takeSid));
+    ok1=await atomicRemovePick(giveDate,giverId,giveSid);
+    ok2=await atomicAddPick(takeDate,giverId,takeSid);
+    ok3=await atomicAddPick(giveDate,selectedMember.id,giveSid);
+    ok4=await atomicRemovePick(takeDate,selectedMember.id,takeSid);
   }
   if(!ok1||!ok2||!ok3||!ok4){showToast('换班保存失败，已刷新最新数据，请重试');try{await pullPicksSelCfg()}catch(e){};renderEmp();return}
   s.status='accepted';s.decidedTs=Date.now();svSwaps();await syncSwaps();
   logEvent('接受双向换班',`${selectedMember.name} 接受了与 ${s.fromName} 的双向换班：${giveDate} ${shiftNameOf(giveSid)} ↔ ${takeDate} ${shiftNameOf(takeSid)}`);
   showToast('已接受双向换班，班次已互换');renderEmp();
+  }finally{_swapBusy=false}
 }
 
 // ===== 员工端：补卡申请（缺卡时申请补卡，管理员审批后写入 punches）=====
@@ -5207,7 +5218,7 @@ function renderAll(){renderEmp();if(document.getElementById('pg-admin').classLis
 
 tick();setInterval(tick,1000);setInterval(renderEmp,3e4);
 // ===== 新版本检测：部署新版后自动提醒用户刷新，避免大家一直跑旧代码 =====
-const APP_VERSION='v2026.08.07.23';
+const APP_VERSION='v2026.08.07.24';
 let _newVerNotified=false;
 async function checkAppVersion(){
   if(_newVerNotified)return;
