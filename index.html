@@ -3141,6 +3141,8 @@ async function acceptMakeup(id){
     if(!ok){syncOk=false;queueOfflinePunches([rec])}
   }
   m.status='accepted';m.decidedTs=Date.now();m.decidedBy=adminDisplayName();svMakeups();await syncMakeups();
+  // 补卡通过后，从 Supabase 重新拉取该日期的打卡记录，确保多端/多标签页同步
+  if(fbReady){try{const {data:rows}=await supa.from('punches').select('*').eq('date',punchDate);if(rows&&rows.length)mergeFbPunches(rows)}catch(e){}}
   const isHandover=recs.length>1;
   logEvent('批准补卡',`管理员批准 ${m.name} 在 ${m.date} ${shiftNameOf(m.sid)} 的${m.t==='s'?'上班':'下班'}卡（${m.time}）${isHandover?' · 连班交接同步补卡':''}${syncOk?'':' · 远端同步待恢复'}`);
   showToast(syncOk?`已批准，打卡记录已补上${isHandover?'（连班交接同步）':''}`:`已批准并本地生效，云端同步失败，联网后将自动补同步${isHandover?'（连班交接同步）':''}`);renderMakeupAdmin();updateMakeupAdminBadge();renderAll();
@@ -5193,7 +5195,7 @@ function renderAll(){renderEmp();if(document.getElementById('pg-admin').classLis
 
 tick();setInterval(tick,1000);setInterval(renderEmp,3e4);
 // ===== 新版本检测：部署新版后自动提醒用户刷新，避免大家一直跑旧代码 =====
-const APP_VERSION='v2026.08.07.20';
+const APP_VERSION='v2026.08.07.21';
 let _newVerNotified=false;
 async function checkAppVersion(){
   if(_newVerNotified)return;
