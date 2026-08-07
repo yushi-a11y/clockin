@@ -2032,6 +2032,10 @@ async function renderEmp(){
   const viewDate=ymd(viewDateObj);
   // 查看历史/未来日期时，先从 Supabase 拉取该日打卡记录，避免本地缓存缺失导致状态为空
   await ensurePunchesForDate(viewDate);
+  // 同时拉取次日记录：getAllPunchesForMember 会 union D + D+1（跨天班次下班卡落在次日），
+  // 若补卡写入的 date 为次日，不拉取则员工端看不到
+  const viewDateNext=ymd(addDays(parseYmd(viewDate),1));
+  await ensurePunchesForDate(viewDateNext);
   const isToday=viewDate===tdStr();
   const punches=getAllPunchesForMember(selectedMember.id,viewDate);
   const prevDate=ymd(addDays(parseYmd(viewDate),-1));
@@ -5195,7 +5199,7 @@ function renderAll(){renderEmp();if(document.getElementById('pg-admin').classLis
 
 tick();setInterval(tick,1000);setInterval(renderEmp,3e4);
 // ===== 新版本检测：部署新版后自动提醒用户刷新，避免大家一直跑旧代码 =====
-const APP_VERSION='v2026.08.07.21';
+const APP_VERSION='v2026.08.07.22';
 let _newVerNotified=false;
 async function checkAppVersion(){
   if(_newVerNotified)return;
