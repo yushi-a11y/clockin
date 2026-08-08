@@ -2087,8 +2087,8 @@ async function renderEmp(){
   let ok=0,act=0,miss=0;
   items.forEach(it=>{const st=stOf(it);if(st.ov==='ok')ok++;else if(st.ov==='active')act++;else if(st.ov==='miss')miss++});
 
-  // 连班链：只在今天的实例之间成链；昨日跨天实例单独成卡，其跨午夜交接由 resolvePunchAction 处理
-  const chains=buildInstanceChains(items.filter(it=>it.sd===viewDate));
+  // 连班链：包含昨日跨天实例（若与今日首班首尾相接），使显示正确反映连班关系
+  const chains=buildInstanceChains(items);
   // 下一步打卡动作（与 doPunch 共用同一份解析）—— 仅今天才允许真正打卡
   const action=isToday?resolvePunchAction(items,viewDate,punchesOf):null;
 
@@ -2140,7 +2140,7 @@ async function renderEmp(){
     const sh=it.sh;
     const st=stOf(it);
     const isPrevInst=it.sd!==viewDate;
-    const pos=isPrevInst?'solo':instChainPos(it,chains);
+    const pos=instChainPos(it,chains);
     const isChain=pos!=='solo';
     const hideSS=pos==='middle'||pos==='last';
     const hideES=pos==='first'||pos==='middle';
@@ -2150,7 +2150,7 @@ async function renderEmp(){
     const esCls=hideES?'':(' '+st.es);
     const hasOfflinePunch=(!hideSS&&st.sp&&st.sp.offline)||(!hideES&&st.ep&&st.ep.offline);
     const offTag=hasOfflinePunch?'<span class="off-tag" title="离线打卡：使用本地时间，待管理员复核">离</span>':'';
-    const prevTag=isPrevInst?`<span style="font-size:10px;color:var(--danger);margin-left:4px">昨日跨天 · 待收尾</span>`:'';
+    const prevTag=isPrevInst?`<span style="font-size:10px;color:var(--danger);margin-left:4px">昨日跨天${isChain?' · 链首':''}</span>`:'';
     const statusText=shiftStatusText(sh,st,pos);
     const dotCls=st.ov==='ok'?'ok':st.ov==='miss'?'miss':st.ov==='warn'?'late':st.ov==='active'?'active':'wait';
     html+=`<div class="pc${st.ov==='active'?' now':''}"${isChain?' title="连班：中间交接打卡自动共用前后班次"':''}><div class="pc-dot ${dotCls}"></div><div class="pc-info"><div class="pc-range">${sh.name}${isChain?`<span style="font-size:10px;color:var(--muted);margin-left:4px">${pos==='first'?'链首':pos==='middle'?'链中':'链尾'}</span>`:''}${prevTag}</div><div class="pc-status">${statusText}</div></div><div class="pc-chks"><div class="pc-chk${ssCls}">${ssShow}</div><div class="pc-chk${esCls}">${esShow}</div>${offTag}</div></div>`;
@@ -2220,46 +2220,6 @@ async function adminUnbind(){
   await unclaimAccount(selectedMember.id,reason.trim());
   logEvent('解绑',`管理员解绑了「${selectedMember.name}」的设备绑定${reason?' · 原因：'+reason:''}`);
   localStorage.removeItem('cb6');localStorage.removeItem('cb6exp');localStorage.removeItem('cb6auth');localStorage.removeItem('cb6authTs');selectedMember=null;stopReminderTimer();renderEmp();showToast('已解绑');
-}
-
-// ===== 连班检测：相邻班次 end == 下一班 start 视为连班链，每链最多2个班次 =====
-function buildConsecutiveChains(shifts){
-  if(!shifts||!shifts.length)return[];
-  const arr=shifts.slice().sort((a,b)=>toM(a.start)-toM(b.start));
-  const chains=[];let cur=[arr[0]];
-  for(let i=1;i<arr.length;i++){
-    // 只有当前链还没满 2 个，且与上一班次首尾相接，才继续连；否则另起新链
-    if(cur.length<2&&arr[i].start===arr[i-1].end){cur.push(arr[i])}
-    else{chains.push(cur);cur=[arr[i]]}
-  }
-  chains.push(cur);
-  return chains;
-}
-// 返回当前正在进行的连班链（按时间顺序第一个尚未全部完成的链）
-// punches 可以是数组，也可以是 (shift)=>punchArray 的解析函数（跨天班次需按其选班日期取打卡）
-function findActiveChain(shifts,punches,ctxDate=tdStr()){
-  const psOf=sh=>typeof punches==='function'?punches(sh):punches;
-  const chains=buildConsecutiveChains(shifts);
-  for(const ch of chains){
-    if(ch.length<2)continue;
-    const first=ch[0],last=ch[ch.length-1];
-    const fss=ss(first,psOf(first),ctxDate),lss=ss(last,psOf(last),ctxDate);
-    // 链未全部完成(最后一个的下班未打)且首个班次已在打卡窗口内或已打过上班卡
-    if(!lss.ep&&(fss.sp||inStartWindow(first,ctxDate)))return ch;
-  }
-  return null;
-}
-// 判定某班次在链中的位置：'solo' / 'first' / 'middle' / 'last'
-function chainPosOf(sh,chains){
-  for(const ch of chains){
-    const idx=ch.findIndex(x=>x.id===sh.id);
-    if(idx<0)continue;
-    if(ch.length<2)return'solo';
-    if(idx===0)return'first';
-    if(idx===ch.length-1)return'last';
-    return'middle';
-  }
-  return'solo';
 }
 
 // ===== 班次实例：构建 / 成链 / 打卡动作解析（v2026.08.07.18）=====
@@ -3217,7 +3177,9 @@ async function acceptMakeup(id){
     }
     if(partner){
       const partnerT=m.t==='e'?'s':'e';
-      recs.push({sid:partner.sh.id,t:partnerT,time:m.time,ts:parseMakeupTs(punchDate,m.time),mid:m.mid,date:punchDate,name:m.name,makeup:true,sd:partner.sd});
+      // 计算 partner 的实际打卡日历日期（跨午夜班次的下班卡落在次日）
+      const partnerPunchDate=makeupPunchDate(partner.sd,partner.sh.id,partnerT,m.mid);
+      recs.push({sid:partner.sh.id,t:partnerT,time:m.time,ts:parseMakeupTs(partnerPunchDate,m.time),mid:m.mid,date:partnerPunchDate,name:m.name,makeup:true,sd:partner.sd});
     }
   }
   // 本地优先写入（与员工端 doPunch 一致），再尽力同步远端：
@@ -5319,7 +5281,7 @@ function renderAll(){renderEmp();if(document.getElementById('pg-admin').classLis
 
 tick();setInterval(tick,1000);setInterval(renderEmp,3e4);
 // ===== 新版本检测：部署新版后自动提醒用户刷新，避免大家一直跑旧代码 =====
-const APP_VERSION='v2026.08.07.26';
+const APP_VERSION='v2026.08.07.27';
 let _newVerNotified=false;
 async function checkAppVersion(){
   if(_newVerNotified)return;
