@@ -2076,13 +2076,12 @@ async function renderEmp(){
   const viewDateNext=ymd(addDays(parseYmd(viewDate),1));
   await ensurePunchesForDate(viewDateNext);
   const isToday=viewDate===tdStr();
-  const punches=getAllPunchesForMember(selectedMember.id,viewDate);
-  const prevDate=ymd(addDays(parseYmd(viewDate),-1));
-  // 昨天选班的跨天班次，其上班卡记录在昨天：需要把 D-1 的打卡一并纳入，否则凌晨会被误判为"上班缺卡"
-  const prevPunches=isToday?getAllPunchesForMember(selectedMember.id,prevDate):punches;
+  // 统一使用全量打卡记录：instPunch 已按 (sid, sd) 实例身份匹配，不需要按日期过滤。
+  // 跨天班次下班卡落在次日（date=viewDate），若按 sd 过滤会查不到，导致误判"下班缺卡"。
+  const allPunches=getAllPunchesForMember(selectedMember.id,viewDate);
+  const punchesOf=(it)=>allPunches;
   // 班次实例 = 今天选的班 + 昨天选的、跨过午夜且还没打下班卡的班（同一 sid 连排两天也各自独立）
-  const items=buildDayInstances(selectedMember,viewDate,isToday,prevPunches);
-  const punchesOf=(it)=>it.sd===viewDate?punches:prevPunches;
+  const items=buildDayInstances(selectedMember,viewDate,isToday,allPunches);
   const stOf=(it)=>ss(it.sh,punchesOf(it),viewDate,it.sd);
   let ok=0,act=0,miss=0;
   items.forEach(it=>{const st=stOf(it);if(st.ov==='ok')ok++;else if(st.ov==='active')act++;else if(st.ov==='miss')miss++});
@@ -5281,7 +5280,7 @@ function renderAll(){renderEmp();if(document.getElementById('pg-admin').classLis
 
 tick();setInterval(tick,1000);setInterval(renderEmp,3e4);
 // ===== 新版本检测：部署新版后自动提醒用户刷新，避免大家一直跑旧代码 =====
-const APP_VERSION='v2026.08.07.27';
+const APP_VERSION='v2026.08.07.28';
 let _newVerNotified=false;
 async function checkAppVersion(){
   if(_newVerNotified)return;
