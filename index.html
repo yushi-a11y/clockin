@@ -2101,7 +2101,37 @@ async function renderEmp(){
   if(!isToday){
     html+=items.length?`<button class="punch-btn off" disabled>查看 · ${viewDateObj.getMonth()+1}/${viewDateObj.getDate()}<div class="hint">${items.length} 个班次 · 仅供预览</div></button>`:`<button class="punch-btn off" disabled>${viewDateObj.getMonth()+1}/${viewDateObj.getDate()} 暂无班次<div class="hint">该日尚未选班</div></button>`;
   }else{
-    html+=action?`<button class="punch-btn" onclick="doPunch()">${action.label}<div class="hint">${action.hint}</div></button>`:`<button class="punch-btn off" disabled>暂无可打卡时段<div class="hint">当前无进行中的班次</div></button>`;
+    if(action){
+      html+=`<button class="punch-btn" onclick="doPunch()">${action.label}<div class="hint">${action.hint}</div></button>`;
+    }else{
+      // 分析无法打卡的具体原因
+      const now=serverDate(),T=now.getTime();
+      const allDone=items.every(it=>{const s=stOf(it);return s.ov==='ok'});
+      const allMissed=items.length>0&&items.every(it=>{const s=stOf(it);return s.ended&&s.ov==='miss'});
+      const hasActive=items.some(it=>{const s=stOf(it);return s.started&&!s.ended});
+      let disabledHint='当前无进行中的班次';
+      if(items.length===0){disabledHint='今天尚未选班，请到「选班」标签选择班次'}
+      else if(allDone){disabledHint='今日所有班次已完成打卡 ✓'}
+      else if(allMissed){disabledHint='今日班次均已结束且缺卡，请到「补卡」标签申请补卡'}
+      else if(hasActive){
+        // 有进行中的班次，但不在打卡窗口内
+        const nextShift=items.find(it=>{const{eD}=shiftDateTimes(it.sh,viewDate,it.sd);return eD.getTime()>T});
+        if(nextShift){
+          const{sD}=shiftDateTimes(nextShift.sh,viewDate,nextShift.sd);
+          const tol=(nextShift.sh.tolerance||0)*60000;
+          const windowStart=sD.getTime()-tol;
+          if(T<windowStart){
+            const mins=Math.ceil((windowStart-T)/60000);
+            disabledHint=`下一个打卡窗口在 ${mins} 分钟后（${nextShift.sh.name}）`;
+          }else{
+            disabledHint=`当前不在打卡窗口内，请在班次开始/结束前后 ${nextShift.sh.tolerance||5} 分钟内打卡`;
+          }
+        }else{
+          disabledHint='当前不在打卡窗口内，请在班次开始/结束前后规定时间内打卡';
+        }
+      }
+      html+=`<button class="punch-btn off" disabled>暂无可打卡时段<div class="hint">${disabledHint}</div></button>`;
+    }
   }
   const remChecked=isReminderEnabled()?'checked':'';
   html+=`<div class="reminder-setting" style="max-width:420px;margin:10px 0 6px;font-size:12px;color:var(--muted);display:flex;align-items:center;gap:6px"><label style="display:flex;align-items:center;gap:6px;cursor:pointer"><input type="checkbox" ${remChecked} onchange="setReminderEnabled(this.checked)" style="accent-color:var(--primary);width:14px;height:14px"> 班次开始/结束前 5 分钟提醒我打卡</label></div>`;
@@ -2147,7 +2177,12 @@ async function doPunch(){
   const punchesOf=(it)=>it.sd===todayStr?punches:prevPunches;
   // 与 renderEmp 共用同一份动作解析，保证"按钮显示什么"和"按下去写什么"永远一致
   const action=resolvePunchAction(items,todayStr,punchesOf);
-  if(!action)return;
+  if(!action){
+    // 按钮理论上不应出现此情况，但以防状态变化导致竞态，给出明确提示
+    const allDone=items.every(it=>{const s=ss(it.sh,punchesOf(it),todayStr,it.sd);return s.ov==='ok'});
+    showToast(allDone?'今日所有班次已完成打卡':'当前不在打卡窗口内，请在班次开始/结束前后规定时间内打卡');
+    return;
+  }
   const n=serverDate(),time=`${String(n.getHours()).padStart(2,'0')}:${String(n.getMinutes()).padStart(2,'0')}`,td=tdStr();
   // 离线打卡标记（v2026.08.07，报告 A-3）：无 Supabase 连接时时间来自本地时钟，
   // 打 offline 标记以便员工端提示、管理员复核与仲裁举证区分
@@ -4600,7 +4635,34 @@ function renderTrend(en,td){
 function renderTable(q,en,td){
   const ql=(q||'').toLowerCase(),ms=TEAM.filter(m=>!ql||m.name.includes(ql)||m.dept.includes(ql));
   let h='<table><thead><tr><th>成员</th><th>排班</th><th>已完成</th><th>缺卡</th><th>状态</th></tr></thead><tbody>';
-  ms.forEach(m=>{const mp=getAllPunchesForMember(m.id,td);const myS=en.filter(s=>memberShifts(m,td).includes(s.id));let okC=0,missC=0;const missDetails=[];myS.forEach(s=>{const st=ss(s,mp,td);if(st.ov==='ok')okC++;if(st.ov==='miss'){missC++;const parts=[];if(st.ss==='miss')parts.push(s.name+' 上班');if(st.es==='miss')parts.push(s.name+' 下班');missDetails.push(parts.join(' / '))}});const allOk=myS.length>0&&okC===myS.length;const c=clr(m.id);const claimed=fbReady&&claims[m.id];const missCell=missC?`<span class="mono warn">${missC}</span><div style="font-size:10px;color:var(--danger);line-height:1.5;margin-top:2px">${missDetails.map(d=>esc(d)).join('<br>')}</div>`:`<span class="mono">0</span>`;h+=`<tr><td><div class="u-cell"><div class="u-av" style="background:${c.bg};color:${c.fg}">${m.name[0]}</div><div><div style="font-weight:500">${esc(m.name)}${claimed?' <span style="font-size:9px;color:var(--success)">● 在线</span>':''}</div><div style="font-size:10px;color:var(--muted)">${esc(m.dept)}</div></div></div></td><td class="mono">${myS.length}个</td><td class="mono">${okC}</td><td style="vertical-align:top">${missCell}</td><td>${myS.length===0?'<span class="badge b-wait">无排班</span>':allOk?'<span class="badge b-ok">正常</span>':missC?'<span class="badge b-miss">缺卡</span>':'<span class="badge b-wait">进行中</span>'}</td></tr>`});
+  ms.forEach(m=>{
+    const mp=getAllPunchesForMember(m.id,td);
+    const myS=en.filter(s=>memberShifts(m,td).includes(s.id));
+    let okC=0,missC=0,activeMissC=0;
+    const missDetails=[],activeMissDetails=[];
+    myS.forEach(s=>{
+      const st=ss(s,mp,td);
+      if(st.ov==='ok')okC++;
+      // 统计所有缺卡（包括已结束的"miss"和进行中的"未打卡"）
+      const missParts=[];
+      if(!st.sp){
+        if(st.ended){missC++;missParts.push(s.name+' 上班（已结束）')}
+        else if(st.started){activeMissC++;activeMissDetails.push(s.name+' 上班（进行中）')}
+      }
+      if(!st.ep){
+        if(st.ended){if(!missParts.length){missC++;missParts.push(s.name+' 下班（已结束）')}else{missParts.push(s.name+' 下班（已结束）')}}
+        else if(st.started){activeMissC++;activeMissDetails.push(s.name+' 下班（进行中）')}
+      }
+      if(missParts.length)missDetails.push(missParts.join(' / '));
+    });
+    const totalMiss=missC+activeMissC;
+    const allOk=myS.length>0&&okC===myS.length;
+    const c=clr(m.id);
+    const claimed=fbReady&&claims[m.id];
+    const missCell=totalMiss?`<span class="mono warn">${totalMiss}</span><div style="font-size:10px;color:var(--danger);line-height:1.5;margin-top:2px">${[...missDetails,...activeMissDetails].map(d=>esc(d)).join('<br>')}</div>`:`<span class="mono">0</span>`;
+    const statusBadge=myS.length===0?'<span class="badge b-wait">无排班</span>':allOk?'<span class="badge b-ok">正常</span>':totalMiss?'<span class="badge b-miss">缺卡</span>':'<span class="badge b-wait">进行中</span>';
+    h+=`<tr><td><div class="u-cell"><div class="u-av" style="background:${c.bg};color:${c.fg}">${m.name[0]}</div><div><div style="font-weight:500">${esc(m.name)}${claimed?' <span style="font-size:9px;color:var(--success)">● 在线</span>':''}</div><div style="font-size:10px;color:var(--muted)">${esc(m.dept)}</div></div></div></td><td class="mono">${myS.length}个</td><td class="mono">${okC}</td><td style="vertical-align:top">${missCell}</td><td>${statusBadge}</td></tr>`;
+  });
   h+='</tbody></table>';document.getElementById('tableBody').innerHTML=h;
 }
 
@@ -5257,7 +5319,7 @@ function renderAll(){renderEmp();if(document.getElementById('pg-admin').classLis
 
 tick();setInterval(tick,1000);setInterval(renderEmp,3e4);
 // ===== 新版本检测：部署新版后自动提醒用户刷新，避免大家一直跑旧代码 =====
-const APP_VERSION='v2026.08.07.25';
+const APP_VERSION='v2026.08.07.26';
 let _newVerNotified=false;
 async function checkAppVersion(){
   if(_newVerNotified)return;
