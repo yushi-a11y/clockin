@@ -775,11 +775,12 @@ function validatePunch(punchData){
   // Prevent punches for dates more than 1 day in the future (use server time to resist client clock manipulation)
   const punchDate=parseYmd(punchData.date);
   const srv=serverDate();
-  const tomorrow=new Date(srv);tomorrow.setDate(tomorrow.getDate()+1);
-  if(punchDate>tomorrow)return false;
-  // Prevent punches for dates more than 7 days in the past
-  const weekAgo=new Date(srv);weekAgo.setDate(weekAgo.getDate()-7);
-  if(punchDate<weekAgo)return false;
+  const tomorrow=new Date(srv);tomorrow.setDate(tomorrow.getDate()+1);tomorrow.setHours(0,0,0,0);
+  if(punchDate>=tomorrow)return false;
+  // Prevent punches for dates more than 7 days in the past (date-only comparison to avoid boundary false positives)
+  const weekAgo=new Date(srv);weekAgo.setDate(weekAgo.getDate()-7);weekAgo.setHours(0,0,0,0);
+  const punchDateOnly=new Date(punchDate);punchDateOnly.setHours(0,0,0,0);
+  if(punchDateOnly<weekAgo)return false;
   return true;
 }
 
