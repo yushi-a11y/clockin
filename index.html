@@ -1779,6 +1779,25 @@ async function checkReminders(){
       notifyReminder('⏰ 即将下班',`${sh.name} 还有 ${REMINDER_LEAD_MIN} 分钟结束，请准备打下班卡`);
       markReminded(endKey);
     }
+    // 班次结束后缺卡提醒
+    if(now.getTime()>eD.getTime()){
+      const hasStart=!!punches.find(p=>p.sid===sh.id&&p.t==='s');
+      const hasEnd=!!punches.find(p=>p.sid===sh.id&&p.t==='e');
+      if(!hasStart){
+        const missStartKey=reminderLogKey(today,sh.id,'miss_s');
+        if(!log[missStartKey]){
+          notifyReminder('⚠️ 上班缺卡',`${sh.name} 已结束，但未打上班卡，请及时补卡`);
+          markReminded(missStartKey);
+        }
+      }
+      if(!hasEnd){
+        const missEndKey=reminderLogKey(today,sh.id,'miss_e');
+        if(!log[missEndKey]){
+          notifyReminder('⚠️ 下班缺卡',`${sh.name} 已结束，但未打下班卡，请及时补卡`);
+          markReminded(missEndKey);
+        }
+      }
+    }
   }
 }
 
@@ -5289,7 +5308,7 @@ function renderAll(){renderEmp();if(document.getElementById('pg-admin').classLis
 
 tick();setInterval(tick,1000);setInterval(renderEmp,3e4);
 // ===== 新版本检测：部署新版后自动提醒用户刷新，避免大家一直跑旧代码 =====
-const APP_VERSION='v2026.08.07.28';
+const APP_VERSION='v2026.08.07.31';
 let _newVerNotified=false;
 async function checkAppVersion(){
   if(_newVerNotified)return;
