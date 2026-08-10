@@ -2077,12 +2077,15 @@ async function renderEmp(){
   const viewDateNext=ymd(addDays(parseYmd(viewDate),1));
   await ensurePunchesForDate(viewDateNext);
   const isToday=viewDate===tdStr();
-  // 统一使用全量打卡记录：instPunch 已按 (sid, sd) 实例身份匹配，不需要按日期过滤。
-  // 跨天班次下班卡落在次日（date=viewDate），若按 sd 过滤会查不到，导致误判"下班缺卡"。
+  // 全量打卡记录：用于显示状态和打卡动作解析（instPunch 按 sid+sd 匹配，跨天下班卡 date=viewDate 也能找到）
   const allPunches=getAllPunchesForMember(selectedMember.id,viewDate);
   const punchesOf=(it)=>allPunches;
+  // buildDayInstances 用昨天本地打卡判断昨日实例是否已收尾：只用 state.punches[prevDate]（不含 D+1），
+  // 因为昨日跨天班次的下班卡 date=viewDate，不会出现在 state.punches[prevDate] 中，避免误判"已打下班卡"。
+  const prevDate=ymd(addDays(parseYmd(viewDate),-1));
+  const prevLocalPunches=isToday?(state.punches[prevDate]||[]):allPunches;
   // 班次实例 = 今天选的班 + 昨天选的、跨过午夜且还没打下班卡的班（同一 sid 连排两天也各自独立）
-  const items=buildDayInstances(selectedMember,viewDate,isToday,allPunches);
+  const items=buildDayInstances(selectedMember,viewDate,isToday,prevLocalPunches);
   const stOf=(it)=>ss(it.sh,punchesOf(it),viewDate,it.sd);
   let ok=0,act=0,miss=0;
   items.forEach(it=>{const st=stOf(it);if(st.ov==='ok')ok++;else if(st.ov==='active')act++;else if(st.ov==='miss')miss++});
