@@ -1799,6 +1799,34 @@ async function checkReminders(){
       }
     }
   }
+  // 昨天跨天班次的缺卡提醒（午夜后 today 已变，这些班次不在 myShifts 中）
+  const yesterday=ymd(addDays(parseYmd(today),-1));
+  const yesterdayShifts=state.shifts.filter(s=>{
+    if(!s.enabled)return false;
+    const arr=picks[yesterday]&&picks[yesterday][selectedMember.id];
+    return Array.isArray(arr)&&arr.includes(s.id)&&(s.cross||toM(s.end)<=toM(s.start));
+  });
+  for(const sh of yesterdayShifts){
+    const {sD,eD}=shiftDateTimes(sh,yesterday);
+    if(now.getTime()>eD.getTime()){
+      const hasStart=!!punches.find(p=>p.sid===sh.id&&p.t==='s');
+      const hasEnd=!!punches.find(p=>p.sid===sh.id&&p.t==='e');
+      if(!hasStart){
+        const missStartKey=reminderLogKey(yesterday,sh.id,'miss_s');
+        if(!log[missStartKey]){
+          notifyReminder('⚠️ 上班缺卡',`${sh.name}（昨日跨天）已结束，但未打上班卡，请及时补卡`);
+          markReminded(missStartKey);
+        }
+      }
+      if(!hasEnd){
+        const missEndKey=reminderLogKey(yesterday,sh.id,'miss_e');
+        if(!log[missEndKey]){
+          notifyReminder('⚠️ 下班缺卡',`${sh.name}（昨日跨天）已结束，但未打下班卡，请及时补卡`);
+          markReminded(missEndKey);
+        }
+      }
+    }
+  }
 }
 
 function getAllPunchesForMember(mid,date){
@@ -2027,7 +2055,9 @@ function shiftStatusText(sh,st,pos){
   }
   if(pos==='last'){
     if(st.ov==='ok')return '已完成';
+    if(st.ov==='active')return '进行中';
     if(st.ov==='miss')return missText||'有缺卡';
+    if(st.ov==='warn')return missText||'有迟到';
     return '待上班';
   }
   if(st.ov==='ok')return '已完成';
@@ -2100,16 +2130,15 @@ async function renderEmp(){
   const viewDatePrev=ymd(addDays(parseYmd(viewDate),-1));
   await ensurePunchesForDate(viewDatePrev);
   const isToday=viewDate===tdStr();
-  // 全量打卡记录：用于显示状态和打卡动作解析（instPunch 按 sid+sd 匹配，跨天下班卡 date=viewDate 也能找到）
-  const allPunches=getAllPunchesForMember(selectedMember.id,viewDate);
-  const punchesOf=(it)=>allPunches;
-  // buildDayInstances 用 prevDate 的打卡判断昨日实例是否已收尾：
-  // 使用 allPunches 过滤 date=prevDate，确保包含 Supabase 同步的打卡，
-  // 同时排除 date=viewDate 的下班卡（跨天班次下班卡落在次日），避免误判"已打下班卡"。
   const prevDate=ymd(addDays(parseYmd(viewDate),-1));
-  const prevDatePunches=allPunches.filter(p=>p.date===prevDate);
-  // 班次实例 = 今天选的班 + 昨天选的、跨过午夜且还没打下班卡的班（同一 sid 连排两天也各自独立）
-  const items=buildDayInstances(selectedMember,viewDate,isToday,prevDatePunches);
+  // 今天的实例用 viewDate 的打卡记录（D+D+1），昨天的实例用 prevDate 的打卡记录（D-1+D）
+  // 与 doPunch 保持一致的模式，确保跨天班次的上班卡（date=D-1）和下班卡（date=D）都能找到
+  const todayPunches=getAllPunchesForMember(selectedMember.id,viewDate);
+  const prevPunches=getAllPunchesForMember(selectedMember.id,prevDate);
+  const punchesOf=(it)=>it.sd===viewDate?todayPunches:prevPunches;
+  // buildDayInstances 用 prevPunches 判断昨日实例是否已收尾：
+  // prevPunches 包含 D-1 和 D 的打卡，跨天班次下班卡（date=D）在其中，能正确判断
+  const items=buildDayInstances(selectedMember,viewDate,isToday,prevPunches);
   const stOf=(it)=>ss(it.sh,punchesOf(it),viewDate,it.sd);
   let ok=0,act=0,miss=0;
   items.forEach(it=>{const st=stOf(it);if(st.ov==='ok')ok++;else if(st.ov==='active')act++;else if(st.ov==='miss')miss++});
@@ -4649,7 +4678,7 @@ function renderTable(q,en,td){
     const c=clr(m.id);
     const claimed=fbReady&&claims[m.id];
     const missCell=totalMiss?`<span class="mono warn">${totalMiss}</span><div style="font-size:10px;color:var(--danger);line-height:1.5;margin-top:2px">${[...missDetails,...activeMissDetails].map(d=>esc(d)).join('<br>')}</div>`:`<span class="mono">0</span>`;
-    const statusBadge=myS.length===0?'<span class="badge b-wait">无排班</span>':allOk?'<span class="badge b-ok">正常</span>':totalMiss?'<span class="badge b-miss">缺卡</span>':'<span class="badge b-wait">进行中</span>';
+    const statusBadge=myS.length===0?'<span class="badge b-wait">无排班</span>':allOk?'<span class="badge b-ok">正常</span>':missC?'<span class="badge b-miss">缺卡</span>':'<span class="badge b-wait">进行中</span>';
     h+=`<tr><td><div class="u-cell"><div class="u-av" style="background:${c.bg};color:${c.fg}">${m.name[0]}</div><div><div style="font-weight:500">${esc(m.name)}${claimed?' <span style="font-size:9px;color:var(--success)">● 在线</span>':''}</div><div style="font-size:10px;color:var(--muted)">${esc(m.dept)}</div></div></div></td><td class="mono">${myS.length}个</td><td class="mono">${okC}</td><td style="vertical-align:top">${missCell}</td><td>${statusBadge}</td></tr>`;
   });
   h+='</tbody></table>';document.getElementById('tableBody').innerHTML=h;
@@ -5308,7 +5337,7 @@ function renderAll(){renderEmp();if(document.getElementById('pg-admin').classLis
 
 tick();setInterval(tick,1000);setInterval(renderEmp,3e4);
 // ===== 新版本检测：部署新版后自动提醒用户刷新，避免大家一直跑旧代码 =====
-const APP_VERSION='v2026.08.07.31';
+const APP_VERSION='v2026.08.07.32';
 let _newVerNotified=false;
 async function checkAppVersion(){
   if(_newVerNotified)return;
