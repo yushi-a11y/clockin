@@ -66,7 +66,7 @@ CREATE POLICY "punches_insert_validated" ON punches
   FOR INSERT WITH CHECK(
     date ~ '^\d{4}-\d{2}-\d{2}$'
     AND time ~ '^\d{2}:\d{2}$'
-    AND date::date >= CURRENT_DATE - INTERVAL '7 days'
+    AND date::date >= CURRENT_DATE - INTERVAL '8 days'
     AND date::date <= CURRENT_DATE + INTERVAL '1 day'
   );
 
