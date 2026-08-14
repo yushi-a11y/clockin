@@ -1831,11 +1831,13 @@ async function checkReminders(){
 
 function getAllPunchesForMember(mid,date){
   const d=date||tdStr();
-  // 跨天班次的实际打卡可能落在 D+1（如 23:00-00:00 的下班卡在 00:00，日期为次日），
-  // 因此查询 D 时一并纳入 D+1 的打卡记录，避免误判为缺卡。
+  // 跨天班次的实际打卡可能落在 D-1（如 23:00-00:00 的上班卡在 23:00，日期为前一天）
+  // 或 D+1（如 23:00-00:00 的下班卡在 00:00，日期为次日），
+  // 因此查询 D 时一并纳入 D-1 和 D+1 的打卡记录，避免误判为缺卡。
+  const dPrev=ymd(addDays(parseYmd(d),-1));
   const dNext=ymd(addDays(parseYmd(d),1));
-  const local=((state.punches[d]||[]).concat(state.punches[dNext]||[])).filter(x=>x.mid===mid);
-  const fb=fbPunches.filter(x=>x.mid===mid&&(x.date===d||x.date===dNext));
+  const local=((state.punches[dPrev]||[]).concat(state.punches[d]||[]).concat(state.punches[dNext]||[])).filter(x=>x.mid===mid);
+  const fb=fbPunches.filter(x=>x.mid===mid&&(x.date===dPrev||x.date===d||x.date===dNext));
   // Deduplicate: if a punch exists in both local and fb (same sid+t+mid+date), keep fb version；
   // 但云端表无 offline 列，同步回读后标记会丢失，需从本地孪生记录继承（v2026.08.07）
   // 同理，班次实例标记 sd 也不是云端表字段，同样从本地孪生记录继承（v2026.08.07.18）
@@ -2298,13 +2300,13 @@ function buildDayInstances(member,viewDate,isToday,prevPunches){
   });
   return list;
 }
-// 以「绝对开始/结束时刻」成链（因此可跨午夜），每链最多 2 个班次
+// 以「绝对开始/结束时刻」成链（因此可跨午夜），连续首尾相接的班次归入同一条链
 function buildInstanceChains(items){
   if(!items||!items.length)return[];
   const arr=items.slice().map(it=>Object.assign({},it,shiftDateTimes(it.sh,it.sd,it.sd))).sort((a,b)=>a.sD-b.sD);
   const chains=[];let cur=[arr[0]];
   for(let i=1;i<arr.length;i++){
-    if(cur.length<2&&arr[i].sD.getTime()===arr[i-1].eD.getTime())cur.push(arr[i]);
+    if(arr[i].sD.getTime()===arr[i-1].eD.getTime())cur.push(arr[i]);
     else{chains.push(cur);cur=[arr[i]]}
   }
   chains.push(cur);
@@ -2347,20 +2349,27 @@ function resolvePunchAction(items,ctxDate,punchesOf,nowDt){
     if(nx)return{sh:it.sh,sd:it.sd,t:'e',label:'连班交接打卡',hint:`${it.sh.name} 下班（昨日跨天）· ${nx.sh.name} 上班`,shared:nx.sh,sharedSd:nx.sd};
     return{sh:it.sh,sd:it.sd,t:'e',label:'下班打卡',hint:it.sh.name+'（昨日跨天）'};
   }
-  // ② 今日连班链（与原逻辑一致：只处理第一个活跃链）
+  // ② 今日连班链（只处理第一个活跃链）
   const chains=buildInstanceChains(sorted.filter(it=>it.sd===ctxDate));
   let ch=null;
   for(const c of chains){
     if(c.length<2)continue;
-    const f=stOf(c[0]),l=stOf(c[c.length-1]);
-    if(!l.ep&&(f.sp||inSW(c[0]))){ch=c;break}
+    // 链仍需处理：链中任一班次仍缺卡（支持 3+ 连班，前面的班次可能已完成）
+    const chainActive=c.some(it=>{const s=stOf(it);return!s.sp||!s.ep});
+    if(chainActive){ch=c;break}
   }
   if(ch){
     const first=ch[0],last=ch[ch.length-1],fss=stOf(first);
     if(fss.ss==='w'&&inSW(first))return{sh:first.sh,sd:first.sd,t:'s',label:'上班打卡',hint:`${first.sh.name} → ${last.sh.name}（连班）`};
     for(let i=0;i<ch.length-1;i++){
       const pv=ch[i],nx=ch[i+1],pst=stOf(pv),nst=stOf(nx);
-      if(pst.sp&&!pst.ep&&!nst.sp&&(inEW(pv)||inSW(nx)))return{sh:pv.sh,sd:pv.sd,t:'e',label:'连班交接打卡',hint:`${pv.sh.name} 下班 · ${nx.sh.name} 上班`,shared:nx.sh,sharedSd:nx.sd};
+      const needEnd=!pst.ep,needStart=!nst.sp;
+      if(needEnd&&needStart&&(inEW(pv)||inSW(nx)))
+        return{sh:pv.sh,sd:pv.sd,t:'e',label:'连班交接打卡',hint:`${pv.sh.name} 下班 · ${nx.sh.name} 上班`,shared:nx.sh,sharedSd:nx.sd};
+      if(needEnd&&!needStart&&inEW(pv))
+        return{sh:pv.sh,sd:pv.sd,t:'e',label:'下班打卡',hint:`${pv.sh.name}（连班下班）`};
+      if(!needEnd&&needStart&&inSW(nx))
+        return{sh:nx.sh,sd:nx.sd,t:'s',label:'上班打卡',hint:`${nx.sh.name}（连班上班）`};
     }
     if(inEW(last))return{sh:last.sh,sd:last.sd,t:'e',label:'下班打卡',hint:last.sh.name};
   }
@@ -2372,11 +2381,20 @@ function resolvePunchAction(items,ctxDate,punchesOf,nowDt){
   }
   // ④ 宽限：班次进行中仍可补打上班卡（记为迟到，ss() 本就支持 late）；
   //    下班超时 30 分钟内仍可打卡。多个候选时取"逾期最短"的那个，避免早班盖住当前班。
+  //    连班优化：补打迟到/补打下班时，若该班次处于连班链中，优先处理交接缺卡。
+  const prevInChain=new Map();
+  for(const c of chains){for(let i=1;i<c.length;i++)prevInChain.set(c[i].sh.id+'_'+c[i].sd,c[i-1])}
   let best=null;
   for(const it of sorted){
     const s=stOf(it),{sD,eD}=dtOf(it),tol=tolOf(it);
     if(s.ss==='w'&&T>sD.getTime()+tol&&T<eD.getTime()){
       const gap=T-sD.getTime();
+      // 连班链中缺上班卡：检查前一班次是否也缺下班卡，若是则走交接打卡
+      const prev=prevInChain.get(it.sh.id+'_'+it.sd);
+      if(prev){const ps=stOf(prev);if(!ps.ep){
+        if(!best||gap<best.gap)best={gap,it,act:{sh:prev.sh,sd:prev.sd,t:'e',label:'连班交接打卡（补打）',hint:`${prev.sh.name} 下班 · ${it.sh.name} 上班 · 已过交接时间`,shared:it.sh,sharedSd:it.sd}};
+        continue;
+      }}
       if(!best||gap<best.gap)best={gap,it,act:{sh:it.sh,sd:it.sd,t:'s',label:'上班打卡（迟到）',hint:`${it.sh.name}${tag(it)} · 已过上班时间，打卡记为迟到`}};
     }
     if(s.sp&&!s.ep&&T>eD.getTime()+tol&&T<=eD.getTime()+LATE_END_GRACE_MS){
@@ -2384,7 +2402,7 @@ function resolvePunchAction(items,ctxDate,punchesOf,nowDt){
       if(!best||gap<best.gap)best={gap,it,act:{sh:it.sh,sd:it.sd,t:'e',label:'下班打卡（补打）',hint:`${it.sh.name}${tag(it)} · 已过下班时间，仍可补打`}};
     }
   }
-  if(best&&best.act.t==='e'){
+  if(best&&best.act.t==='e'&&!best.act.shared){
     const nx=nextOf(best.it);
     if(nx){best.act.shared=nx.sh;best.act.sharedSd=nx.sd;best.act.label='连班交接打卡（补打）';best.act.hint=`${best.it.sh.name} 下班 · ${nx.sh.name} 上班 · 已过交接时间`}
   }
@@ -4579,7 +4597,10 @@ function kpiShiftSlot(d){
 async function renderAdmin(){
   const en=state.shifts.filter(s=>s.enabled);
   const td=kpiDateStr();
+  // 拉取 D-1、D、D+1 三天的打卡记录，确保跨天班次的上班卡（D-1）和下班卡（D+1）都能找到
+  await ensurePunchesForDate(ymd(addDays(parseYmd(td),-1)));
   await ensurePunchesForDate(td);
+  await ensurePunchesForDate(ymd(addDays(parseYmd(td),1)));
   document.getElementById('dateBtn').textContent=td;
   document.getElementById('kpiDayLabel').textContent=kpiDayLabelText();
 
@@ -5337,7 +5358,7 @@ function renderAll(){renderEmp();if(document.getElementById('pg-admin').classLis
 
 tick();setInterval(tick,1000);setInterval(renderEmp,3e4);
 // ===== 新版本检测：部署新版后自动提醒用户刷新，避免大家一直跑旧代码 =====
-const APP_VERSION='v2026.08.07.32';
+const APP_VERSION='v2026.08.14.35';
 let _newVerNotified=false;
 async function checkAppVersion(){
   if(_newVerNotified)return;
