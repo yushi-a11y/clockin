@@ -2647,6 +2647,13 @@ function renderPickView(){
   html+=rulesBlockHtml();
   html+=`<div class="week-switch"><button class="${pickWeekOffset===0?'active':''}" onclick="setPickWeek(0)">本周</button><button class="${pickWeekOffset===1?'active':''}" onclick="setPickWeek(1)">下周</button></div>`;
   const td=tdStr();
+  // 性能优化：预计算所有日期×班次的 slotCount，避免在内层循环重复遍历 TEAM
+  const slotCountCache={};
+  days.forEach(dObj=>{
+    const dStr=ymd(dObj);
+    slotCountCache[dStr]={};
+    en.forEach(sh=>{slotCountCache[dStr][sh.id]=slotCount(dStr,sh.id,selectedMember?selectedMember.id:null)});
+  });
   days.forEach(dObj=>{
     const dStr=ymd(dObj);
     const editable=dayEditable(dStr);const isToday=dStr===td;
@@ -2654,7 +2661,7 @@ function renderPickView(){
     html+=`<div class="daycard${isToday?' today':''}${!editable?' locked':''}">`;
     html+=`<div class="daycard-h"><div class="dt">${dObj.getMonth()+1}/${dObj.getDate()}<span class="wd">周${WD_NAMES[dObj.getDay()]}${isToday?' · 今天':''}</span></div><div class="cnt">已选 <b>${sel.length}</b> 个时段${!editable?' · 已锁定':''}</div></div>`;
     html+=`<div class="slot-grid">`;
-    en.forEach(sh=>{const on=sel.includes(sh.id);const cap=slotCapOf(dStr,sh.id);const others=slotCount(dStr,sh.id,selectedMember.id);const taken=others+(on?1:0);const full=cap>0&&others>=cap;const blocked=full&&!on&&!admin;const clickable=editable&&!blocked;const cls='slot'+(on?' on':'')+((!editable||blocked)?' disabled':'')+(full?' full':'');html+=`<div class="${cls}" ${clickable?`onclick="togglePickSlot('${dStr}',${sh.id})"`:''}>${sh.name}${cap>0?`<span class="cap${full?' full':''}">${taken}/${cap}${full?' 满':''}</span>`:''}</div>`});
+    en.forEach(sh=>{const on=sel.includes(sh.id);const cap=slotCapOf(dStr,sh.id);const others=slotCountCache[dStr][sh.id];const taken=others+(on?1:0);const full=cap>0&&others>=cap;const blocked=full&&!on&&!admin;const clickable=editable&&!blocked;const cls='slot'+(on?' on':'')+((!editable||blocked)?' disabled':'')+(full?' full':'');html+=`<div class="${cls}" ${clickable?`onclick="togglePickSlot('${dStr}',${sh.id})"`:''}>${sh.name}${cap>0?`<span class="cap${full?' full':''}">${taken}/${cap}${full?' 满':''}</span>`:''}</div>`});
     html+=`</div></div>`;
   });
   // 底部信息栏：显示本周合计 + 即时保存提示
@@ -5358,7 +5365,7 @@ function renderAll(){renderEmp();if(document.getElementById('pg-admin').classLis
 
 tick();setInterval(tick,1000);setInterval(renderEmp,3e4);
 // ===== 新版本检测：部署新版后自动提醒用户刷新，避免大家一直跑旧代码 =====
-const APP_VERSION='v2026.08.14.36';
+const APP_VERSION='v2026.08.14.37';
 let _newVerNotified=false;
 async function checkAppVersion(){
   if(_newVerNotified)return;
