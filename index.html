@@ -4699,7 +4699,7 @@ function renderTable(q,en,td){
     const c=clr(m.id);
     const claimed=fbReady&&claims[m.id];
     const missCell=totalMiss?`<span class="mono warn">${totalMiss}</span><div style="font-size:10px;color:var(--danger);line-height:1.5;margin-top:2px">${[...missDetails,...activeMissDetails].map(d=>esc(d)).join('<br>')}</div>`:`<span class="mono">0</span>`;
-    const statusBadge=myS.length===0?'<span class="badge b-wait">无排班</span>':allOk?'<span class="badge b-ok">正常</span>':missC?'<span class="badge b-miss">缺卡</span>':'<span class="badge b-wait">进行中</span>';
+    const statusBadge=myS.length===0?'<span class="badge b-wait">无排班</span>':allOk?'<span class="badge b-ok">正常</span>':totalMiss?'<span class="badge b-miss">缺卡</span>':'<span class="badge b-wait">进行中</span>';
     h+=`<tr><td><div class="u-cell"><div class="u-av" style="background:${c.bg};color:${c.fg}">${m.name[0]}</div><div><div style="font-weight:500">${esc(m.name)}${claimed?' <span style="font-size:9px;color:var(--success)">● 在线</span>':''}</div><div style="font-size:10px;color:var(--muted)">${esc(m.dept)}</div></div></div></td><td class="mono">${myS.length}个</td><td class="mono">${okC}</td><td style="vertical-align:top">${missCell}</td><td>${statusBadge}</td></tr>`;
   });
   h+='</tbody></table>';document.getElementById('tableBody').innerHTML=h;
@@ -5358,7 +5358,7 @@ function renderAll(){renderEmp();if(document.getElementById('pg-admin').classLis
 
 tick();setInterval(tick,1000);setInterval(renderEmp,3e4);
 // ===== 新版本检测：部署新版后自动提醒用户刷新，避免大家一直跑旧代码 =====
-const APP_VERSION='v2026.08.14.35';
+const APP_VERSION='v2026.08.14.36';
 let _newVerNotified=false;
 async function checkAppVersion(){
   if(_newVerNotified)return;
