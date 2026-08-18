@@ -8,10 +8,10 @@ This project was handed off from QoderWork Canvas to Qoder.
 ### Context
 
 - Source: QoderWork Canvas
-- Generated at: 2026-07-20T05:46:13.635Z
+- Generated at: 2026-08-08T12:30:31.402Z
 - Project root: .
-- Canvas frame id: index
-- Canvas frame title: Main Canvas
+- Canvas frame id: sync_push
+- Canvas frame title: Sync_push
 - Canvas frame kind: html-file
 
 
