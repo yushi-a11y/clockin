@@ -4688,7 +4688,8 @@ function renderTable(q,en,td){
     const missDetails=[],activeMissDetails=[];
     myS.forEach(s=>{
       const st=ss(s,mp,td);
-      if(st.ov==='ok')okC++;
+      // "已完成"= 上下班均打卡（不论班次是否已结束），避免进行中的班次被误算为"未完成"
+      if(st.sp&&st.ep)okC++;
       // 统计所有缺卡（包括已结束的"miss"和进行中的"未打卡"）
       const missParts=[];
       if(!st.sp){
@@ -5365,7 +5366,7 @@ function renderAll(){renderEmp();if(document.getElementById('pg-admin').classLis
 
 tick();setInterval(tick,1000);setInterval(renderEmp,3e4);
 // ===== 新版本检测：部署新版后自动提醒用户刷新，避免大家一直跑旧代码 =====
-const APP_VERSION='v2026.08.14.37';
+const APP_VERSION='v2026.08.14.38';
 let _newVerNotified=false;
 async function checkAppVersion(){
   if(_newVerNotified)return;
