@@ -1236,6 +1236,8 @@ async function atomicAddPickCap(dateStr,mid,sid,isAdmin){
 }
 // 清理超过 60 天的历史 picks，避免无限增长
 function prunePicks(){const days=Math.max(7,+selCfg.retainDays||60);const cutoff=ymd(addDays(new Date(),-days));Object.keys(picks).forEach(d=>{if(d<cutoff)delete picks[d]})}
+// 清理本地 punches 缓存中超过 60 天的记录（v2026.08.14.40）
+function pruneLocalPunches(){const cutoff=ymd(addDays(new Date(),-60));Object.keys(state.punches||{}).forEach(d=>{if(d<cutoff)delete state.punches[d]});sv('cv6',state)}
 
 // Supabase sync
 async function syncToFB(){if(!fbReady)return;try{await supa.from('config').upsert({id:'shifts',data:state.shifts,updated_at:Date.now()},{onConflict:'id'});const teamUpload=isSrvAdminMode()?TEAM.map(m=>{const{pwd,...r}=m;return r}):TEAM;await supa.from('config').upsert({id:'team',data:teamUpload,updated_at:Date.now()},{onConflict:'id'})}catch(e){console.warn('Sync error:',e)}}
@@ -1361,6 +1363,7 @@ async function initFBListeners(){
     pruneSlotCap();
     pruneSwaps();
     pruneLeaves();
+    pruneLocalPunches();
     expireProxyRequests();
     syncSelectedMember();
     renderAll();
@@ -5504,7 +5507,7 @@ setMemberPick=function(...args){_origSetMemberPick.apply(this,args);markRenderDi
 
 tick();setInterval(tick,1000);setInterval(renderEmpIfNeeded,3e4);
 // ===== 新版本检测：部署新版后自动提醒用户刷新，避免大家一直跑旧代码 =====
-const APP_VERSION='v2026.08.14.40';
+const APP_VERSION='v2026.08.14.41';
 let _newVerNotified=false;
 async function checkAppVersion(){
   if(_newVerNotified)return;
