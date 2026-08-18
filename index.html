@@ -1430,8 +1430,8 @@ async function initFBListeners(){
       try{await pullPicksSelCfg();syncSelectedMember();renderAll();refreshEmpAfterSync();}catch(e){}
     },300);
   }).subscribe();
-  // Polling fallback: Realtime 活跃时 60s 一次（仅兜底），否则 30s
-  const POLL_INTERVAL=30000,POLL_IDLE_INTERVAL=60000;
+  // Polling fallback: Realtime 活跃时 120s 一次（仅兜底），否则 60s
+  const POLL_INTERVAL=60000,POLL_IDLE_INTERVAL=120000;
   let pollTimer=null;
   function schedulePoll(){
     const interval=(rtConfigActive&&Date.now()-rtLastHit<120000)?POLL_IDLE_INTERVAL:POLL_INTERVAL;
@@ -5609,7 +5609,7 @@ setMemberPick=function(...args){_origSetMemberPick.apply(this,args);markRenderDi
 
 tick();setInterval(tick,1000);setInterval(renderEmpIfNeeded,3e4);
 // ===== 新版本检测：部署新版后自动提醒用户刷新，避免大家一直跑旧代码 =====
-const APP_VERSION='v2026.08.14.42';
+const APP_VERSION='v2026.08.14.43';
 let _newVerNotified=false;
 async function checkAppVersion(){
   if(_newVerNotified)return;
