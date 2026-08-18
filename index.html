@@ -97,6 +97,11 @@
     .pick-save-bar .info{flex:1;font-size:11px;color:var(--muted)}
     .pick-save-btn{padding:11px 20px;border:none;border-radius:var(--radius);background:var(--primary);color:#fff;font-size:14px;font-weight:600;box-shadow:0 3px 12px rgba(37,99,235,.2)}
     .pick-save-btn:disabled{background:var(--border);color:var(--muted-light);box-shadow:none;cursor:not-allowed}
+    /* 打卡成功动画 */
+    @keyframes punchSuccess{0%{transform:scale(0);opacity:0}50%{transform:scale(1.2)}100%{transform:scale(1);opacity:1}}
+    .punch-success-overlay{position:fixed;inset:0;background:rgba(0,0,0,.3);display:flex;align-items:center;justify-content:center;z-index:2000;animation:punchSuccess .4s ease-out}
+    .punch-success-icon{width:80px;height:80px;border-radius:50%;background:var(--success);display:flex;align-items:center;justify-content:center;box-shadow:0 8px 32px rgba(22,163,74,.4)}
+    .punch-success-icon svg{width:48px;height:48px;stroke:#fff;stroke-width:3;fill:none}
     .sel-grid-wrap{overflow-x:auto;border:1px solid var(--border-light);border-radius:var(--radius-lg);background:var(--surface)}
     .sel-grid{border-collapse:collapse;font-size:12px;min-width:100%}
     .sel-grid th,.sel-grid td{border:1px solid var(--border-light);padding:6px 8px;text-align:center;white-space:nowrap}
@@ -524,6 +529,26 @@
 </div>
 
 <script>
+// ====== 全局错误边界（v2026.08.14.39）======
+// 捕获未处理的异常和 Promise rejection，防止白屏，给用户友好提示
+let _globalErrorShown=false;
+window.onerror=function(msg,url,line,col,error){
+  console.error('[Global Error]',msg,'at',url+':'+line+':'+col,error);
+  if(!_globalErrorShown&&typeof showToast==='function'){
+    _globalErrorShown=true;
+    showToast('页面出现异常，请刷新重试');
+    setTimeout(()=>{_globalErrorShown=false},5000);
+  }
+  return false; // 不阻止默认行为
+};
+window.onunhandledrejection=function(e){
+  console.error('[Unhandled Rejection]',e.reason);
+  if(!_globalErrorShown&&typeof showToast==='function'){
+    _globalErrorShown=true;
+    showToast('网络请求失败，请检查连接后重试');
+    setTimeout(()=>{_globalErrorShown=false},5000);
+  }
+};
 // ====== 移动端拦截（UA 检测，覆盖横屏平板等超过 768px 的设备）======
 (function(){
   var ua=navigator.userAgent||'';
@@ -2268,6 +2293,7 @@ async function doPunch(){
   renderAll();
   const label=action.t==='s'?'上班打卡':'下班打卡';
   logEvent('打卡',`${selectedMember.name} ${label} · ${action.sh.name}${action.shared?' → '+action.shared.name+'（连班共用）':''} · ${time}${isOfflinePunch?' · 离线打卡（本地时钟，待复核）':''}`);
+  showPunchSuccess();
   showToast(isOfflinePunch?`打卡成功（离线）· ${time} · 联网后自动同步，时间待复核`:`打卡成功 · ${time}${action.shared?'（连班共用）':''}`);
 }
 
@@ -3207,23 +3233,65 @@ function setMakeupFilter(st){makeupFilterStatus=st;renderMakeupAdmin()}
 function renderMakeupAdmin(){
   const el=document.getElementById('makeupAdminList');if(!el)return;
   const filtered=makeups.filter(m=>makeupFilterStatus==='all'||m.status===makeupFilterStatus).sort((a,b)=>b.ts-a.ts);
-  let h=`<div style="display:flex;gap:6px;margin-bottom:10px;flex-wrap:wrap">`;
+  const pendingList=filtered.filter(m=>m.status==='pending');
+  let h=`<div style="display:flex;gap:6px;margin-bottom:10px;flex-wrap:wrap;align-items:center">`;
   const tabs=[['pending','待审批'],['accepted','已通过'],['rejected','已驳回'],['cancelled','已取消'],['all','全部']];
   const pendingN=makeups.filter(m=>m.status==='pending').length;
   tabs.forEach(([k,label])=>{const n=k==='pending'&&pendingN?` <span class="tab-badge" style="background:var(--danger)">${pendingN}</span>`:'';h+=`<button class="btn-s" style="background:${makeupFilterStatus===k?'var(--primary-soft)':'var(--surface)'};border:1px solid ${makeupFilterStatus===k?'var(--primary)':'var(--border)'};color:${makeupFilterStatus===k?'var(--primary)':'var(--muted)'}" onclick="setMakeupFilter('${k}')">${label}${n}</button>`});
-  h+=`<button class="btn-s" onclick="renderMakeupAdmin()">刷新</button></div>`;
+  h+=`<button class="btn-s" onclick="renderMakeupAdmin()">刷新</button>`;
+  // 批量操作按钮（v2026.08.14.39）
+  if(pendingList.length>1){
+    h+=`<button class="btn-s" style="background:var(--success);color:#fff;border:none;margin-left:auto" onclick="batchAcceptMakeups()">✓ 批量通过 (${pendingList.length})</button>`;
+    h+=`<button class="btn-s" style="color:var(--danger);border-color:var(--danger)" onclick="batchRejectMakeups()"> 批量驳回</button>`;
+  }
+  h+=`</div>`;
   if(!filtered.length){h+=`<div style="padding:24px;text-align:center;color:var(--muted);font-size:13px">暂无${makeupFilterStatus==='pending'?'待审批的':''}补卡申请</div>`}
   else{
-    h+='<table class="cnt-tbl"><thead><tr><th>申请时间</th><th>员工</th><th>缺卡日期</th><th>班次</th><th>补哪边</th><th>补卡时间</th><th>原因</th><th>状态</th><th>操作</th></tr></thead><tbody>';
+    h+='<table class="cnt-tbl"><thead><tr><th style="width:30px"><input type="checkbox" id="makeupSelectAll" onchange="toggleMakeupSelectAll(this.checked)"'+(pendingList.length===0?' disabled':'')+'></th><th>申请时间</th><th>员工</th><th>缺卡日期</th><th>班次</th><th>补哪边</th><th>补卡时间</th><th>原因</th><th>状态</th><th>操作</th></tr></thead><tbody>';
     filtered.forEach(m=>{
       const d=parseYmd(m.date);
       const stTxt={pending:'待审批',accepted:'已通过',rejected:'已驳回',cancelled:'已取消'}[m.status]||m.status;
       const acts=m.status==='pending'?`<button class="btn-s" style="background:var(--success);color:#fff;border:none" onclick="acceptMakeup('${m.id}')">通过</button> <button class="btn-s" style="color:var(--danger);border-color:var(--danger)" onclick="rejectMakeup('${m.id}')">驳回</button>`:'—';
-      h+=`<tr><td class="wk" style="white-space:nowrap">${fmtTs(m.ts)}</td><td>${esc(m.name)}</td><td>${d.getMonth()+1}/${d.getDate()} 周${WD_NAMES[d.getDay()]}</td><td>${esc(shiftNameOf(m.sid))}</td><td>${m.t==='s'?'上班':'下班'}</td><td>${esc(m.time)}</td><td style="font-size:11px;color:var(--muted);max-width:180px;text-align:left">${esc(m.reason||'—')}</td><td><span class="swap-st ${m.status}">${stTxt}</span></td><td>${acts}</td></tr>`;
+      const chk=m.status==='pending'?`<input type="checkbox" class="makeup-chk" data-id="${m.id}">`:'<span style="color:var(--muted-light)">—</span>';
+      h+=`<tr><td>${chk}</td><td class="wk" style="white-space:nowrap">${fmtTs(m.ts)}</td><td>${esc(m.name)}</td><td>${d.getMonth()+1}/${d.getDate()} 周${WD_NAMES[d.getDay()]}</td><td>${esc(shiftNameOf(m.sid))}</td><td>${m.t==='s'?'上班':'下班'}</td><td>${esc(m.time)}</td><td style="font-size:11px;color:var(--muted);max-width:180px;text-align:left">${esc(m.reason||'—')}</td><td><span class="swap-st ${m.status}">${stTxt}</span></td><td>${acts}</td></tr>`;
     });
     h+='</tbody></table>';
   }
   el.innerHTML=h;
+}
+// 批量通过补卡申请（v2026.08.14.39）
+async function batchAcceptMakeups(){
+  const checks=document.querySelectorAll('.makeup-chk:checked');
+  if(!checks.length){showToast('请先勾选要通过的申请');return}
+  if(!await ensureAdminToken())return;
+  const ids=Array.from(checks).map(c=>c.dataset.id);
+  if(!confirm(`确认批量通过 ${ids.length} 条补卡申请？`))return;
+  let success=0,fail=0;
+  for(const id of ids){
+    try{await acceptMakeup(id);success++}catch(e){fail++}
+  }
+  showToast(`批量完成：通过 ${success} 条${fail?' · 失败 '+fail+' 条':''}`);
+  renderMakeupAdmin();
+}
+// 批量驳回补卡申请（v2026.08.14.39）
+async function batchRejectMakeups(){
+  const checks=document.querySelectorAll('.makeup-chk:checked');
+  if(!checks.length){showToast('请先勾选要驳回的申请');return}
+  if(!await ensureAdminToken())return;
+  const ids=Array.from(checks).map(c=>c.dataset.id);
+  if(!confirm(`确认批量驳回 ${ids.length} 条补卡申请？`))return;
+  let success=0;
+  for(const id of ids){
+    const m=makeups.find(x=>x.id===id);
+    if(m&&m.status==='pending'){m.status='rejected';m.decidedTs=Date.now();m.decidedBy=adminDisplayName();success++}
+  }
+  svMakeups();await syncMakeups();
+  showToast(`已批量驳回 ${success} 条补卡申请`);
+  renderMakeupAdmin();
+}
+// 全选/取消全选（v2026.08.14.39）
+function toggleMakeupSelectAll(checked){
+  document.querySelectorAll('.makeup-chk').forEach(c=>{c.checked=checked});
 }
 async function acceptMakeup(id){
   const m=makeups.find(x=>x.id===id);if(!m||m.status!=='pending')return;
@@ -4324,6 +4392,16 @@ function showToast(m){
   };
   showNext();
 }
+// 打卡成功全屏动画反馈（v2026.08.14.39）
+function showPunchSuccess(){
+  const overlay=document.createElement('div');
+  overlay.className='punch-success-overlay';
+  overlay.innerHTML='<div class="punch-success-icon"><svg viewBox="0 0 24 24"><polyline points="20 6 9 17 4 12"/></svg></div>';
+  document.body.appendChild(overlay);
+  // 震动反馈（仅支持的设备）
+  if(navigator.vibrate)navigator.vibrate([50,30,50]);
+  setTimeout(()=>{overlay.style.opacity='0';overlay.style.transition='opacity .3s';setTimeout(()=>overlay.remove(),300)},800);
+}
 // ===== SHA-256 哈希：密码存储不再明文 =====
 async function sha256(str){
   try{
@@ -5364,9 +5442,17 @@ const dz=document.getElementById('dropZone');if(dz){dz.addEventListener('dragove
 function tick(){const n=new Date();document.getElementById('liveClock').textContent=`${String(n.getHours()).padStart(2,'0')}:${String(n.getMinutes()).padStart(2,'0')}:${String(n.getSeconds()).padStart(2,'0')}`;document.getElementById('liveDate').textContent=`${n.getFullYear()}年${n.getMonth()+1}月${n.getDate()}日 星期${'日一二三四五六'[n.getDay()]}`}
 function renderAll(){renderEmp();if(document.getElementById('pg-admin').classList.contains('active')){renderAdmin();renderBindingStatus()}}
 
-tick();setInterval(tick,1000);setInterval(renderEmp,3e4);
+// 渲染优化：脏标记机制，避免无数据变化时的全量重渲染（v2026.08.14.39）
+let _renderDirty=true;
+function markRenderDirty(){_renderDirty=true}
+function renderEmpIfNeeded(){if(_renderDirty){renderEmp();_renderDirty=false}}
+// 数据变更时标记脏（在关键写入点调用）
+const _origSetMemberPick=setMemberPick;
+setMemberPick=function(...args){_origSetMemberPick.apply(this,args);markRenderDirty()};
+
+tick();setInterval(tick,1000);setInterval(renderEmpIfNeeded,3e4);
 // ===== 新版本检测：部署新版后自动提醒用户刷新，避免大家一直跑旧代码 =====
-const APP_VERSION='v2026.08.14.38';
+const APP_VERSION='v2026.08.14.39';
 let _newVerNotified=false;
 async function checkAppVersion(){
   if(_newVerNotified)return;
