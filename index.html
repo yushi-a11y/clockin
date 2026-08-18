@@ -349,6 +349,7 @@
       </div>
       <div class="kpi-row" id="kpiRow"></div>
       <div class="chart-card"><div class="chart-title">各时段出勤率</div><div class="trend-chart" id="trendChart"></div></div>
+      <div class="chart-card"><div class="chart-title">月度出勤趋势 <span style="font-size:11px;color:var(--muted);font-weight:400;margin-left:8px" id="monthTrendLabel"></span></div><div class="trend-chart" id="monthTrendChart"></div></div>
       <div class="tbl-card"><div class="tbl-head"><div class="tbl-title">出勤明细</div><input class="tbl-search" placeholder="搜索..." id="tblSearch" oninput="renderTable(this.value)"/></div><div id="tableBody"></div></div>
     </div>
     <div class="panel" id="ap-rules"><div class="ph"><h1 class="pt">时段配置</h1><div class="ha"><button class="btn-s" onclick="toggleAllShifts(true)">全部启用</button><button class="btn-s" onclick="toggleAllShifts(false)">全部禁用</button><button class="btn-p" onclick="addShift()">+ 添加</button></div></div><div id="rulesList"></div></div>
@@ -1793,7 +1794,8 @@ function startReminderTimer(){
   stopReminderTimer();
   if(!selectedMember||!isReminderEnabled())return;
   checkReminders();
-  reminderTimer=setInterval(checkReminders,60000);
+  checkDailySummary();
+  reminderTimer=setInterval(()=>{checkReminders();checkDailySummary()},60000);
 }
 async function checkReminders(){
   if(!selectedMember||!isReminderEnabled())return;
@@ -1865,6 +1867,33 @@ async function checkReminders(){
       }
     }
   }
+}
+// 每日考勤汇总通知（v2026.08.14.42）：当天所有班次结束后，发送当日考勤汇总
+let _dailySummarySent={};
+function checkDailySummary(){
+  if(!selectedMember||!isReminderEnabled())return;
+  const today=tdStr();
+  if(_dailySummarySent[today])return;
+  const punches=getAllPunchesForMember(selectedMember.id,today);
+  const myShifts=state.shifts.filter(s=>s.enabled&&memberShifts(selectedMember,today).includes(s.id));
+  if(!myShifts.length)return;
+  // 检查是否所有班次都已结束
+  const now=serverDate();
+  const allEnded=myShifts.every(sh=>{const{eD}=shiftDateTimes(sh,today);return now.getTime()>eD.getTime()});
+  if(!allEnded)return;
+  // 统计考勤情况
+  let okCount=0,missCount=0,lateCount=0;
+  myShifts.forEach(sh=>{
+    const mp=getAllPunchesForMember(selectedMember.id,today);
+    const st=ss(sh,mp,today);
+    if(st.ov==='ok')okCount++;
+    else if(st.ov==='miss')missCount++;
+    else if(st.ov==='warn')lateCount++;
+  });
+  const total=myShifts.length;
+  const summary=okCount===total?`今日 ${total} 个班次全部完成 ✓`:`今日 ${total} 个班次：完成 ${okCount} · 迟到 ${lateCount} · 缺卡 ${missCount}`;
+  notifyReminder('📊 今日考勤汇总',summary);
+  _dailySummarySent[today]=true;
 }
 
 function getAllPunchesForMember(mid,date){
@@ -2194,6 +2223,23 @@ async function renderEmp(){
   if(!isToday){navHtml+=`<div style="font-size:11px;color:var(--muted-light);margin-bottom:8px;padding:6px 10px;background:var(--surface-alt);border-radius:var(--radius-sm);line-height:1.5">当前查看的是 ${viewDateObj.getMonth()+1}/${viewDateObj.getDate()} 的班次，仅供预览，<b>打卡仅对今天生效</b>。如需修改其他日期的班次请到「选班」标签。</div>`}
 
   let html=navHtml+`<div class="sbar"><div class="si ok"><div class="n">${ok}</div><div class="l">已完成</div></div><div class="si pd"><div class="n">${act}</div><div class="l">进行中</div></div><div class="si ms"><div class="n">${miss}</div><div class="l">缺卡</div></div></div>`;
+  // 快捷操作卡片：显示下一个打卡动作和倒计时（v2026.08.14.42）
+  if(isToday&&action){
+    const now2=serverDate(),T2=now2.getTime();
+    let countdownHtml='';
+    if(action.t==='s'){
+      const{sD}=shiftDateTimes(action.sh,viewDate,action.sd);
+      const diff=sD.getTime()-T2;
+      if(diff>0){const m=Math.floor(diff/60000),s=Math.floor((diff%60000)/1000);countdownHtml=`<div style="font-size:11px;color:var(--muted);margin-top:4px">距离上班还有 <b style="color:var(--primary)">${m}分${s}秒</b></div>`}
+      else{countdownHtml=`<div style="font-size:11px;color:var(--success);margin-top:4px">已到上班时间，请立即打卡</div>`}
+    }else{
+      const{eD}=shiftDateTimes(action.sh,viewDate,action.sd);
+      const diff=eD.getTime()-T2;
+      if(diff>0){const m=Math.floor(diff/60000),s=Math.floor((diff%60000)/1000);countdownHtml=`<div style="font-size:11px;color:var(--muted);margin-top:4px">距离下班还有 <b style="color:var(--warning)">${m}分${s}秒</b></div>`}
+      else{countdownHtml=`<div style="font-size:11px;color:var(--danger);margin-top:4px">已过下班时间，请尽快打卡</div>`}
+    }
+    html+=`<div style="max-width:420px;margin:10px 0;padding:12px 16px;background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);display:flex;align-items:center;gap:12px"><div style="width:40px;height:40px;border-radius:50%;background:var(--primary-soft);color:var(--primary);display:flex;align-items:center;justify-content:center;flex-shrink:0"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width:20px;height:20px"><circle cx="12" cy="12" r="9"/><polyline points="12 7 12 12 14.5 14.5"/></svg></div><div style="flex:1;min-width:0"><div style="font-size:13px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${action.label}</div><div style="font-size:11px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${action.hint}</div>${countdownHtml}</div></div>`;
+  }
   if(!isToday){
     html+=items.length?`<button class="punch-btn off" disabled>查看 · ${viewDateObj.getMonth()+1}/${viewDateObj.getDate()}<div class="hint">${items.length} 个班次 · 仅供预览</div></button>`:`<button class="punch-btn off" disabled>${viewDateObj.getMonth()+1}/${viewDateObj.getDate()} 暂无班次<div class="hint">该日尚未选班</div></button>`;
   }else{
@@ -2968,6 +3014,8 @@ async function acceptSwap(id){
   if(!okSwap1||!okSwap2){showToast('换班保存失败，已刷新最新数据，请重试');try{await pullPicksSelCfg()}catch(e){};renderEmp();return}
   s.status='accepted';s.decidedTs=Date.now();svSwaps();await syncSwaps();
   logEvent('接受换班',`${s.toName} 接收了 ${s.fromName} 的 ${s.date} ${shiftNameOf(s.sid)} 班次`);
+  // 发送审批结果通知（v2026.08.14.42）
+  sendApprovalNotification(s.fromName, '换班', '已接受', `${s.date} ${shiftNameOf(s.sid)} 班次转让已通过`);
   showToast('已接受换班，班次已转到你名下');renderEmp();
   }finally{_swapBusy=false}
 }
@@ -3705,6 +3753,8 @@ async function approveLeave(id){
   }
   l.status='approved';l.decidedTs=Date.now();l.decidedBy=adminDisplayName();svLeaves();await syncLeaves();
   logEvent('批准请假',`管理员批准 ${l.name} 在 ${l.date} 的请假（移除 ${(l.sids||[]).length} 个班次）`);
+  // 发送审批结果通知（v2026.08.14.42）
+  sendApprovalNotification(l.name, '请假', '已批准', `${l.date} 的请假申请已通过，当天班次已移除`);
   showToast('已批准请假，班次已移除');renderLeaveAdmin();updateLeaveAdminBadge();renderAll();
 }
 async function rejectLeave(id){
@@ -3713,7 +3763,15 @@ async function rejectLeave(id){
   if(reason===null)return;
   l.status='rejected';l.decidedTs=Date.now();l.decidedBy=adminDisplayName();l.rejectReason=(reason||'').trim();svLeaves();await syncLeaves();
   logEvent('驳回请假',`管理员驳回 ${l.name} 在 ${l.date} 的请假申请${reason?' · 原因：'+reason:''}`);
+  // 发送审批结果通知（v2026.08.14.42）
+  sendApprovalNotification(l.name, '请假', '已驳回', `${l.date} 的请假申请未通过${reason?' · 原因：'+reason:''}`);
   showToast('已驳回');renderLeaveAdmin();updateLeaveAdminBadge();
+}
+// 审批结果通知（v2026.08.14.42）
+function sendApprovalNotification(name, type, status, detail){
+  if('Notification' in window && Notification.permission === 'granted'){
+    new Notification(`📋 ${name}的${type}申请${status}`, {body: detail, icon: 'data:image/svg+xml,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="%232563eb"><circle cx="12" cy="12" r="10"/></svg>'});
+  }
 }
 
 // ===== 绩效：后台录入 + 小二端展示 =====
@@ -4778,7 +4836,7 @@ async function renderAdmin(){
   console.log('[renderAdmin]',td,'fbPunches for date',datePunches.length,'total',total,'norm',norm,'local dates',Object.keys(state.punches||{}));
   const debugInfo=`<div style="grid-column:1/-1;font-size:11px;color:var(--muted-light);margin-top:2px">调试：${td} 云端 ${datePunches.length} 条 / 本地 ${localDatePunches} 条 · 应到${total} 正常${norm}</div>`;
   document.getElementById('kpiRow').innerHTML=`<div class="kpi"><div class="kpi-l">应到 · ${scopeLabel}</div><div class="kpi-v">${total}</div></div><div class="kpi"><div class="kpi-l">正常 · 上下班均打卡</div><div class="kpi-v">${norm}</div></div><div class="kpi"><div class="kpi-l">出勤率</div><div class="kpi-v">${rate}%</div><div class="kpi-d ${+rate>=90?'up':'down'}">${+rate>=90?'达标':'偏低'}</div></div><div class="kpi"><div class="kpi-l">异常 · 应到-正常</div><div class="kpi-v">${anom}</div></div>${debugInfo}`;
-  renderTrend(en,td);renderTable(document.getElementById('tblSearch')?.value||'',en,td);renderRules();renderMembers();
+  renderTrend(en,td);renderMonthTrendChart(en);renderTable(document.getElementById('tblSearch')?.value||'',en,td);renderRules();renderMembers();
   if(document.getElementById('ap-selection')?.classList.contains('active'))renderSelection();
 }
 
@@ -4809,6 +4867,50 @@ function renderTrend(en,td){
   let svg=`<svg width="${w}" height="${h+30}" viewBox="0 0 ${w} ${h+30}"><line x1="${pad}" y1="${h}" x2="${w}" y2="${h}" stroke="var(--border)" stroke-width="1"/>`;
   data.forEach((d,i)=>{if(!d.count)return;const x=pad+i*(bw+gap),bh=d.pct/100*(h-20),y=h-bh;const c=d.pct>=80?'var(--success)':d.pct>=50?'var(--primary)':'var(--warning)';svg+=`<rect x="${x}" y="${y}" width="${bw}" height="${bh}" rx="3" fill="${c}" opacity=".8"/><text x="${x+bw/2}" y="${y-4}" font-size="8" font-weight="600" fill="${c}" text-anchor="middle">${d.pct}%</text><text x="${x+bw/2}" y="${h+14}" font-size="9" fill="var(--muted)" text-anchor="middle">${d.name}</text>`});
   svg+='</svg>';document.getElementById('trendChart').innerHTML=toggle+svg;
+}
+// 月度出勤趋势折线图（v2026.08.14.42）
+function renderMonthTrendChart(en){
+  const el=document.getElementById('monthTrendChart');const labelEl=document.getElementById('monthTrendLabel');
+  if(!el)return;
+  const now=new Date(),y=now.getFullYear(),m=now.getMonth();
+  const daysInMonth=new Date(y,m+1,0).getDate();
+  const td=tdStr(),monthStr=`${y}-${String(m+1).padStart(2,'0')}`;
+  labelEl.textContent=`${y}年${m+1}月`;
+  // 计算每天的出勤率
+  const dailyRates=[];
+  for(let d=1;d<=daysInMonth;d++){
+    const ds=`${y}-${String(m+1).padStart(2,'0')}-${String(d).padStart(2,'0')}`;
+    if(ds>td){dailyRates.push(null);continue} // 未来日期无数据
+    let dayTotal=0,dayNorm=0;
+    en.forEach(sh=>{
+      const cnt=slotCount(ds,sh.id);if(!cnt)return;
+      TEAM.forEach(mem=>{
+        if(!memberShifts(mem,ds).includes(sh.id))return;
+        dayTotal++;
+        const mp=getAllPunchesForMember(mem.id,ds);const st=ss(sh,mp,ds);
+        if(st.sp&&st.ep)dayNorm++;
+      });
+    });
+    dailyRates.push(dayTotal?Math.round(dayNorm/dayTotal*100):null);
+  }
+  // 过滤掉无数据的日期
+  const validData=dailyRates.map((r,i)=>({day:i+1,rate:r})).filter(d=>d.rate!==null);
+  if(!validData.length){el.innerHTML='<div style="text-align:center;padding:20px;color:var(--muted);font-size:12px">本月暂无数据</div>';return}
+  // 绘制折线图
+  const w=560,h=120,pad=30,gap=2;
+  const maxRate=100,minRate=0;
+  const xStep=(w-pad*2)/(validData.length-1||1);
+  let svg=`<svg width="${w}" height="${h+30}" viewBox="0 0 ${w} ${h+30}">`;
+  // 网格线
+  for(let r=0;r<=100;r+=25){const yy=h-(r/100)*(h-20);svg+=`<line x1="${pad}" y1="${yy}" x2="${w-pad}" y2="${yy}" stroke="var(--border-light)" stroke-width="1" stroke-dasharray="3,3"/><text x="${pad-5}" y="${yy+3}" font-size="8" fill="var(--muted)" text-anchor="end">${r}%</text>`}
+  // 折线
+  let pathD='';const points=[];
+  validData.forEach((d,i)=>{const x=pad+i*xStep,y=h-(d.rate/100)*(h-20);points.push({x,y,day:d.day,rate:d.rate});if(i===0)pathD=`M${x},${y}`;else pathD+=` L${x},${y}`});
+  svg+=`<path d="${pathD}" fill="none" stroke="var(--primary)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>`;
+  // 数据点
+  points.forEach(p=>{svg+=`<circle cx="${p.x}" cy="${p.y}" r="3" fill="var(--primary)"/><text x="${p.x}" y="${h+14}" font-size="7" fill="var(--muted)" text-anchor="middle">${p.day}日</text><text x="${p.x}" y="${p.y-6}" font-size="7" fill="var(--primary)" text-anchor="middle">${p.rate}%</text>`});
+  svg+='</svg>';
+  el.innerHTML=svg;
 }
 
 function renderTable(q,en,td){
@@ -5507,7 +5609,7 @@ setMemberPick=function(...args){_origSetMemberPick.apply(this,args);markRenderDi
 
 tick();setInterval(tick,1000);setInterval(renderEmpIfNeeded,3e4);
 // ===== 新版本检测：部署新版后自动提醒用户刷新，避免大家一直跑旧代码 =====
-const APP_VERSION='v2026.08.14.41';
+const APP_VERSION='v2026.08.14.42';
 let _newVerNotified=false;
 async function checkAppVersion(){
   if(_newVerNotified)return;
