@@ -4885,7 +4885,7 @@ async function renderAdmin(){
   console.log('[renderAdmin]',td,'fbPunches for date',datePunches.length,'total',total,'norm',norm,'local dates',Object.keys(state.punches||{}));
   const debugInfo=`<div style="grid-column:1/-1;font-size:11px;color:var(--muted-light);margin-top:2px">调试：${td} 云端 ${datePunches.length} 条 / 本地 ${localDatePunches} 条 · 应到${total} 正常${norm}</div>`;
   document.getElementById('kpiRow').innerHTML=`<div class="kpi"><div class="kpi-l">应到 · ${scopeLabel}</div><div class="kpi-v">${total}</div></div><div class="kpi"><div class="kpi-l">正常 · 上下班均打卡</div><div class="kpi-v">${norm}</div></div><div class="kpi"><div class="kpi-l">出勤率</div><div class="kpi-v">${rate}%</div><div class="kpi-d ${+rate>=90?'up':'down'}">${+rate>=90?'达标':'偏低'}</div></div><div class="kpi"><div class="kpi-l">异常 · 应到-正常</div><div class="kpi-v">${anom}</div></div>${debugInfo}`;
-  renderTrend(en,td);renderMonthTrendChart(en);renderTable(document.getElementById('tblSearch')?.value||'',en,td);renderRules();renderMembers();
+  renderTrend(en,td);await renderMonthTrendChart(en);renderTable(document.getElementById('tblSearch')?.value||'',en,td);renderRules();renderMembers();
   if(document.getElementById('ap-selection')?.classList.contains('active'))renderSelection();
 }
 
@@ -4917,14 +4917,21 @@ function renderTrend(en,td){
   data.forEach((d,i)=>{if(!d.count)return;const x=pad+i*(bw+gap),bh=d.pct/100*(h-20),y=h-bh;const c=d.pct>=80?'var(--success)':d.pct>=50?'var(--primary)':'var(--warning)';svg+=`<rect x="${x}" y="${y}" width="${bw}" height="${bh}" rx="3" fill="${c}" opacity=".8"/><text x="${x+bw/2}" y="${y-4}" font-size="8" font-weight="600" fill="${c}" text-anchor="middle">${d.pct}%</text><text x="${x+bw/2}" y="${h+14}" font-size="9" fill="var(--muted)" text-anchor="middle">${d.name}</text>`});
   svg+='</svg>';document.getElementById('trendChart').innerHTML=toggle+svg;
 }
-// 月度出勤趋势折线图（v2026.08.14.42）
-function renderMonthTrendChart(en){
+// 月度出勤趋势折线图（v2026.08.14.45）
+async function renderMonthTrendChart(en){
   const el=document.getElementById('monthTrendChart');const labelEl=document.getElementById('monthTrendLabel');
   if(!el)return;
   const now=new Date(),y=now.getFullYear(),m=now.getMonth();
   const daysInMonth=new Date(y,m+1,0).getDate();
   const td=tdStr(),monthStr=`${y}-${String(m+1).padStart(2,'0')}`;
   labelEl.textContent=`${y}年${m+1}月`;
+  // 先加载本月所有日期的 punches 数据（趋势图需要整月数据）
+  if(fbReady){
+    for(let d=1;d<=daysInMonth;d++){
+      const ds=`${y}-${String(m+1).padStart(2,'0')}-${String(d).padStart(2,'0')}`;
+      if(ds<=td)await ensurePunchesForDate(ds);
+    }
+  }
   // 计算每天的出勤率
   const dailyRates=[];
   for(let d=1;d<=daysInMonth;d++){
@@ -5658,7 +5665,7 @@ setMemberPick=function(...args){_origSetMemberPick.apply(this,args);markRenderDi
 
 tick();setInterval(tick,1000);setInterval(renderEmpIfNeeded,3e4);
 // ===== 新版本检测：部署新版后自动提醒用户刷新，避免大家一直跑旧代码 =====
-const APP_VERSION='v2026.08.14.45';
+const APP_VERSION='v2026.08.14.46';
 let _newVerNotified=false;
 async function checkAppVersion(){
   if(_newVerNotified)return;
