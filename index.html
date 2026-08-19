@@ -3871,10 +3871,13 @@ function renderPerformanceAdmin(){
 // ===== 绩效指标自动计算：从打卡/选班/请假/补卡数据实时统计 =====
 function calcMonthMetrics(mid, monthStr) {
   let workDays = 0, workHours = 0, lateCount = 0, missCount = 0;
+  // 当月只统计到今天为止的数据，未来排班不计入
+  const todayStr = tdStr();
+  const isCurrentMonth = monthStr === todayStr.slice(0, 7);
 
-  // 统计已批准的请假天数（按记录条数，每条代表一天）
+  // 统计已批准的请假天数（按记录条数，每条代表一天）；当月只计到今天的请假
   const approvedLeaves = leaves.filter(l =>
-    +l.mid === +mid && l.status === 'approved' && (l.date || '').slice(0, 7) === monthStr
+    +l.mid === +mid && l.status === 'approved' && (l.date || '').slice(0, 7) === monthStr && (!isCurrentMonth || l.date <= todayStr)
   );
   const leaveDays = approvedLeaves.length;
   // 用于快速判断某班次是否被已批准请假覆盖
@@ -3887,6 +3890,8 @@ function calcMonthMetrics(mid, monthStr) {
 
   Object.keys(picks).forEach(ds => {
     if (ds.slice(0, 7) !== monthStr) return;
+    // 当月只统计到今天，跳过未来日期
+    if (isCurrentMonth && ds > todayStr) return;
     const shiftIds = picks[ds] && picks[ds][mid];
     if (!Array.isArray(shiftIds) || !shiftIds.length) return;
 
@@ -5609,7 +5614,7 @@ setMemberPick=function(...args){_origSetMemberPick.apply(this,args);markRenderDi
 
 tick();setInterval(tick,1000);setInterval(renderEmpIfNeeded,3e4);
 // ===== 新版本检测：部署新版后自动提醒用户刷新，避免大家一直跑旧代码 =====
-const APP_VERSION='v2026.08.14.43';
+const APP_VERSION='v2026.08.14.44';
 let _newVerNotified=false;
 async function checkAppVersion(){
   if(_newVerNotified)return;
