@@ -1126,7 +1126,7 @@ function addDays(d,n){const r=new Date(d);r.setDate(r.getDate()+n);return r}
 function weekStartOf(date){const d=new Date(date.getFullYear(),date.getMonth(),date.getDate());const diff=(d.getDay()-selCfg.weekStartDay+7)%7;return addDays(d,-diff)}
 function weekDaysArr(startDate){const a=[];for(let i=0;i<7;i++)a.push(addDays(startDate,i));return a}
 // 某个选班周的"开放选班"时间戳（该周起始日之前最近的 openDay openHour）
-function selectionOpenTs(weekStartDate){let daysBefore=(selCfg.weekStartDay-selCfg.openDay+7)%7;if(daysBefore===0)daysBefore=7;const open=addDays(weekStartDate,-daysBefore);open.setHours(selCfg.openHour,0,0,0);return open.getTime()}
+function selectionOpenTs(weekStartDate){let daysBefore=(selCfg.weekStartDay-selCfg.openDay+7)%7;if(daysBefore===0)daysBefore=7;const open=addDays(weekStartDate,-daysBefore);const oh=+selCfg.openHour||0;const h=Math.floor(oh),m=Math.round((oh-h)*60);open.setHours(h,m,0,0);return open.getTime()}
 function isSelectionOpen(weekStartDate){return Date.now()>=selectionOpenTs(weekStartDate)}
 // isAdminNow() is defined in SECURITY MODULE with enhanced token verification
 // 员工能否编辑某天：管理员随时可改；否则需选班已开放、未锁定、且不是过去的日期；员工一旦保存了某天的选班就锁死，只能换班或管理员后台改
@@ -2724,7 +2724,7 @@ function renderPickView(){
   let banner;
   if(selCfg.lock){banner=`<div class="sel-banner lock"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg><div>选班已被管理员锁定，暂时无法修改${admin?'（你是管理员，仍可编辑）':''}</div></div>`;}
   else if(isSelectionOpen(ws)){banner=`<div class="sel-banner open"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M20 6 9 17l-5-5"/></svg><div>选班开放中 · 可修改<b>今天及以后</b>的班次，过去的日期已锁定</div></div>`;}
-  else{const ots=selectionOpenTs(ws);banner=`<div class="sel-banner wait"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg><div>本周班次将于 <b>${WD_NAMES[selCfg.openDay]==='日'?'周日':'周'+WD_NAMES[selCfg.openDay]} ${String(selCfg.openHour).padStart(2,'0')}:00</b> 开放选择，还有 <b>${fmtCountdown(ots)}</b>${admin?'（你是管理员，仍可编辑）':''}</div></div>`;}
+  else{const ots=selectionOpenTs(ws);const oh=+selCfg.openHour||0;const ohH=Math.floor(oh),ohM=Math.round((oh-ohH)*60);banner=`<div class="sel-banner wait"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg><div>本周班次将于 <b>${WD_NAMES[selCfg.openDay]==='日'?'周日':'周'+WD_NAMES[selCfg.openDay]} ${String(ohH).padStart(2,'0')}:${String(ohM).padStart(2,'0')}</b> 开放选择，还有 <b>${fmtCountdown(ots)}</b>${admin?'（你是管理员，仍可编辑）':''}</div></div>`;}
   let html=banner;
   html+=rulesBlockHtml();
   html+=`<div class="week-switch"><button class="${pickWeekOffset===0?'active':''}" onclick="setPickWeek(0)">本周</button><button class="${pickWeekOffset===1?'active':''}" onclick="setPickWeek(1)">下周</button></div>`;
@@ -4280,7 +4280,7 @@ async function clearSingleSlotCap(){
 function renderSelection(){
   // 规则选择器回填
   const ohSel=document.getElementById('selOpenHour');
-  if(ohSel&&!ohSel.options.length){let o='';for(let i=0;i<24;i++)o+=`<option value="${i}">${String(i).padStart(2,'0')}:00</option>`;ohSel.innerHTML=o}
+  if(ohSel&&!ohSel.options.length){let o='';for(let h=0;h<24;h++){o+=`<option value="${h}">${String(h).padStart(2,'0')}:00</option>`;o+=`<option value="${h}.5">${String(h).padStart(2,'0')}:30</option>`}ohSel.innerHTML=o}
   document.getElementById('selOpenDay').value=String(selCfg.openDay);
   document.getElementById('selOpenHour').value=String(selCfg.openHour);
   document.getElementById('selWeekStart').value=String(selCfg.weekStartDay);
@@ -4289,7 +4289,8 @@ function renderSelection(){
   document.getElementById('selAmShift').value=String(+selCfg.amShiftId||7);
   document.getElementById('selPmShift').value=String(+selCfg.pmShiftId||25);
   const wdLabel=d=>d===0?'周日':'周'+WD_NAMES[d];
-  document.getElementById('selCfgHint').textContent=`每${wdLabel(selCfg.openDay)} ${String(selCfg.openHour).padStart(2,'0')}:00 开放选择，员工选取从${wdLabel(selCfg.weekStartDay)}起的一整周班次`;
+  const oh=+selCfg.openHour||0;const ohH=Math.floor(oh),ohM=Math.round((oh-ohH)*60);
+  document.getElementById('selCfgHint').textContent=`每${wdLabel(selCfg.openDay)} ${String(ohH).padStart(2,'0')}:${String(ohM).padStart(2,'0')} 开放选择，员工选取从${wdLabel(selCfg.weekStartDay)}起的一整周班次`;
   const lockBtn=document.getElementById('selLockBtn');lockBtn.textContent=selCfg.lock?'🔒 已锁定 · 点击开放':'🔓 开放中 · 点击锁定';
   const curWs=weekStartOf(new Date()),ws=addDays(curWs,adminSelWeekOffset*7);
   const open=isSelectionOpen(ws);
@@ -5619,7 +5620,7 @@ setMemberPick=function(...args){_origSetMemberPick.apply(this,args);markRenderDi
 
 tick();setInterval(tick,1000);setInterval(renderEmpIfNeeded,3e4);
 // ===== 新版本检测：部署新版后自动提醒用户刷新，避免大家一直跑旧代码 =====
-const APP_VERSION='v2026.08.14.49';
+const APP_VERSION='v2026.08.14.50';
 let _newVerNotified=false;
 async function checkAppVersion(){
   if(_newVerNotified)return;
