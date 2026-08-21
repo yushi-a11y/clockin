@@ -2577,7 +2577,12 @@ async function reconcilePicks(){
   return false;
 }
 async function togglePickSlot(dateStr,sid){
-  if(!dayEditable(dateStr))return;
+  if(!dayEditable(dateStr)){
+    if(selCfg.lock)showToast('选班已锁定，无法修改');
+    else if(dateStr<tdStr())showToast('过去的日期无法选班');
+    else showToast('选班尚未开放');
+    return;
+  }
   // Validate inputs
   if(!isValidDate(dateStr)){logSecurityEvent('invalid_pick_date','Invalid date: '+dateStr);return}
   if(!isValidShiftId(sid)){logSecurityEvent('invalid_pick_shift','Invalid shift: '+sid);return}
@@ -2620,12 +2625,9 @@ async function togglePickSlot(dateStr,sid){
       if(res.reason==='full'){showToast(`该时段已满员（${res.count}/${res.cap}），无法选择`)}
       else{showToast(`每天最多选 ${res.max||MAX_PER_DAY} 个时段，当天已有 ${res.count} 个，无法再选`)}
     }else{
-      // 结果不确定（网络波动等，服务器可能其实已存上）：不盲目回滚，
-      // 带重试地强制拉取服务器真相对齐，杜绝"界面显示已选、服务器其实没存"的分家
-      showToast('网络波动，正在为你核对保存结果…');
-      const reconciled=await reconcilePicks();
-      renderPickView();
-      if(!reconciled){showToast('网络异常，个别班次可能未保存成功，请刷新页面后确认')}
+      // 网络错误：保留本地乐观更新，提示用户刷新确认
+      // 不调用 reconcilePicks()，避免"刚选上就被旧数据冲掉"
+      showToast('网络不稳定，已暂时保存，请刷新页面确认');
     }
     return;
   }
@@ -5704,7 +5706,7 @@ setMemberPick=function(...args){_origSetMemberPick.apply(this,args);markRenderDi
 
 tick();setInterval(tick,1000);setInterval(renderEmpIfNeeded,3e4);
 // ===== 新版本检测：部署新版后自动提醒用户刷新，避免大家一直跑旧代码 =====
-const APP_VERSION='v2026.08.14.51';
+const APP_VERSION='v2026.08.14.52';
 let _newVerNotified=false;
 async function checkAppVersion(){
   if(_newVerNotified)return;
