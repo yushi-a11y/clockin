@@ -393,6 +393,13 @@
           <button class="btn-s" onclick="applySingleSlotCap()">应用到本周</button>
           <button class="btn-s" onclick="clearSingleSlotCap()">清空(不限)</button>
         </div>
+        <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;padding-top:8px;border-top:1px solid var(--border-light)">
+          <span style="font-weight:600;color:var(--fg)">从历史周期部署：</span>
+          <select id="capHistoryWeek" style="padding:5px 8px;border:1px solid var(--border);border-radius:var(--radius-sm);background:var(--surface);font-size:12px;min-width:140px"><option value="">选择周期</option></select>
+          <button class="btn-s" onclick="previewWeekCap()">预览配置</button>
+          <button class="btn-s" style="background:var(--primary);color:#fff;border:none" onclick="applyWeekCapFromHistory()">一键部署到本周</button>
+        </div>
+        <div id="capHistoryPreview" style="display:none;width:100%;margin-top:8px;padding:10px;background:var(--surface-alt);border-radius:var(--radius-sm);font-size:11px"></div>
       </div>
       <div id="bulkClearBar" style="display:none;margin-bottom:10px;gap:8px;align-items:center;flex-wrap:wrap;font-size:12px;color:var(--muted);background:var(--surface);border:1px solid var(--border-light);border-radius:var(--radius-lg);padding:10px 14px;box-shadow:var(--shadow-sm)">
         <span style="font-weight:600;color:var(--fg)">一键删减班次</span>
@@ -4277,6 +4284,82 @@ async function clearSingleSlotCap(){
   showToast(`本周 ${shiftNameOf(sid)} 已清空（不限人数）`);
   renderSelection();
 }
+// 从历史周期部署人数配置
+function populateCapWeekSelector(){
+  const sel=document.getElementById('capHistoryWeek');
+  if(!sel)return;
+  const curWs=weekStartOf(new Date());
+  const options=['<option value="">选择周期</option>'];
+  // 生成过去 8 周的选项
+  for(let i=1;i<=8;i++){
+    const ws=addDays(curWs,-i*7);
+    const we=addDays(ws,6);
+    const label=`${ws.getMonth()+1}/${ws.getDate()}-${we.getMonth()+1}/${we.getDate()}`;
+    options.push(`<option value="${-i}">${label}（${i}周前）</option>`);
+  }
+  sel.innerHTML=options.join('');
+}
+function getWeekCapData(weekOffset){
+  const curWs=weekStartOf(new Date());
+  const ws=addDays(curWs,weekOffset*7);
+  const days=weekDaysArr(ws);
+  const en=enabledShiftsSorted();
+  const data={};
+  days.forEach(d=>{
+    const ds=ymd(d);
+    data[ds]={};
+    en.forEach(sh=>{
+      const cap=slotCapOf(ds,sh.id);
+      if(cap>0)data[ds][sh.id]=cap;
+    });
+  });
+  return{days,en,data};
+}
+function previewWeekCap(){
+  const offset=+document.getElementById('capHistoryWeek').value;
+  const previewEl=document.getElementById('capHistoryPreview');
+  if(!offset){previewEl.style.display='none';return}
+  const{days,en,data}=getWeekCapData(offset);
+  const ws=days[0],we=days[6];
+  const label=`${ws.getMonth()+1}/${ws.getDate()}-${we.getMonth()+1}/${we.getDate()}`;
+  let html=`<div style="font-weight:600;margin-bottom:6px;color:var(--fg)">${label} 的人数配置：</div>`;
+  let hasData=false;
+  en.forEach(sh=>{
+    const caps=days.map(d=>slotCapOf(ymd(d),sh.id));
+    const uniqueCaps=[...new Set(caps.filter(c=>c>0))];
+    if(uniqueCaps.length>0){
+      hasData=true;
+      const capStr=uniqueCaps.length===1?`${uniqueCaps[0]}人/天`:uniqueCaps.map(c=>`${c}人`).join('/');
+      html+=`<div style="margin:3px 0">${esc(sh.name)}：<b>${capStr}</b></div>`;
+    }
+  });
+  if(!hasData)html+='<div style="color:var(--muted)">该周期未配置人数限制（全部不限）</div>';
+  previewEl.innerHTML=html;
+  previewEl.style.display='block';
+}
+async function applyWeekCapFromHistory(){
+  const offset=+document.getElementById('capHistoryWeek').value;
+  if(!offset){showToast('请先选择周期');return}
+  const{days:srcDays,en,data}=getWeekCapData(offset);
+  const curDays=adminSelWeekDays();
+  if(curDays.length!==srcDays.length){showToast('周期天数不匹配');return}
+  let count=0;
+  curDays.forEach((d,i)=>{
+    const ds=ymd(d);
+    const srcDs=ymd(srcDays[i]);
+    en.forEach(sh=>{
+      const cap=data[srcDs]&&data[srcDs][sh.id];
+      if(cap>0){setSlotCap(ds,sh.id,cap);count++}
+      else{setSlotCap(ds,sh.id,0)}
+    });
+  });
+  sv('csc6',slotCap);await syncSlotCap();
+  const srcWs=srcDays[0],srcWe=srcDays[6];
+  const srcLabel=`${srcWs.getMonth()+1}/${srcWs.getDate()}-${srcWe.getMonth()+1}/${srcWe.getDate()}`;
+  logEvent('人数上限',`从${srcLabel}部署人数配置到本周（${count}项）`);
+  showToast(`已从${srcLabel}部署${count}项人数配置到本周`);
+  renderSelection();
+}
 function renderSelection(){
   // 规则选择器回填
   const ohSel=document.getElementById('selOpenHour');
@@ -4305,6 +4388,7 @@ function renderSelection(){
     if(singleSlotSel&&singleSlotSel.options.length-1!==en.length){
       singleSlotSel.innerHTML='<option value="">选择时段</option>'+en.map(sh=>`<option value="${sh.id}">${esc(sh.name)}</option>`).join('');
     }
+    populateCapWeekSelector();
   }
   const bcb=document.getElementById('bulkClearBar');
   if(bcb){
@@ -5620,7 +5704,7 @@ setMemberPick=function(...args){_origSetMemberPick.apply(this,args);markRenderDi
 
 tick();setInterval(tick,1000);setInterval(renderEmpIfNeeded,3e4);
 // ===== 新版本检测：部署新版后自动提醒用户刷新，避免大家一直跑旧代码 =====
-const APP_VERSION='v2026.08.14.50';
+const APP_VERSION='v2026.08.14.51';
 let _newVerNotified=false;
 async function checkAppVersion(){
   if(_newVerNotified)return;
