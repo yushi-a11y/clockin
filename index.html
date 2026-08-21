@@ -1311,12 +1311,14 @@ function mergeTeamFromCloud(cloudTeam){
 // 从 Supabase 拉取 picks / selcfg / slotcap / forceout 到本地；picks 若有变化则刷新员工视图
 async function pullPicksSelCfg(force){if(!fbReady)return;try{
   const oldPicksSig=JSON.stringify(picks);
-  // [性能] picks_snapshot + 合并 config 请求：原来 8 次请求现为 2 次
-  const [pcR,cfgR]=await Promise.all([
+  // [性能] 4 个相互独立的请求改为并行发起：加载耗时从"4 个请求之和"降为"最慢的那 1 个"
+  const [pcR,scfgR,scR,swcR]=await Promise.all([
     supa.rpc('picks_snapshot'),
-    supa.from('config').select('*').in('id',['selcfg','slotcap','swaps','forceout','makeups','leaves','performances'])
+    supa.from('config').select('*').eq('id','selcfg').maybeSingle(),
+    supa.from('config').select('*').eq('id','slotcap').maybeSingle(),
+    supa.from('config').select('*').eq('id','swaps').maybeSingle()
   ]);
-  const pc=pcR.data;
+  const pc=pcR.data,scfg=scfgR.data,sc=scR.data,swc=swcR.data;
   if(pc?.data&&typeof pc.data==='object'){
     // 竞态防护（纯客户端时钟，规避前后端时钟偏差）：最近 1.5 秒内本地写过选班，
     // 暂不用服务端快照覆盖，避免"在途的旧快照"冲掉刚选/刚取消的班次
@@ -1330,19 +1332,11 @@ async function pullPicksSelCfg(force){if(!fbReady)return;try{
       }
     }
   }
-  // 解析合并的 config 响应
-  if(Array.isArray(cfgR?.data)){
-    cfgR.data.forEach(r=>{
-      if(!r?.data)return;
-      if(r.id==='selcfg'){selCfg=Object.assign({},DEF_SELCFG,r.data);sv('csel6',selCfg)}
-      else if(r.id==='slotcap'){slotCap=r.data;sv('csc6',slotCap)}
-      else if(r.id==='swaps'){swaps=r.data;sv('cswap6',swaps)}
-      else if(r.id==='forceout'){forceout=r.data;sv('cfo6',forceout)}
-      else if(r.id==='makeups'){makeups=r.data;sv('cmkup6',makeups);updateMakeupAdminBadge()}
-      else if(r.id==='leaves'){leaves=r.data;sv('cleave6',leaves)}
-      else if(r.id==='performances'){performances=r.data;sv('cperf6',performances)}
-    });
-  }
+  if(scfg?.data&&typeof scfg.data==='object'){selCfg=Object.assign({},DEF_SELCFG,scfg.data);sv('csel6',selCfg)}
+  if(sc?.data&&typeof sc.data==='object'){slotCap=sc.data;sv('csc6',slotCap)}
+  if(swc?.data&&Array.isArray(swc.data)){swaps=swc.data;sv('cswap6',swaps)}
+  // [性能] 三个子拉取互不依赖，同样并行
+  await Promise.all([fetchLeavesConfig(),syncPullMakeups(),syncForceOut(),fetchPerformancesConfig()]);
   // picks 发生变化 → 员工端打卡/选班页必须立刻反映(管理员后台加班次等场景)
   if(JSON.stringify(picks)!==oldPicksSig&&selectedMember){
     syncSelectedMember();
@@ -1353,22 +1347,18 @@ async function initFBListeners(){
   if(!fbReady)return;
   document.getElementById('syncBadge').className='sync-badge on';document.getElementById('syncBadge').innerHTML='<span class="dot"></span>已同步';
   try{
-    // [性能] 启动请求并行发起 + 合并 config 请求
-    const [claimR,punchR,cfgR]=await Promise.all([
+    // [性能] 启动的 4 个请求改为并行发起：加载耗时从"4 个请求之和"降为"最慢的那 1 个"
+    const [claimR,punchR,shiftR,teamR]=await Promise.all([
       supa.from('claims').select('*'),
       supa.from('punches').select('*').eq('date',tdStr()),
-      supa.from('config').select('*').in('id',['shifts','team'])
+      supa.from('config').select('*').eq('id','shifts').maybeSingle(),
+      supa.from('config').select('*').eq('id','team').maybeSingle()
     ]);
-    const claimRows=claimR.data,punchRows=punchR.data,cfgRows=cfgR.data;
+    const claimRows=claimR.data,punchRows=punchR.data,shiftConfig=shiftR.data,teamConfig=teamR.data;
     claims={};(claimRows||[]).forEach(r=>{if(!isClaimExpired(r))claims[r.id]=r});
     mergeFbPunches(punchRows||[]);
-    if(Array.isArray(cfgRows)){
-      cfgRows.forEach(r=>{
-        if(!r?.data)return;
-        if(r.id==='shifts'){state.shifts=r.data;sv('cv6',state)}
-        else if(r.id==='team'&&!mergeTeamFromCloud(r.data)){logSecurityEvent('malformed_team','Pulled team data failed structure validation')}
-      });
-    }
+    if(shiftConfig?.data){state.shifts=shiftConfig.data;sv('cv6',state)}
+    if(teamConfig?.data&&!mergeTeamFromCloud(teamConfig.data)){logSecurityEvent('malformed_team','Pulled team data failed structure validation')}
     await pullPicksSelCfg();
     prunePicks();
     pruneSlotCap();
@@ -1414,15 +1404,11 @@ async function initFBListeners(){
       }else if(['picks','selcfg','slotcap','swaps','forceout','makeups','leaves'].includes(changedId)){
         await pullPicksSelCfg();
       }else{
-        // 未知 id 或全量事件 → 合并拉取 shifts + team
-        const {data:rows}=await supa.from('config').select('*').in('id',['shifts','team']);
-        if(Array.isArray(rows)){
-          rows.forEach(r=>{
-            if(!r?.data)return;
-            if(r.id==='shifts'){state.shifts=r.data;sv('cv6',state)}
-            else if(r.id==='team')mergeTeamFromCloud(r.data);
-          });
-        }
+        // 未知 id 或全量事件 → 拉全部
+        const {data:sc}=await supa.from('config').select('*').eq('id','shifts').maybeSingle();
+        if(sc?.data){state.shifts=sc.data;sv('cv6',state)}
+        const {data:tc}=await supa.from('config').select('*').eq('id','team').maybeSingle();
+        if(tc?.data)mergeTeamFromCloud(tc.data);
         await pullPicksSelCfg();
       }
       syncSelectedMember();
@@ -1444,64 +1430,31 @@ async function initFBListeners(){
       try{await pullPicksSelCfg();syncSelectedMember();renderAll();refreshEmpAfterSync();}catch(e){}
     },300);
   }).subscribe();
-  // Polling fallback: Realtime 活跃时完全跳过轮询，仅在 Realtime 断开/超时时兜底
-  const POLL_INTERVAL=300000; // Realtime 断开后 5 分钟轮询一次（大幅降低带宽）
-  let pollTimer=null, rtWatchTimer=null;
-  function doPoll(){
-    return (async()=>{
+  // Polling fallback: 60s 轮询一次（兜底 + 定时刷新页面）
+  const POLL_INTERVAL=60000;
+  let pollTimer=null;
+  function schedulePoll(){
+    pollTimer=setTimeout(async()=>{
       try{
         const {data:cr}=await supa.from('claims').select('*');
         claims={};(cr||[]).forEach(r=>{if(!isClaimExpired(r))claims[r.id]=r});
         const {data:pr}=await supa.from('punches').select('*').eq('date',tdStr());
         mergeFbPunches(pr||[]);
-        // 合并 config 请求：一次拉所有配置项（方案3）
-        const cfgIds=['shifts','team','selcfg','slotcap','swaps','forceout','makeups','leaves','performances'];
-        const {data:cfgRows}=await supa.from('config').select('*').in('id',cfgIds);
-        if(Array.isArray(cfgRows)){
-          cfgRows.forEach(r=>{
-            if(!r?.data)return;
-            if(r.id==='shifts'){state.shifts=r.data;sv('cv6',state)}
-            else if(r.id==='team')mergeTeamFromCloud(r.data);
-            else if(r.id==='selcfg'){selCfg=Object.assign({},DEF_SELCFG,r.data);sv('csel6',selCfg)}
-            else if(r.id==='slotcap'){slotCap=r.data;sv('csc6',slotCap)}
-            else if(r.id==='swaps'){swaps=r.data;sv('cswap6',swaps)}
-            else if(r.id==='forceout'){forceout=r.data;sv('cfo6',forceout)}
-            else if(r.id==='makeups'){makeups=r.data;sv('cmkup6',makeups)}
-            else if(r.id==='leaves'){leaves=r.data;sv('cleave6',leaves)}
-            else if(r.id==='performances'){performances=r.data;sv('cperf6',performances)}
-          });
-        }
+        const {data:sc}=await supa.from('config').select('*').eq('id','shifts').maybeSingle();
+        if(sc?.data){state.shifts=sc.data;sv('cv6',state)}
+        const {data:tc}=await supa.from('config').select('*').eq('id','team').maybeSingle();
+        if(tc?.data)mergeTeamFromCloud(tc.data);
+        await pullPicksSelCfg();
         syncSelectedMember();
         renderAll();
         if(document.getElementById('ap-logs')?.classList.contains('active'))renderLogs();
         refreshEmpAfterSync();
         checkForceOut();
       }catch(e){}
-    })();
-  }
-  function schedulePoll(){
-    clearTimeout(pollTimer);
-    pollTimer=setTimeout(async()=>{
-      // 如果 Realtime 恢复了，取消本次轮询
-      if(rtConfigActive&&Date.now()-rtLastHit<120000){startRtWatch();return}
-      await doPoll();
       schedulePoll();
     },POLL_INTERVAL);
   }
-  // Realtime 活跃监视器：每 30s 检查一次，发现 Realtime 超时未活跃则启动兜底轮询
-  function startRtWatch(){
-    clearTimeout(rtWatchTimer);
-    rtWatchTimer=setInterval(()=>{
-      if(!rtConfigActive||Date.now()-rtLastHit>120000){
-        rtConfigActive=false;
-        clearInterval(rtWatchTimer);
-        rtWatchTimer=null;
-        schedulePoll(); // Realtime 断了，启动兜底轮询
-      }
-    },30000);
-  }
-  // 初始化：如果 Realtime 当前活跃，只启动监视器；否则直接启动轮询
-  if(rtConfigActive&&Date.now()-rtLastHit<120000){startRtWatch()}else{schedulePoll()}
+  schedulePoll();
 }
 async function testFBConnection(){
   if(!fbReady){showToast('Supabase 未初始化');return}
@@ -5666,7 +5619,7 @@ setMemberPick=function(...args){_origSetMemberPick.apply(this,args);markRenderDi
 
 tick();setInterval(tick,1000);setInterval(renderEmpIfNeeded,3e4);
 // ===== 新版本检测：部署新版后自动提醒用户刷新，避免大家一直跑旧代码 =====
-const APP_VERSION='v2026.08.14.47';
+const APP_VERSION='v2026.08.14.48';
 let _newVerNotified=false;
 async function checkAppVersion(){
   if(_newVerNotified)return;
