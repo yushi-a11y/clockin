@@ -5652,7 +5652,8 @@ async function exportReport(){
 
 const dz=document.getElementById('dropZone');if(dz){dz.addEventListener('dragover',e=>{e.preventDefault();dz.classList.add('drag')});dz.addEventListener('dragleave',()=>dz.classList.remove('drag'));dz.addEventListener('drop',e=>{e.preventDefault();dz.classList.remove('drag');const f=e.dataTransfer.files[0];if(f){const inp=document.getElementById('fileInput');const dt=new DataTransfer();dt.items.add(f);inp.files=dt.files;handleFile({target:inp})}})}
 
-function tick(){const n=new Date();document.getElementById('liveClock').textContent=`${String(n.getHours()).padStart(2,'0')}:${String(n.getMinutes()).padStart(2,'0')}:${String(n.getSeconds()).padStart(2,'0')}`;document.getElementById('liveDate').textContent=`${n.getFullYear()}年${n.getMonth()+1}月${n.getDate()}日 星期${'日一二三四五六'[n.getDay()]}`}
+let _lastRenderMinute=-1;
+function tick(){const n=new Date();document.getElementById('liveClock').textContent=`${String(n.getHours()).padStart(2,'0')}:${String(n.getMinutes()).padStart(2,'0')}:${String(n.getSeconds()).padStart(2,'0')}`;document.getElementById('liveDate').textContent=`${n.getFullYear()}年${n.getMonth()+1}月${n.getDate()}日 星期${'日一二三四五六'[n.getDay()]}`;const curMin=n.getHours()*60+n.getMinutes();if(curMin!==_lastRenderMinute){_lastRenderMinute=curMin;if(empTab==='punch')markRenderDirty()}}
 function renderAll(){renderEmp();if(document.getElementById('pg-admin').classList.contains('active')){renderAdmin();renderBindingStatus()}}
 
 // 渲染优化：脏标记机制，避免无数据变化时的全量重渲染（v2026.08.14.39）
@@ -5665,7 +5666,7 @@ setMemberPick=function(...args){_origSetMemberPick.apply(this,args);markRenderDi
 
 tick();setInterval(tick,1000);setInterval(renderEmpIfNeeded,3e4);
 // ===== 新版本检测：部署新版后自动提醒用户刷新，避免大家一直跑旧代码 =====
-const APP_VERSION='v2026.08.14.46';
+const APP_VERSION='v2026.08.14.47';
 let _newVerNotified=false;
 async function checkAppVersion(){
   if(_newVerNotified)return;
