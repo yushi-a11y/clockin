@@ -8,7 +8,7 @@ from pathlib import Path
 from playwright.async_api import async_playwright, expect
 
 ROOT = Path(__file__).resolve().parent.parent
-BASE_URL = 'http://127.0.0.1:8765/index.html'
+BASE_URL = 'http://127.0.0.1:9876/index.html'
 SCREENSHOTS = ROOT / 'test_outputs'
 SCREENSHOTS.mkdir(exist_ok=True)
 
@@ -175,7 +175,7 @@ async def run():
         page = await context.new_page()
         # 外部 CDN（字体、Supabase、Tesseract、xlsx）在部分网络下加载缓慢，测试只依赖本地资源
         await page.route('**/*', lambda route: route.continue_()
-                        if route.request.url.startswith('http://127.0.0.1:8765/')
+                        if route.request.url.startswith('http://127.0.0.1:9876/')
                         else route.abort())
         try:
             await setup_picks(page)

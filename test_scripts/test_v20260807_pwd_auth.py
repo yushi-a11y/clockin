@@ -12,7 +12,7 @@ from pathlib import Path
 from playwright.async_api import async_playwright
 
 ROOT = Path(__file__).resolve().parent.parent
-BASE_URL = 'http://127.0.0.1:8765/index.html'
+BASE_URL = 'http://127.0.0.1:9876/index.html'
 SHOTS = ROOT / 'test_outputs'
 SHOTS.mkdir(exist_ok=True)
 
