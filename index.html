@@ -1430,8 +1430,8 @@ async function initFBListeners(){
       try{await pullPicksSelCfg();syncSelectedMember();renderAll();refreshEmpAfterSync();}catch(e){}
     },300);
   }).subscribe();
-  // Polling fallback: 60s 轮询一次（兜底 + 定时刷新页面）
-  const POLL_INTERVAL=60000;
+  // Polling: 30s 轮询一次（数据同步 + 定时刷新页面）
+  const POLL_INTERVAL=30000;
   let pollTimer=null;
   function schedulePoll(){
     pollTimer=setTimeout(async()=>{
@@ -5619,7 +5619,7 @@ setMemberPick=function(...args){_origSetMemberPick.apply(this,args);markRenderDi
 
 tick();setInterval(tick,1000);setInterval(renderEmpIfNeeded,3e4);
 // ===== 新版本检测：部署新版后自动提醒用户刷新，避免大家一直跑旧代码 =====
-const APP_VERSION='v2026.08.14.48';
+const APP_VERSION='v2026.08.14.49';
 let _newVerNotified=false;
 async function checkAppVersion(){
   if(_newVerNotified)return;
