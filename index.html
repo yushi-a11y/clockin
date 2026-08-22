@@ -1813,20 +1813,23 @@ async function checkReminders(){
   const log=reminderLog();
   for(const sh of myShifts){
     const {sD,eD}=shiftDateTimes(sh,today);
+    // 按「班次实例」(sid+选班日期) 判断是否已打卡：getAllPunchesForMember 会合并
+    // D-1/D/D+1 三天记录，若只按 sid 匹配，同一班次昨天那张卡会把今天的提醒误吞
+    // （如连续两晚都排 23:00-00:00）。与 ss()/doPunch 保持同一套实例匹配口径。
+    const hasStart=!!instPunch(punches,sh,today,'s');
+    const hasEnd=!!instPunch(punches,sh,today,'e');
     const startKey=reminderLogKey(today,sh.id,'s');
-    if(!punches.find(p=>p.sid===sh.id&&p.t==='s') && now.getTime()>=sD.getTime()-leadMs && now.getTime()<=sD.getTime() && !log[startKey]){
+    if(!hasStart && now.getTime()>=sD.getTime()-leadMs && now.getTime()<=sD.getTime() && !log[startKey]){
       notifyReminder('⏰ 即将开始上班',`${sh.name} 还有 ${REMINDER_LEAD_MIN} 分钟开始，请准备打上班卡`);
       markReminded(startKey);
     }
     const endKey=reminderLogKey(today,sh.id,'e');
-    if(!punches.find(p=>p.sid===sh.id&&p.t==='e') && now.getTime()>=eD.getTime()-leadMs && now.getTime()<=eD.getTime() && !log[endKey]){
+    if(!hasEnd && now.getTime()>=eD.getTime()-leadMs && now.getTime()<=eD.getTime() && !log[endKey]){
       notifyReminder('⏰ 即将下班',`${sh.name} 还有 ${REMINDER_LEAD_MIN} 分钟结束，请准备打下班卡`);
       markReminded(endKey);
     }
     // 班次结束后缺卡提醒
     if(now.getTime()>eD.getTime()){
-      const hasStart=!!punches.find(p=>p.sid===sh.id&&p.t==='s');
-      const hasEnd=!!punches.find(p=>p.sid===sh.id&&p.t==='e');
       if(!hasStart){
         const missStartKey=reminderLogKey(today,sh.id,'miss_s');
         if(!log[missStartKey]){
@@ -1853,8 +1856,8 @@ async function checkReminders(){
   for(const sh of yesterdayShifts){
     const {sD,eD}=shiftDateTimes(sh,yesterday);
     if(now.getTime()>eD.getTime()){
-      const hasStart=!!punches.find(p=>p.sid===sh.id&&p.t==='s');
-      const hasEnd=!!punches.find(p=>p.sid===sh.id&&p.t==='e');
+      const hasStart=!!instPunch(punches,sh,yesterday,'s');
+      const hasEnd=!!instPunch(punches,sh,yesterday,'e');
       if(!hasStart){
         const missStartKey=reminderLogKey(yesterday,sh.id,'miss_s');
         if(!log[missStartKey]){
@@ -5706,7 +5709,7 @@ setMemberPick=function(...args){_origSetMemberPick.apply(this,args);markRenderDi
 
 tick();setInterval(tick,1000);setInterval(renderEmpIfNeeded,3e4);
 // ===== 新版本检测：部署新版后自动提醒用户刷新，避免大家一直跑旧代码 =====
-const APP_VERSION='v2026.08.14.52';
+const APP_VERSION='v2026.08.14.53';
 let _newVerNotified=false;
 async function checkAppVersion(){
   if(_newVerNotified)return;

@@ -9,7 +9,11 @@ async def test_resolve_punch_action():
         
         url = "http://127.0.0.1:9876/index.html"
         print(f"Opening {url}...")
-        await page.goto(url, wait_until="networkidle", timeout=30000)
+        # 外部 CDN（字体、Supabase、Tesseract、xlsx）在部分网络下加载缓慢，测试只依赖本地资源
+        await page.route('**/*', lambda route: route.continue_()
+                         if route.request.url.startswith('http://127.0.0.1:9876/')
+                         else route.abort())
+        await page.goto(url, wait_until="domcontentloaded", timeout=30000)
         await page.wait_for_timeout(3000)
         
         # Test resolvePunchAction with various scenarios
