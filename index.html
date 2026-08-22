@@ -1276,32 +1276,69 @@ async function syncLocCfg(){if(!fbReady)return;try{await supa.from('config').ups
 // 打卡时优先用缓存，无缓存再做一次短超时尝试；失败则正常打卡、只是不带定位。
 let _locCache=null;      // {lat,lng,acc,ts}
 let _locPrefetching=false;
+let _locDenied=false;    // 浏览器定位授权被拒绝（平台层无法禁止员工点拒绝，故标记并告知管理员）
 const LOC_FRESH_MS=5*60*1000; // 缓存新鲜窗口：5 分钟内直接复用
+const LOC_SAME_KM=0.3;   // 首尾对比「同地」判定阈值（参考值，300 米）
 function _locReadPosition(){
+  // 解析为 {loc:{lat,lng,acc,ts}} 或 {err:code}（1=拒绝授权 2=不可用 3=超时）
   return new Promise(res=>{
     try{
-      if(!navigator.geolocation)return res(null);
+      if(!navigator.geolocation)return res({err:2});
       navigator.geolocation.getCurrentPosition(
-        p=>{try{res({lat:+p.coords.latitude.toFixed(6),lng:+p.coords.longitude.toFixed(6),acc:Math.round(p.coords.accuracy||0),ts:Date.now()})}catch(e){res(null)}},
-        ()=>res(null),
+        p=>{try{res({loc:{lat:+p.coords.latitude.toFixed(6),lng:+p.coords.longitude.toFixed(6),acc:Math.round(p.coords.accuracy||0),ts:Date.now()}})}catch(e){res({err:2})}},
+        er=>res({err:(er&&er.code)||2}),
         {enableHighAccuracy:false,timeout:8000,maximumAge:180000}
       );
-    }catch(e){res(null)}
+    }catch(e){res({err:2})}
   });
 }
-// 预取：员工打卡页渲染时调用；缓存新鲜或正在获取中则直接返回（幂等、低成本）
-async function ensureLocPrefetch(){
-  if(_locCache&&Date.now()-_locCache.ts<LOC_FRESH_MS)return;
-  if(_locPrefetching)return;
-  _locPrefetching=true;
-  try{const lc=await _locReadPosition();if(lc)_locCache=lc}catch(e){}finally{_locPrefetching=false}
+function _setLocDenied(){
+  if(_locDenied)return;
+  _locDenied=true;
+  if(selectedMember&&locEnabledFor(selectedMember.id))renderEmp(); // 立即显示红色警示
 }
-// 打卡附加定位：缓存新鲜直接用；否则再取一次并与 2.5s 超时赛跑，失败返回 null（永不抛错）
+// 预取：员工打卡页渲染时调用；缓存新鲜/正在获取/已知拒绝则直接返回（幂等、低成本）
+async function ensureLocPrefetch(){
+  if(_locDenied||(_locCache&&Date.now()-_locCache.ts<LOC_FRESH_MS)||_locPrefetching)return;
+  // 先问 Permissions API（不触发弹窗）：此前已拒绝则直接标记，不再请求
+  try{
+    if(navigator.permissions&&navigator.permissions.query){
+      const st=await navigator.permissions.query({name:'geolocation'});
+      if(st.state==='denied'){_setLocDenied();return}
+    }
+  }catch(e){}
+  _locPrefetching=true;
+  try{const r=await _locReadPosition();if(r.loc)_locCache=r.loc;else if(r.err===1)_setLocDenied()}finally{_locPrefetching=false}
+}
+// 打卡附加定位：缓存新鲜直接用；否则再取一次并与 2.5s 超时赛跑；
+// 返回 {loc,denied}，永不抛错
 async function getPunchLoc(){
-  if(_locCache&&Date.now()-_locCache.ts<LOC_FRESH_MS)return _locCache;
-  const lc=await Promise.race([_locReadPosition(),new Promise(res=>setTimeout(()=>res(null),2500))]);
-  if(lc)_locCache=lc;
-  return lc;
+  if(_locDenied)return{loc:null,denied:true};
+  if(_locCache&&Date.now()-_locCache.ts<LOC_FRESH_MS)return{loc:_locCache,denied:false};
+  const r=await Promise.race([_locReadPosition(),new Promise(res=>setTimeout(()=>res({err:3}),2500))]);
+  if(r.loc){_locCache=r.loc;return{loc:r.loc,denied:false}}
+  if(r.err===1)_setLocDenied();
+  return{loc:null,denied:r.err===1};
+}
+// 两坐标球面距离（km），管理端首尾对比用
+function locDistanceKm(a,b){
+  const rad=Math.PI/180,R=6371;
+  const dLat=(b.lat-a.lat)*rad,dLng=(b.lng-a.lng)*rad;
+  const s=Math.sin(dLat/2)**2+Math.cos(a.lat*rad)*Math.cos(b.lat*rad)*Math.sin(dLng/2)**2;
+  return 2*R*Math.asin(Math.sqrt(s));
+}
+// 「末卡」语义：打卡当下无法知道是否当天最后一次，故用"新顶旧"策略——
+// 每次非首卡都附加定位（成为当前"末"），同时剥离上一条"末"的 loc，
+// 最终库里只有 首+末 两条带 loc。剥离失败不影响打卡与对比（展示端按 ts 取首尾）。
+function stripPrevLastLoc(td,mid){
+  const day=(state.punches&&state.punches[td])||[];
+  const withLoc=day.filter(r=>r.mid===mid&&r.loc&&r.loc!=='DENIED').sort((a,b)=>(a.ts||0)-(b.ts||0));
+  if(withLoc.length<2)return; // 只有「首」带 loc：保留，新卡自然成为「末」
+  const prevLast=withLoc[withLoc.length-1];
+  const strip=r=>{const o={...r};delete o.loc;return o};
+  upd(s=>{const p={...s.punches};p[td]=(p[td]||[]).map(r=>(r.mid===mid&&r.ts===prevLast.ts&&r.loc)?strip(r):r);return{...s,punches:p}});
+  fbPunches=fbPunches.map(r=>(r.mid===mid&&r.date===td&&r.ts===prevLast.ts&&r.loc)?strip(r):r);
+  if(fbReady){supa.from('punches').update({loc:null}).eq('mid',mid).eq('date',td).eq('ts',prevLast.ts).then(r=>{if(r.error)console.warn('strip loc:',r.error.message)}).catch(()=>{})}
 }
 // 是否「当天首卡」：本地当日打卡与离线补同步队列中都没有该成员记录（补卡走独立通道，不参与判定）
 function isFirstPunchOfDay(mid,dateStr){
@@ -2349,8 +2386,11 @@ async function renderEmp(){
   html+=`<div class="reminder-setting" style="max-width:420px;margin:10px 0 6px;font-size:12px;color:var(--muted);display:flex;align-items:center;gap:6px"><label style="display:flex;align-items:center;gap:6px;cursor:pointer"><input type="checkbox" ${remChecked} onchange="setReminderEnabled(this.checked)" style="accent-color:var(--primary);width:14px;height:14px"> 班次开始/结束前 5 分钟提醒我打卡</label></div>`;
   if(selectedMember&&locEnabledFor(selectedMember.id)){
     // 透明告知 + 静默预取定位（打卡时直接用缓存，不等待）
-    html+=`<div style="max-width:420px;margin:0 0 6px;font-size:12px;color:var(--muted-light);display:flex;align-items:center;gap:6px"><svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0 1 18 0z"/><circle cx="12" cy="10" r="3"/></svg>每天第一次打卡时会记录当前位置（管理员可见）</div>`;
+    html+=`<div style="max-width:420px;margin:0 0 6px;font-size:12px;color:var(--muted-light);display:flex;align-items:center;gap:6px"><svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0 1 18 0z"/><circle cx="12" cy="10" r="3"/></svg>每天第一次和最后一次打卡时会记录当前位置，两次位置自动对比供管理员核对（管理员可见）</div>`;
     ensureLocPrefetch();
+    if(_locDenied){
+      html+=`<div style="max-width:420px;margin:0 0 6px;padding:8px 10px;border:1px solid var(--danger);background:var(--danger-soft);border-radius:8px;font-size:12px;color:var(--danger);line-height:1.6">公司考勤要求开启定位：检测到你的浏览器当前拒绝了定位授权，打卡记录将被标记「未授权」并提示管理员。请在浏览器设置中允许本网站使用位置后刷新页面。</div>`;
+    }
   }
   html+='<div class="sec-t">我的班次</div>';
   items.forEach(it=>{
@@ -2407,10 +2447,19 @@ async function doPunch(){
   // sd = 班次实例的选班日期：跨天班次的下班卡 date 是次日，靠 sd 才能认回正确的那一次实例
   const pd={sid:action.sh.id,t:action.t,time,ts:n.getTime(),mid:selectedMember.id,date:td,name:selectedMember.name,sd:action.sd||td};
   if(isOfflinePunch)pd.offline=true;
-  // 首卡定位（两层灰度开关控制）：只附加在主卡上；获取失败/拒绝授权则不带定位，
+  // 首/末卡定位（两层灰度开关控制）：只附加在主卡上；获取失败/拒绝授权则不带定位，
   // 永远不阻塞打卡动作本身
-  if(locEnabledFor(selectedMember.id)&&isFirstPunchOfDay(selectedMember.id,td)){
-    try{const lc=await getPunchLoc();if(lc)pd.loc=`${lc.lat},${lc.lng},${lc.acc||0}`}catch(e){}
+  if(locEnabledFor(selectedMember.id)){
+    try{
+      if(isFirstPunchOfDay(selectedMember.id,td)){
+        const r=await getPunchLoc();
+        if(r.loc)pd.loc=`${r.loc.lat},${r.loc.lng},${r.loc.acc||0}`;
+        else if(r.denied){pd.loc='DENIED';logEvent('定位未授权',`${selectedMember.name} 首卡时拒绝定位授权，考勤已标记「未授权」`)}
+      }else{
+        const r=await getPunchLoc();
+        if(r.loc){pd.loc=`${r.loc.lat},${r.loc.lng},${r.loc.acc||0}`;stripPrevLastLoc(td,selectedMember.id)}
+      }
+    }catch(e){}
   }
   // Save locally (including shared punch for consecutive chain handover)
   const pdList=[pd];
@@ -5114,17 +5163,30 @@ function renderTable(q,en,td){
     const allOk=myS.length>0&&okC===myS.length;
     const c=clr(m.id);
     const claimed=fbReady&&claims[m.id];
-    // 首卡定位：mp 含 D-1/D/D+1 打卡，只取 date===td 且带 loc 的最早一条
-    let locLink='';
+    // 首/末卡定位：mp 含 D-1/D/D+1 打卡，只取 date===td 且带 loc 的记录
+    let locHtml='';
     const dayLocRecs=mp.filter(r=>r.date===td&&r.loc);
     if(dayLocRecs.length){
-      const firstRec=dayLocRecs.reduce((a,b)=>((a.ts||0)<=(b.ts||0)?a:b));
-      const lo=parseLoc(firstRec);
-      if(lo){locLink=` <a href="https://www.openstreetmap.org/?mlat=${lo.lat}&mlon=${lo.lng}#map=16/${lo.lat}/${lo.lng}" target="_blank" rel="noopener" title="首卡定位 · ${esc(firstRec.time||'')}${lo.acc?' · 精度±'+lo.acc+'m':''}" style="text-decoration:none">📍</a>`}
+      if(dayLocRecs.some(r=>r.loc==='DENIED')){
+        locHtml+=` <span title="该成员拒绝定位授权，已提示管理员" style="font-size:10px;color:var(--danger)">⚠未授权</span>`;
+      }
+      const geo=dayLocRecs.filter(r=>parseLoc(r)).sort((a,b)=>(a.ts||0)-(b.ts||0));
+      if(geo.length){
+        const firstRec=geo[0],lastRec=geo[geo.length-1];
+        const mkLink=(rec,tag)=>{const lo=parseLoc(rec);return ` <a href="https://www.openstreetmap.org/?mlat=${lo.lat}&mlon=${lo.lng}#map=16/${lo.lat}/${lo.lng}" target="_blank" rel="noopener" title="${tag}卡定位 · ${esc(rec.time||'')}${lo.acc?' · 精度±'+lo.acc+'m':''}" style="text-decoration:none">📍${tag}</a>`};
+        locHtml+=mkLink(firstRec,'首');
+        if(lastRec.ts!==firstRec.ts){
+          locHtml+=mkLink(lastRec,'末');
+          const d=locDistanceKm(parseLoc(firstRec),parseLoc(lastRec));
+          locHtml+=d<=LOC_SAME_KM
+            ?` <span title="首尾相距约${Math.round(d*1000)}米" style="font-size:10px;color:var(--success)">同地</span>`
+            :` <span title="首尾定位不一致（参考阈值${LOC_SAME_KM*1000}米）" style="font-size:10px;color:var(--warning)">异地≈${d<1?Math.round(d*1000)+'m':d.toFixed(1)+'km'}</span>`;
+        }
+      }
     }
     const missCell=totalMiss?`<span class="mono warn">${totalMiss}</span><div style="font-size:10px;color:var(--danger);line-height:1.5;margin-top:2px">${[...missDetails,...activeMissDetails].map(d=>esc(d)).join('<br>')}</div>`:`<span class="mono">0</span>`;
     const statusBadge=myS.length===0?'<span class="badge b-wait">无排班</span>':allOk?'<span class="badge b-ok">正常</span>':totalMiss?'<span class="badge b-miss">缺卡</span>':'<span class="badge b-wait">进行中</span>';
-    h+=`<tr><td><div class="u-cell"><div class="u-av" style="background:${c.bg};color:${c.fg}">${m.name[0]}</div><div><div style="font-weight:500">${esc(m.name)}${claimed?' <span style="font-size:9px;color:var(--success)">● 在线</span>':''}${locLink}</div><div style="font-size:10px;color:var(--muted)">${esc(m.dept)}</div></div></div></td><td class="mono">${myS.length}个</td><td class="mono">${okC}</td><td style="vertical-align:top">${missCell}</td><td>${statusBadge}</td></tr>`;
+    h+=`<tr><td><div class="u-cell"><div class="u-av" style="background:${c.bg};color:${c.fg}">${m.name[0]}</div><div><div style="font-weight:500">${esc(m.name)}${claimed?' <span style="font-size:9px;color:var(--success)">● 在线</span>':''}${locHtml}</div><div style="font-size:10px;color:var(--muted)">${esc(m.dept)}</div></div></div></td><td class="mono">${myS.length}个</td><td class="mono">${okC}</td><td style="vertical-align:top">${missCell}</td><td>${statusBadge}</td></tr>`;
   });
   h+='</tbody></table>';document.getElementById('tableBody').innerHTML=h;
 }
@@ -5146,7 +5208,7 @@ function renderMembers(){
     <div style="display:flex;align-items:center;justify-content:space-between;gap:10px">
       <div style="display:flex;align-items:center;gap:10px">
         <div class="rc-ico" style="background:var(--surface-alt);color:var(--muted)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0 1 18 0z"/><circle cx="12" cy="10" r="3"/></svg></div>
-        <div><div class="rc-name">首卡定位记录</div><div class="rc-desc">成员每天第一次打卡时记录当前位置（考勤表姓名旁 📍 可查看地图）。默认关闭，可按成员灰度开启</div></div>
+        <div><div class="rc-name">首末卡定位记录</div><div class="rc-desc">成员每天第一次和最后一次打卡时记录位置并自动对比（考勤表 📍首/📍末 可查看地图）；拒绝授权将标记「未授权」。默认关闭，可按成员灰度开启</div></div>
       </div>
       <div class="toggle${locCfg.on?' on':''}" onclick="toggleLocMaster()" title="总开关"></div>
     </div>
@@ -5813,7 +5875,7 @@ setMemberPick=function(...args){_origSetMemberPick.apply(this,args);markRenderDi
 
 tick();setInterval(tick,1000);setInterval(renderEmpIfNeeded,3e4);
 // ===== 新版本检测：部署新版后自动提醒用户刷新，避免大家一直跑旧代码 =====
-const APP_VERSION='v2026.08.14.54';
+const APP_VERSION='v2026.08.14.55';
 let _newVerNotified=false;
 async function checkAppVersion(){
   if(_newVerNotified)return;
