@@ -6,10 +6,14 @@ async def test_4_shift_chain():
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=True)
         page = await browser.new_page(viewport={"width": 1280, "height": 900})
-        
+        # 只允许本地资源，避免外部 CDN 拖慢/挂起加载
+        await page.route('**/*', lambda r: r.continue_()
+                         if r.request.url.startswith('http://127.0.0.1:9876/')
+                         else r.abort())
+
         url = "http://127.0.0.1:9876/index.html"
         print(f"Opening {url}...")
-        await page.goto(url, wait_until="networkidle", timeout=30000)
+        await page.goto(url, wait_until="domcontentloaded", timeout=30000)
         await page.wait_for_timeout(3000)
         
         test_results = await page.evaluate("""

@@ -953,6 +953,8 @@ const MAX_PER_WEEK=49;  // 每人整周最多可选/计入有效的时段数
 let picks=ld('cp6',{});
 let selCfg=Object.assign({},DEF_SELCFG,ld('csel6',{}));
 let slotCap=ld('csc6',{});  // 每天每时段需要人数上限 { 'YYYY-MM-DD':{ sid:n } }，无记录=不限
+// 首卡定位配置：on=总开关，members=成员灰度 { [memberId]:true }，两者同时开启才对该成员生效
+let locCfg=Object.assign({on:false,members:{}},ld('cloccfg6',{}));
 let empTab='punch';        // 员工端当前标签：punch=打卡 / pick=选班
 let helpSearch='';         // 帮助中心搜索关键词
 let helpCategory='all';    // 帮助中心当前分类
@@ -1268,6 +1270,54 @@ async function syncPicks(){
 async function syncSelCfg(){if(!fbReady)return;try{await supa.from('config').upsert({id:'selcfg',data:selCfg,updated_at:Date.now()},{onConflict:'id'})}catch(e){console.warn('SelCfg sync error:',e)}}
 async function syncSlotCap(){if(!fbReady)return;try{await supa.from('config').upsert({id:'slotcap',data:slotCap,updated_at:Date.now()},{onConflict:'id'})}catch(e){console.warn('SlotCap sync error:',e)}}
 async function pullSlotCap(){if(!fbReady)return;try{const {data:sc}=await supa.from('config').select('*').eq('id','slotcap').maybeSingle();if(sc?.data&&typeof sc.data==='object'){slotCap=sc.data;sv('csc6',slotCap)}}catch(e){}}
+async function syncLocCfg(){if(!fbReady)return;try{await supa.from('config').upsert({id:'loccfg',data:locCfg,updated_at:Date.now()},{onConflict:'id'})}catch(e){console.warn('LocCfg sync error:',e)}}
+// ===== 首卡定位模块 =====
+// 设计原则：定位绝不阻塞打卡、绝不抛错。打卡页打开即静默预取+短缓存；
+// 打卡时优先用缓存，无缓存再做一次短超时尝试；失败则正常打卡、只是不带定位。
+let _locCache=null;      // {lat,lng,acc,ts}
+let _locPrefetching=false;
+const LOC_FRESH_MS=5*60*1000; // 缓存新鲜窗口：5 分钟内直接复用
+function _locReadPosition(){
+  return new Promise(res=>{
+    try{
+      if(!navigator.geolocation)return res(null);
+      navigator.geolocation.getCurrentPosition(
+        p=>{try{res({lat:+p.coords.latitude.toFixed(6),lng:+p.coords.longitude.toFixed(6),acc:Math.round(p.coords.accuracy||0),ts:Date.now()})}catch(e){res(null)}},
+        ()=>res(null),
+        {enableHighAccuracy:false,timeout:8000,maximumAge:180000}
+      );
+    }catch(e){res(null)}
+  });
+}
+// 预取：员工打卡页渲染时调用；缓存新鲜或正在获取中则直接返回（幂等、低成本）
+async function ensureLocPrefetch(){
+  if(_locCache&&Date.now()-_locCache.ts<LOC_FRESH_MS)return;
+  if(_locPrefetching)return;
+  _locPrefetching=true;
+  try{const lc=await _locReadPosition();if(lc)_locCache=lc}catch(e){}finally{_locPrefetching=false}
+}
+// 打卡附加定位：缓存新鲜直接用；否则再取一次并与 2.5s 超时赛跑，失败返回 null（永不抛错）
+async function getPunchLoc(){
+  if(_locCache&&Date.now()-_locCache.ts<LOC_FRESH_MS)return _locCache;
+  const lc=await Promise.race([_locReadPosition(),new Promise(res=>setTimeout(()=>res(null),2500))]);
+  if(lc)_locCache=lc;
+  return lc;
+}
+// 是否「当天首卡」：本地当日打卡与离线补同步队列中都没有该成员记录（补卡走独立通道，不参与判定）
+function isFirstPunchOfDay(mid,dateStr){
+  if(((state.punches&&state.punches[dateStr])||[]).some(r=>r.mid===mid))return false;
+  if(offlinePunchQueue().some(r=>r.mid===mid&&r.date===dateStr))return false;
+  return true;
+}
+// 两层灰度开关：总开关 && 成员开关 都开启才对该成员生效
+function locEnabledFor(mid){return !!(locCfg&&locCfg.on&&locCfg.members&&locCfg.members[mid])}
+// 解析打卡记录上的定位串 "lat,lng,acc"；非法/缺失返回 null（管理端展示用）
+function parseLoc(rec){
+  if(!rec||typeof rec.loc!=='string')return null;
+  const p=rec.loc.split(',');const lat=parseFloat(p[0]),lng=parseFloat(p[1]);
+  if(!isFinite(lat)||!isFinite(lng)||lat<-90||lat>90||lng<-180||lng>180)return null;
+  return{lat,lng,acc:parseInt(p[2],10)||0};
+}
 // ===== 操作日志：记录所有账号的关键操作到 Supabase logs 表 =====
 // 需在 Supabase 执行：create table logs(id bigserial primary key, ts bigint, account text, role text, action text, detail text, created_at timestamptz default now());
 function currentActor(){
@@ -1318,14 +1368,18 @@ function mergeTeamFromCloud(cloudTeam){
 // 从 Supabase 拉取 picks / selcfg / slotcap / forceout 到本地；picks 若有变化则刷新员工视图
 async function pullPicksSelCfg(force){if(!fbReady)return;try{
   const oldPicksSig=JSON.stringify(picks);
+  const oldLocSig=JSON.stringify(locCfg);
   // [性能] 4 个相互独立的请求改为并行发起：加载耗时从"4 个请求之和"降为"最慢的那 1 个"
+  // selcfg 与 loccfg 合并为同一个 .in 查询，不增加请求数
   const [pcR,scfgR,scR,swcR]=await Promise.all([
     supa.rpc('picks_snapshot'),
-    supa.from('config').select('*').eq('id','selcfg').maybeSingle(),
+    supa.from('config').select('*').in('id',['selcfg','loccfg']),
     supa.from('config').select('*').eq('id','slotcap').maybeSingle(),
     supa.from('config').select('*').eq('id','swaps').maybeSingle()
   ]);
-  const pc=pcR.data,scfg=scfgR.data,sc=scR.data,swc=swcR.data;
+  const pc=pcR.data,cfgRows=Array.isArray(scfgR.data)?scfgR.data:[],sc=scR.data,swc=swcR.data;
+  const scfg=cfgRows.find(r=>r&&r.id==='selcfg')||null;
+  const lcfg=cfgRows.find(r=>r&&r.id==='loccfg')||null;
   if(pc?.data&&typeof pc.data==='object'){
     // 竞态防护（纯客户端时钟，规避前后端时钟偏差）：最近 1.5 秒内本地写过选班，
     // 暂不用服务端快照覆盖，避免"在途的旧快照"冲掉刚选/刚取消的班次
@@ -1340,12 +1394,13 @@ async function pullPicksSelCfg(force){if(!fbReady)return;try{
     }
   }
   if(scfg?.data&&typeof scfg.data==='object'){selCfg=Object.assign({},DEF_SELCFG,scfg.data);sv('csel6',selCfg)}
+  if(lcfg?.data&&typeof lcfg.data==='object'){locCfg=Object.assign({on:false,members:{}},lcfg.data);sv('cloccfg6',locCfg)}
   if(sc?.data&&typeof sc.data==='object'){slotCap=sc.data;sv('csc6',slotCap)}
   if(swc?.data&&Array.isArray(swc.data)){swaps=swc.data;sv('cswap6',swaps)}
   // [性能] 三个子拉取互不依赖，同样并行
   await Promise.all([fetchLeavesConfig(),syncPullMakeups(),syncForceOut(),fetchPerformancesConfig()]);
-  // picks 发生变化 → 员工端打卡/选班页必须立刻反映(管理员后台加班次等场景)
-  if(JSON.stringify(picks)!==oldPicksSig&&selectedMember){
+  // picks/loccfg 发生变化 → 员工端打卡/选班页必须立刻反映(管理员后台加班次/开定位等场景)
+  if((JSON.stringify(picks)!==oldPicksSig||JSON.stringify(locCfg)!==oldLocSig)&&selectedMember){
     syncSelectedMember();
     renderEmp();
   }
@@ -1408,7 +1463,7 @@ async function initFBListeners(){
       }else if(changedId==='team'){
         const {data:tc}=await supa.from('config').select('*').eq('id','team').maybeSingle();
         if(tc?.data)mergeTeamFromCloud(tc.data);
-      }else if(['picks','selcfg','slotcap','swaps','forceout','makeups','leaves'].includes(changedId)){
+      }else if(['picks','selcfg','slotcap','swaps','forceout','makeups','leaves','loccfg'].includes(changedId)){
         await pullPicksSelCfg();
       }else{
         // 未知 id 或全量事件 → 拉全部
@@ -1550,6 +1605,9 @@ async function fbPunch(punchData){
   for(let attempt=0;attempt<3;attempt++){
     // sd / offline 是本地专有字段（punches 表无此列），写云端前统一剔除
     try{await supa.from('punches').insert(_opqSanitize(punchData));return true}catch(e){
+      // 降级保护：若 punches 表尚未添加 loc 列（SQL 未执行），丢弃定位后重试，
+      // 保证打卡本体永远不因定位字段而失败
+      if(punchData.loc){const fb={...punchData};delete fb.loc;try{await supa.from('punches').insert(_opqSanitize(fb));return true}catch(e2){}}
       if(attempt===2){showToast('打卡已保存本地 · 云端同步失败，联网后将自动重试');return false}
       else await new Promise(r=>setTimeout(r,1000*(attempt+1)));
     }
@@ -1582,7 +1640,7 @@ function ensureSupabaseReady(){
 }
 function _opqTimeout(promise,ms){return Promise.race([promise,new Promise((_,rej)=>setTimeout(()=>rej(new Error('网络请求超时')),ms))])}
 // punches 表实际列（见建表脚本）：云端写入前剔除 offline 等非表字段，避免 insert 报错
-const OPQ_PUNCH_COLS=['sid','t','time','ts','mid','date','name','makeup'];
+const OPQ_PUNCH_COLS=['sid','t','time','ts','mid','date','name','makeup','loc'];
 function _opqSanitize(rec){const o={};for(const k of OPQ_PUNCH_COLS){if(rec[k]!==undefined)o[k]=rec[k]}return o}
 async function flushOfflinePunches(silent){
   if(_opqFlushing)return;
@@ -1601,8 +1659,13 @@ async function flushOfflinePunches(silent){
         // 云端去重：同键打卡已存在（可能经其它途径写入）则直接销账
         const {data:ex}=await _opqTimeout(supa.from('punches').select('id').eq('sid',rec.sid).eq('t',rec.t).eq('mid',rec.mid).eq('date',rec.date).limit(1),8000);
         if(ex&&ex.length){dropped++;continue}
-        const {error:insErr}=await _opqTimeout(supa.from('punches').insert(_opqSanitize(rec)),8000);
-        if(insErr){const err=new Error(insErr.message||'insert failed');err.code=insErr.code;throw err}
+        let insRes=await _opqTimeout(supa.from('punches').insert(_opqSanitize(rec)),8000).then(r=>({error:r.error||null})).catch(err=>({error:err}));
+        // 降级保护：loc 列尚未建立时，丢弃定位重试一次，避免整条打卡被误判为永久失败
+        if(insRes.error&&rec.loc){
+          const fb={...rec};delete fb.loc;
+          insRes=await _opqTimeout(supa.from('punches').insert(_opqSanitize(fb)),8000).then(r=>({error:r.error||null})).catch(err=>({error:err}));
+        }
+        if(insRes.error){const err=insRes.error instanceof Error?insRes.error:new Error(insRes.error.message||'insert failed');if(!(err.code)&&insRes.error.code)err.code=insRes.error.code;throw err}
         synced++;
       }catch(e){
         // 带服务端错误码（SQLSTATE/PGRST）= 永久拒绝（如 RLS 日期窗口过期），丢弃并留痕；
@@ -2284,6 +2347,11 @@ async function renderEmp(){
   }
   const remChecked=isReminderEnabled()?'checked':'';
   html+=`<div class="reminder-setting" style="max-width:420px;margin:10px 0 6px;font-size:12px;color:var(--muted);display:flex;align-items:center;gap:6px"><label style="display:flex;align-items:center;gap:6px;cursor:pointer"><input type="checkbox" ${remChecked} onchange="setReminderEnabled(this.checked)" style="accent-color:var(--primary);width:14px;height:14px"> 班次开始/结束前 5 分钟提醒我打卡</label></div>`;
+  if(selectedMember&&locEnabledFor(selectedMember.id)){
+    // 透明告知 + 静默预取定位（打卡时直接用缓存，不等待）
+    html+=`<div style="max-width:420px;margin:0 0 6px;font-size:12px;color:var(--muted-light);display:flex;align-items:center;gap:6px"><svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0 1 18 0z"/><circle cx="12" cy="10" r="3"/></svg>每天第一次打卡时会记录当前位置（管理员可见）</div>`;
+    ensureLocPrefetch();
+  }
   html+='<div class="sec-t">我的班次</div>';
   items.forEach(it=>{
     const sh=it.sh;
@@ -2339,6 +2407,11 @@ async function doPunch(){
   // sd = 班次实例的选班日期：跨天班次的下班卡 date 是次日，靠 sd 才能认回正确的那一次实例
   const pd={sid:action.sh.id,t:action.t,time,ts:n.getTime(),mid:selectedMember.id,date:td,name:selectedMember.name,sd:action.sd||td};
   if(isOfflinePunch)pd.offline=true;
+  // 首卡定位（两层灰度开关控制）：只附加在主卡上；获取失败/拒绝授权则不带定位，
+  // 永远不阻塞打卡动作本身
+  if(locEnabledFor(selectedMember.id)&&isFirstPunchOfDay(selectedMember.id,td)){
+    try{const lc=await getPunchLoc();if(lc)pd.loc=`${lc.lat},${lc.lng},${lc.acc||0}`}catch(e){}
+  }
   // Save locally (including shared punch for consecutive chain handover)
   const pdList=[pd];
   if(action.shared){
@@ -4824,7 +4897,7 @@ async function adminClearAll(){
       const {data:crows}=await supa.from('claims').select('id');
       const cdels=await Promise.all((crows||[]).map(r=>supa.from('claims').delete().eq('id',r.id)));
       cloudFails+=cdels.filter(x=>x.error).length;
-      const configIds=['shifts','team','picks','selcfg','slotcap','swaps','forceout','makeups'];
+      const configIds=['shifts','team','picks','selcfg','slotcap','swaps','forceout','makeups','loccfg'];
       const cfgDels=await Promise.all(configIds.map(cid=>supa.from('config').delete().eq('id',cid)));
       cloudFails+=cfgDels.filter(x=>x.error).length;
     }catch(e){cloudFails++;console.warn('clear cloud data error:',e)}
@@ -4835,6 +4908,7 @@ async function adminClearAll(){
   picks={};sv('cp6',picks);
   selCfg=Object.assign({},DEF_SELCFG);sv('csel6',selCfg);
   slotCap={};sv('csc6',slotCap);
+  locCfg={on:false,members:{}};sv('cloccfg6',locCfg);
   swaps=[];sv('cswap6',swaps);
   makeups=[];sv('cmkup6',makeups);
   forceout={};sv('cfo6',forceout);
@@ -5040,9 +5114,17 @@ function renderTable(q,en,td){
     const allOk=myS.length>0&&okC===myS.length;
     const c=clr(m.id);
     const claimed=fbReady&&claims[m.id];
+    // 首卡定位：mp 含 D-1/D/D+1 打卡，只取 date===td 且带 loc 的最早一条
+    let locLink='';
+    const dayLocRecs=mp.filter(r=>r.date===td&&r.loc);
+    if(dayLocRecs.length){
+      const firstRec=dayLocRecs.reduce((a,b)=>((a.ts||0)<=(b.ts||0)?a:b));
+      const lo=parseLoc(firstRec);
+      if(lo){locLink=` <a href="https://www.openstreetmap.org/?mlat=${lo.lat}&mlon=${lo.lng}#map=16/${lo.lat}/${lo.lng}" target="_blank" rel="noopener" title="首卡定位 · ${esc(firstRec.time||'')}${lo.acc?' · 精度±'+lo.acc+'m':''}" style="text-decoration:none">📍</a>`}
+    }
     const missCell=totalMiss?`<span class="mono warn">${totalMiss}</span><div style="font-size:10px;color:var(--danger);line-height:1.5;margin-top:2px">${[...missDetails,...activeMissDetails].map(d=>esc(d)).join('<br>')}</div>`:`<span class="mono">0</span>`;
     const statusBadge=myS.length===0?'<span class="badge b-wait">无排班</span>':allOk?'<span class="badge b-ok">正常</span>':totalMiss?'<span class="badge b-miss">缺卡</span>':'<span class="badge b-wait">进行中</span>';
-    h+=`<tr><td><div class="u-cell"><div class="u-av" style="background:${c.bg};color:${c.fg}">${m.name[0]}</div><div><div style="font-weight:500">${esc(m.name)}${claimed?' <span style="font-size:9px;color:var(--success)">● 在线</span>':''}</div><div style="font-size:10px;color:var(--muted)">${esc(m.dept)}</div></div></div></td><td class="mono">${myS.length}个</td><td class="mono">${okC}</td><td style="vertical-align:top">${missCell}</td><td>${statusBadge}</td></tr>`;
+    h+=`<tr><td><div class="u-cell"><div class="u-av" style="background:${c.bg};color:${c.fg}">${m.name[0]}</div><div><div style="font-weight:500">${esc(m.name)}${claimed?' <span style="font-size:9px;color:var(--success)">● 在线</span>':''}${locLink}</div><div style="font-size:10px;color:var(--muted)">${esc(m.dept)}</div></div></div></td><td class="mono">${myS.length}个</td><td class="mono">${okC}</td><td style="vertical-align:top">${missCell}</td><td>${statusBadge}</td></tr>`;
   });
   h+='</tbody></table>';document.getElementById('tableBody').innerHTML=h;
 }
@@ -5058,10 +5140,32 @@ function toggleAllShifts(v){upd(s=>({...s,shifts:s.shifts.map(x=>({...x,enabled:
 function renderMembers(){
   const el=document.getElementById('membersList');if(!el)return;
   if(!TEAM.length){el.innerHTML='<div style="text-align:center;padding:30px;color:var(--muted)">暂无成员</div>';return}
-  let h=`<div class="sec-t" style="margin-bottom:6px">共${TEAM.length}人</div>`;
-  TEAM.forEach(m=>{const c=clr(m.id);const claimed=fbReady&&claims[m.id];h+=`<div class="rc"><div class="rc-info"><div style="width:28px;height:28px;border-radius:50%;background:${c.bg};color:${c.fg};display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:600">${m.name[0]}</div><div><div class="rc-name">${esc(m.name)}${claimed?` <span style="font-size:10px;color:var(--success);background:var(--success-soft);padding:0 5px;border-radius:50px;margin-left:4px">● ${esc(claims[m.id]?.by_name||claims[m.id]?.by||'在线')}</span>`:''}</div><div class="rc-desc">${esc(m.dept)}</div></div></div><div class="rc-actions">${claimed?`<button class="r-btn" style="color:var(--warning)" onclick="forceUnclaim(${m.id})">强制下线</button>`:''}<button class="r-btn" onclick="showMemberForm(${m.id})">编辑</button><button class="r-btn" style="color:var(--danger)" onclick="delMember(${m.id})">删除</button></div></div>`});
+  // 首卡定位灰度设置卡片：总开关 + 按成员开关
+  const locOnCount=TEAM.filter(m=>locCfg.members&&locCfg.members[m.id]).length;
+  let h=`<div style="background:var(--surface);border-radius:var(--radius);padding:12px 14px;border:1px solid var(--border-light);box-shadow:var(--shadow-sm);margin-bottom:10px">
+    <div style="display:flex;align-items:center;justify-content:space-between;gap:10px">
+      <div style="display:flex;align-items:center;gap:10px">
+        <div class="rc-ico" style="background:var(--surface-alt);color:var(--muted)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0 1 18 0z"/><circle cx="12" cy="10" r="3"/></svg></div>
+        <div><div class="rc-name">首卡定位记录</div><div class="rc-desc">成员每天第一次打卡时记录当前位置（考勤表姓名旁 📍 可查看地图）。默认关闭，可按成员灰度开启</div></div>
+      </div>
+      <div class="toggle${locCfg.on?' on':''}" onclick="toggleLocMaster()" title="总开关"></div>
+    </div>
+    <div style="display:flex;align-items:center;gap:8px;margin-top:10px;padding-top:10px;border-top:1px dashed var(--border-light);font-size:12px;color:var(--muted)">
+      <span>成员灰度：已开 <span class="mono">${locOnCount}/${TEAM.length}</span></span>
+      <button class="r-btn" onclick="locSetAll(true)">全部开启</button>
+      <button class="r-btn" onclick="locSetAll(false)">全部关闭</button>
+      <span style="font-size:11px;color:var(--muted-light)">单个成员用下面行内的 📍 开关</span>
+    </div>
+  </div>`;
+  h+=`<div class="sec-t" style="margin-bottom:6px">共${TEAM.length}人</div>`;
+  TEAM.forEach(m=>{const c=clr(m.id);const claimed=fbReady&&claims[m.id];const locOn=!!(locCfg.members&&locCfg.members[m.id]);h+=`<div class="rc"><div class="rc-info"><div style="width:28px;height:28px;border-radius:50%;background:${c.bg};color:${c.fg};display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:600">${m.name[0]}</div><div><div class="rc-name">${esc(m.name)}${claimed?` <span style="font-size:10px;color:var(--success);background:var(--success-soft);padding:0 5px;border-radius:50px;margin-left:4px">● ${esc(claims[m.id]?.by_name||claims[m.id]?.by||'在线')}</span>`:''}</div><div class="rc-desc">${esc(m.dept)}</div></div></div><div class="rc-actions"><span style="font-size:10px;color:var(--muted)">📍</span><div class="toggle${locOn?' on':''}" onclick="toggleLocMember(${m.id})" title="${locOn?'首卡定位：已开启':'首卡定位：未开启'}"></div>${claimed?`<button class="r-btn" style="color:var(--warning)" onclick="forceUnclaim(${m.id})">强制下线</button>`:''}<button class="r-btn" onclick="showMemberForm(${m.id})">编辑</button><button class="r-btn" style="color:var(--danger)" onclick="delMember(${m.id})">删除</button></div></div>`});
   el.innerHTML=h;
 }
+// 首卡定位灰度开关操作：本地持久化 + 云端同步 + 操作留痕
+function _applyLocCfg(action,detail){sv('cloccfg6',locCfg);syncLocCfg();logEvent('定位设置',action+(detail?' · '+detail:''));renderMembers()}
+function toggleLocMaster(){locCfg={on:!locCfg.on,members:locCfg.members||{}};_applyLocCfg(locCfg.on?'开启首卡定位总开关':'关闭首卡定位总开关')}
+function toggleLocMember(mid){const cur=!!(locCfg.members&&locCfg.members[mid]);locCfg={on:!!locCfg.on,members:Object.assign({},locCfg.members||{},{[mid]:!cur})};_applyLocCfg((!cur?'开启':'关闭')+'成员首卡定位',memberNameOf(mid))}
+function locSetAll(v){const m={};if(v)TEAM.forEach(x=>{m[x.id]=true});locCfg={on:!!locCfg.on,members:m};_applyLocCfg(v?'全部成员开启首卡定位':'全部成员关闭首卡定位')}
 function delMember(id){const m=TEAM.find(x=>x.id===id);if(!m)return;if(!confirm('删除？'))return;TEAM=TEAM.filter(x=>x.id!==id);sv('ct6',TEAM);syncToFB();logEvent('成员变更',`删除成员：${m.name}（${m.dept||''}）`);renderAll()}
 async function forceUnclaim(mid){
   const reason=prompt(`强制下线成员「${memberNameOf(mid)}」？请填写原因（可选，将告知对方）：`);
@@ -5709,7 +5813,7 @@ setMemberPick=function(...args){_origSetMemberPick.apply(this,args);markRenderDi
 
 tick();setInterval(tick,1000);setInterval(renderEmpIfNeeded,3e4);
 // ===== 新版本检测：部署新版后自动提醒用户刷新，避免大家一直跑旧代码 =====
-const APP_VERSION='v2026.08.14.53';
+const APP_VERSION='v2026.08.14.54';
 let _newVerNotified=false;
 async function checkAppVersion(){
   if(_newVerNotified)return;
