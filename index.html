@@ -1279,12 +1279,14 @@ async function pullSlotCap(){if(!fbReady)return;try{const {data:sc}=await supa.f
 async function syncLocCfg(){if(!fbReady)return;try{await supa.from('config').upsert({id:'loccfg',data:locCfg,updated_at:Date.now()},{onConflict:'id'})}catch(e){console.warn('LocCfg sync error:',e)}}
 // ===== 首卡定位模块 =====
 // 设计原则：定位绝不阻塞打卡、绝不抛错。打卡页打开即静默预取+短缓存；
-// 打卡时优先用缓存，无缓存再做一次短超时尝试；失败则正常打卡、只是不带定位。
+// 打卡时强制重新获取（不直接用缓存），并在管理端展示精度、实时性等反作弊提示。
 let _locCache=null;      // {lat,lng,acc,ts}
 let _locPrefetching=false;
 let _locDenied=false;    // 浏览器定位授权被拒绝（平台层无法禁止员工点拒绝，故标记并告知管理员）
-const LOC_FRESH_MS=5*60*1000; // 缓存新鲜窗口：5 分钟内直接复用
+const LOC_FRESH_MS=5*60*1000; // 缓存新鲜窗口：5 分钟内直接复用（仅用于预取和权限探测）
 const LOC_SAME_KM=0.3;   // 首尾对比「同地」判定阈值（参考值，300 米）
+const LOC_LOW_ACC_M=200; // 定位精度超过此值视为「精度低」，提示管理员复核
+const LOC_STALE_MS=30000;// 定位获取时间与打卡时间相差超过此值视为「非实时」
 function _locReadPosition(){
   // 解析为 {loc:{lat,lng,acc,ts}} 或 {err:code}（1=拒绝授权 2=不可用 3=超时）
   return new Promise(res=>{
@@ -1293,7 +1295,7 @@ function _locReadPosition(){
       navigator.geolocation.getCurrentPosition(
         p=>{try{res({loc:{lat:+p.coords.latitude.toFixed(6),lng:+p.coords.longitude.toFixed(6),acc:Math.round(p.coords.accuracy||0),ts:Date.now()}})}catch(e){res({err:2})}},
         er=>res({err:(er&&er.code)||2}),
-        {enableHighAccuracy:false,timeout:8000,maximumAge:180000}
+        {enableHighAccuracy:true,timeout:8000,maximumAge:0}
       );
     }catch(e){res({err:2})}
   });
@@ -1316,11 +1318,10 @@ async function ensureLocPrefetch(){
   _locPrefetching=true;
   try{const r=await _locReadPosition();if(r.loc)_locCache=r.loc;else if(r.err===1)_setLocDenied()}finally{_locPrefetching=false}
 }
-// 打卡附加定位：缓存新鲜直接用；否则再取一次并与 2.5s 超时赛跑；
-// 返回 {loc,denied}，永不抛错
+// 打卡附加定位：打卡场景不直接用缓存，强制重新获取（提高反作弊可信度），
+// 并与 2.5s 超时赛跑；返回 {loc,denied}，永不抛错
 async function getPunchLoc(){
   if(_locDenied)return{loc:null,denied:true};
-  if(_locCache&&Date.now()-_locCache.ts<LOC_FRESH_MS)return{loc:_locCache,denied:false};
   const r=await Promise.race([_locReadPosition(),new Promise(res=>setTimeout(()=>res({err:3}),2500))]);
   if(r.loc){_locCache=r.loc;return{loc:r.loc,denied:false}}
   if(r.err===1)_setLocDenied();
@@ -1354,12 +1355,13 @@ function isFirstPunchOfDay(mid,dateStr){
 }
 // 两层灰度开关：总开关 && 成员开关 都开启才对该成员生效
 function locEnabledFor(mid){return !!(locCfg&&locCfg.on&&locCfg.members&&locCfg.members[mid])}
-// 解析打卡记录上的定位串 "lat,lng,acc"；非法/缺失返回 null（管理端展示用）
+// 解析打卡记录上的定位串 "lat,lng,acc,ts"；非法/缺失返回 null（管理端展示用）
 function parseLoc(rec){
   if(!rec||typeof rec.loc!=='string')return null;
   const p=rec.loc.split(',');const lat=parseFloat(p[0]),lng=parseFloat(p[1]);
   if(!isFinite(lat)||!isFinite(lng)||lat<-90||lat>90||lng<-180||lng>180)return null;
-  return{lat,lng,acc:parseInt(p[2],10)||0};
+  const ts=p[3]?parseInt(p[3],10):NaN;
+  return{lat,lng,acc:parseInt(p[2],10)||0,ts:isFinite(ts)?ts:null};
 }
 // ===== 操作日志：记录所有账号的关键操作到 Supabase logs 表 =====
 // 需在 Supabase 执行：create table logs(id bigserial primary key, ts bigint, account text, role text, action text, detail text, created_at timestamptz default now());
@@ -2459,11 +2461,11 @@ async function doPunch(){
     try{
       if(isFirstPunchOfDay(selectedMember.id,td)){
         const r=await getPunchLoc();
-        if(r.loc)pd.loc=`${r.loc.lat},${r.loc.lng},${r.loc.acc||0}`;
+        if(r.loc)pd.loc=`${r.loc.lat},${r.loc.lng},${r.loc.acc||0},${r.loc.ts}`;
         else if(r.denied){pd.loc='DENIED';logEvent('定位未授权',`${selectedMember.name} 首卡时拒绝定位授权，考勤已标记「未授权」`)}
       }else{
         const r=await getPunchLoc();
-        if(r.loc){pd.loc=`${r.loc.lat},${r.loc.lng},${r.loc.acc||0}`;stripPrevLastLoc(td,selectedMember.id)}
+        if(r.loc){pd.loc=`${r.loc.lat},${r.loc.lng},${r.loc.acc||0},${r.loc.ts}`;stripPrevLastLoc(td,selectedMember.id)}
       }
     }catch(e){}
   }
@@ -5179,7 +5181,12 @@ function renderTable(q,en,td){
       const geo=dayLocRecs.filter(r=>parseLoc(r)).sort((a,b)=>(a.ts||0)-(b.ts||0));
       if(geo.length){
         const firstRec=geo[0],lastRec=geo[geo.length-1];
-        const mkLink=(rec,tag)=>{const lo=parseLoc(rec);return ` <a href="https://www.openstreetmap.org/?mlat=${lo.lat}&mlon=${lo.lng}#map=16/${lo.lat}/${lo.lng}" target="_blank" rel="noopener" title="${tag}卡定位 · ${esc(rec.time||'')}${lo.acc?' · 精度±'+lo.acc+'m':''}" style="text-decoration:none">📍${tag}</a>`};
+        const mkLink=(rec,tag)=>{
+          const lo=parseLoc(rec);
+          const stale=(lo.ts&&Math.abs((rec.ts||0)-lo.ts)>LOC_STALE_MS)?` <span title="定位获取时间（${new Date(lo.ts).toLocaleTimeString()}）与打卡时间（${esc(rec.time||'')}）相差超过 ${LOC_STALE_MS/1000} 秒，存在伪造/延迟定位风险" style="font-size:10px;color:var(--warning)">非实时</span>`:'';
+          const lowAcc=(lo.acc>LOC_LOW_ACC_M)?` <span title="定位精度 ±${lo.acc} 米，超过 ${LOC_LOW_ACC_M} 米阈值，位置可信度较低" style="font-size:10px;color:var(--warning)">精度低</span>`:'';
+          return ` <a href="https://www.openstreetmap.org/?mlat=${lo.lat}&mlon=${lo.lng}#map=16/${lo.lat}/${lo.lng}" target="_blank" rel="noopener" title="${tag}卡定位 · ${esc(rec.time||'')}${lo.acc?' · 精度±'+lo.acc+'m':''}${lo.ts?' · 定位时间'+new Date(lo.ts).toLocaleTimeString():''}" style="text-decoration:none">📍${tag}</a>${stale}${lowAcc}`;
+        };
         locHtml+=mkLink(firstRec,'首');
         if(lastRec.ts!==firstRec.ts){
           locHtml+=mkLink(lastRec,'末');
@@ -5881,7 +5888,7 @@ setMemberPick=function(...args){_origSetMemberPick.apply(this,args);markRenderDi
 
 tick();setInterval(tick,1000);setInterval(renderEmpIfNeeded,3e4);
 // ===== 新版本检测：部署新版后自动提醒用户刷新，避免大家一直跑旧代码 =====
-const APP_VERSION='v2026.08.23.57';
+const APP_VERSION='v2026.08.23.58';
 let _newVerNotified=false;
 async function checkAppVersion(){
   if(_newVerNotified)return;
