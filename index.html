@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8"/>
   <meta name="viewport" content="width=device-width,initial-scale=1"/>
-  <meta http-equiv="Content-Security-Policy" content="default-src 'self' https://txtduqfhugjupxdoxdvp.supabase.co https://cdn.jsdelivr.net https://cdnjs.cloudflare.com https://fonts.googleapis.com https://fonts.gstatic.com; script-src 'self' 'unsafe-inline' 'unsafe-eval' https://cdn.jsdelivr.net https://cdnjs.cloudflare.com blob:; worker-src blob:; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; connect-src https://txtduqfhugjupxdoxdvp.supabase.co wss://txtduqfhugjupxdoxdvp.supabase.co https://cdn.jsdelivr.net; img-src 'self' data: blob:; frame-ancestors 'none'"/>
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self' https://txtduqfhugjupxdoxdvp.supabase.co https://cdn.jsdelivr.net https://cdnjs.cloudflare.com https://fonts.googleapis.com https://fonts.gstatic.com; script-src 'self' 'unsafe-inline' 'unsafe-eval' https://cdn.jsdelivr.net https://cdnjs.cloudflare.com https://restapi.amap.com blob:; worker-src blob:; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; connect-src https://txtduqfhugjupxdoxdvp.supabase.co wss://txtduqfhugjupxdoxdvp.supabase.co https://cdn.jsdelivr.net https://restapi.amap.com; img-src 'self' data: blob:; frame-ancestors 'none'"/>
   <title>ClockIn 考勤打卡</title>
   <link rel="preconnect" href="https://fonts.googleapis.com"/>
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet"/>
@@ -5994,7 +5994,7 @@ setMemberPick=function(...args){_origSetMemberPick.apply(this,args);markRenderDi
 
 tick();setInterval(tick,1000);setInterval(renderEmpIfNeeded,3e4);
 // ===== 新版本检测：部署新版后自动提醒用户刷新，避免大家一直跑旧代码 =====
-const APP_VERSION='v2026.08.26.61';
+const APP_VERSION='v2026.08.26.62';
 let _newVerNotified=false;
 async function checkAppVersion(){
   if(_newVerNotified)return;
