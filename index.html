@@ -1386,6 +1386,27 @@ function _formatGaodeAddr(regeo){
   if(c.streetNumber)parts.push(c.streetNumber);
   return parts.join('')||null;
 }
+function _locAddrFetchJsonp(lat,lng){
+  return new Promise((resolve)=>{
+    const cbName='_gdRegeoCb_'+Date.now()+'_'+Math.floor(Math.random()*1e9);
+    const script=document.createElement('script');
+    const timer=setTimeout(()=>{cleanup();resolve(null)},6000);
+    function cleanup(){
+      clearTimeout(timer);
+      if(script.parentNode)script.parentNode.removeChild(script);
+      try{delete window[cbName]}catch(e){window[cbName]=undefined}
+    }
+    window[cbName]=(data)=>{
+      cleanup();
+      if(!data||data.status!=='1'||!data.regeocode){resolve(null);return}
+      resolve(_formatGaodeAddr(data.regeocode));
+    };
+    const url=`https://restapi.amap.com/v3/geocode/regeo?key=${GAODE_KEY}&location=${lng.toFixed(6)},${lat.toFixed(6)}&output=json&extensions=all&callback=${cbName}`;
+    script.src=url;
+    script.onerror=()=>{cleanup();resolve(null)};
+    document.head.appendChild(script);
+  });
+}
 async function _locAddrFetchOne(lat,lng){
   const key=_locAddrKey(lat,lng);
   if(_locAddrCache.has(key))return _locAddrCache.get(key);
@@ -1393,13 +1414,20 @@ async function _locAddrFetchOne(lat,lng){
     // 高德逆地理编码：location 参数格式为 lng,lat
     const url=`https://restapi.amap.com/v3/geocode/regeo?key=${GAODE_KEY}&location=${lng.toFixed(6)},${lat.toFixed(6)}&output=json&extensions=all`;
     const res=await fetch(url);
-    if(!res.ok)return null;
+    if(!res.ok)throw new Error('http '+res.status);
     const data=await res.json();
-    if(data.status!=='1'||!data.regeocode)return null;
+    if(data.status!=='1'||!data.regeocode)throw new Error('amap status '+data.status+' info '+data.info);
     const addr=_formatGaodeAddr(data.regeocode);
     _locAddrCache.set(key,addr);
     return addr;
-  }catch(e){return null}
+  }catch(e){
+    console.warn('[locAddr] fetch failed, try jsonp',lat,lng,e.message);
+    try{
+      const addr=await _locAddrFetchJsonp(lat,lng);
+      if(addr)_locAddrCache.set(key,addr);
+      return addr;
+    }catch(e2){console.warn('[locAddr] jsonp also failed',lat,lng,e2.message);return null}
+  }
 }
 async function _locAddrDrainQueue(){
   if(_locAddrRunning)return;
@@ -5966,7 +5994,7 @@ setMemberPick=function(...args){_origSetMemberPick.apply(this,args);markRenderDi
 
 tick();setInterval(tick,1000);setInterval(renderEmpIfNeeded,3e4);
 // ===== 新版本检测：部署新版后自动提醒用户刷新，避免大家一直跑旧代码 =====
-const APP_VERSION='v2026.08.23.60';
+const APP_VERSION='v2026.08.26.61';
 let _newVerNotified=false;
 async function checkAppVersion(){
   if(_newVerNotified)return;
