@@ -1363,6 +1363,81 @@ function parseLoc(rec){
   const ts=p[3]?parseInt(p[3],10):NaN;
   return{lat,lng,acc:parseInt(p[2],10)||0,ts:isFinite(ts)?ts:null};
 }
+// ===== 逆地理编码：将 lat/lng 转为可读地址（管理端展示用）=====
+// 使用 Nominatim (OpenStreetMap) 免费服务，无需 API Key；有频率限制（1 req/s），
+// 故加内存缓存 + 请求队列，避免管理端表格渲染时并发打爆。
+const _locAddrCache=new Map(); // key: "lat,lng" → address string
+const _locAddrQueue=[];
+let _locAddrRunning=false;
+function _locAddrKey(lat,lng){return `${lat.toFixed(4)},${lng.toFixed(4)}`}
+function _formatNominatimAddr(addr){
+  if(!addr)return null;
+  // 优先取中文地址组件；Nominatim 对国内 POI 通常返回 state/city/county/road/suburb
+  const parts=[];
+  if(addr.state)parts.push(addr.state);
+  if(addr.city&&addr.city!==addr.state)parts.push(addr.city);
+  else if(addr.town)parts.push(addr.town);
+  else if(addr.county)parts.push(addr.county);
+  if(addr.suburb&&addr.suburb!==addr.city&&addr.suburb!==addr.county)parts.push(addr.suburb);
+  if(addr.road)parts.push(addr.road);
+  if(addr.house_number)parts.push(addr.house_number);
+  // 兜底：用 display_name 截断
+  if(!parts.length&&addr.display_name){
+    const dn=addr.display_name.split(',').map(s=>s.trim()).filter(Boolean);
+    return dn.slice(0,4).join(' ');
+  }
+  return parts.slice(0,5).join(' ')||null;
+}
+async function _locAddrFetchOne(lat,lng){
+  const key=_locAddrKey(lat,lng);
+  if(_locAddrCache.has(key))return _locAddrCache.get(key);
+  try{
+    const url=`https://nominatim.openstreetmap.org/reverse?format=jsonv2&lat=${lat}&lon=${lng}&zoom=16&addressdetails=1&accept-language=zh-CN`;
+    const res=await fetch(url,{headers:{'Accept-Language':'zh-CN'}});
+    if(!res.ok)return null;
+    const data=await res.json();
+    const addr=_formatNominatimAddr(data.address||{});
+    _locAddrCache.set(key,addr);
+    return addr;
+  }catch(e){return null}
+}
+async function _locAddrDrainQueue(){
+  if(_locAddrRunning)return;
+  _locAddrRunning=true;
+  while(_locAddrQueue.length){
+    const{lat,lng,el}= _locAddrQueue.shift();
+    const addr=await _locAddrFetchOne(lat,lng);
+    if(el&&el.isConnected){
+      el.textContent=addr||'地址获取失败';
+      el.title=addr||'';
+    }
+    // Nominatim 频率限制：1 req/s
+    await new Promise(r=>setTimeout(r,1100));
+  }
+  _locAddrRunning=false;
+}
+function queueLocAddrResolve(lat,lng,el){
+  if(!isFinite(lat)||!isFinite(lng))return;
+  const key=_locAddrKey(lat,lng);
+  if(_locAddrCache.has(key)){
+    const cached=_locAddrCache.get(key);
+    if(el&&el.isConnected){el.textContent=cached||'地址获取失败';el.title=cached||''}
+    return;
+  }
+  _locAddrQueue.push({lat,lng,el});
+  _locAddrDrainQueue();
+}
+// 管理端表格渲染后，批量填充定位地址（异步，不阻塞表格显示）
+function fillLocAddresses(){
+  const placeholders=document.querySelectorAll('[data-loc-addr]');
+  placeholders.forEach(el=>{
+    const lat=parseFloat(el.dataset.locLat);
+    const lng=parseFloat(el.dataset.locLng);
+    if(!isFinite(lat)||!isFinite(lng))return;
+    el.textContent='加载中…';
+    queueLocAddrResolve(lat,lng,el);
+  });
+}
 // ===== 操作日志：记录所有账号的关键操作到 Supabase logs 表 =====
 // 需在 Supabase 执行：create table logs(id bigserial primary key, ts bigint, account text, role text, action text, detail text, created_at timestamptz default now());
 function currentActor(){
@@ -5185,7 +5260,8 @@ function renderTable(q,en,td){
           const lo=parseLoc(rec);
           const stale=(lo.ts&&Math.abs((rec.ts||0)-lo.ts)>LOC_STALE_MS)?` <span title="定位获取时间（${new Date(lo.ts).toLocaleTimeString()}）与打卡时间（${esc(rec.time||'')}）相差超过 ${LOC_STALE_MS/1000} 秒，存在伪造/延迟定位风险" style="font-size:10px;color:var(--warning)">非实时</span>`:'';
           const lowAcc=(lo.acc>LOC_LOW_ACC_M)?` <span title="定位精度 ±${lo.acc} 米，超过 ${LOC_LOW_ACC_M} 米阈值，位置可信度较低" style="font-size:10px;color:var(--warning)">精度低</span>`:'';
-          return ` <a href="https://www.openstreetmap.org/?mlat=${lo.lat}&mlon=${lo.lng}#map=16/${lo.lat}/${lo.lng}" target="_blank" rel="noopener" title="${tag}卡定位 · ${esc(rec.time||'')}${lo.acc?' · 精度±'+lo.acc+'m':''}${lo.ts?' · 定位时间'+new Date(lo.ts).toLocaleTimeString():''}" style="text-decoration:none">📍${tag}</a>${stale}${lowAcc}`;
+          const addrSpan=`<span data-loc-addr="1" data-loc-lat="${lo.lat}" data-loc-lng="${lo.lng}" style="font-size:10px;color:var(--muted);margin-left:4px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:180px;display:inline-block;vertical-align:middle">加载中…</span>`;
+          return ` <a href="https://www.openstreetmap.org/?mlat=${lo.lat}&mlon=${lo.lng}#map=16/${lo.lat}/${lo.lng}" target="_blank" rel="noopener" title="${tag}卡定位 · ${esc(rec.time||'')}${lo.acc?' · 精度±'+lo.acc+'m':''}${lo.ts?' · 定位时间'+new Date(lo.ts).toLocaleTimeString():''}" style="text-decoration:none">${tag}</a>${addrSpan}${stale}${lowAcc}`;
         };
         locHtml+=mkLink(firstRec,'首');
         if(lastRec.ts!==firstRec.ts){
@@ -5202,6 +5278,8 @@ function renderTable(q,en,td){
     h+=`<tr><td><div class="u-cell"><div class="u-av" style="background:${c.bg};color:${c.fg}">${m.name[0]}</div><div><div style="font-weight:500">${esc(m.name)}${claimed?' <span style="font-size:9px;color:var(--success)">● 在线</span>':''}${locHtml}</div><div style="font-size:10px;color:var(--muted)">${esc(m.dept)}</div></div></div></td><td class="mono">${myS.length}个</td><td class="mono">${okC}</td><td style="vertical-align:top">${missCell}</td><td>${statusBadge}</td></tr>`;
   });
   h+='</tbody></table>';document.getElementById('tableBody').innerHTML=h;
+  // 异步填充定位地址（逆地理编码，不阻塞表格渲染）
+  fillLocAddresses();
 }
 
 function renderRules(){
@@ -5888,7 +5966,7 @@ setMemberPick=function(...args){_origSetMemberPick.apply(this,args);markRenderDi
 
 tick();setInterval(tick,1000);setInterval(renderEmpIfNeeded,3e4);
 // ===== 新版本检测：部署新版后自动提醒用户刷新，避免大家一直跑旧代码 =====
-const APP_VERSION='v2026.08.23.58';
+const APP_VERSION='v2026.08.23.59';
 let _newVerNotified=false;
 async function checkAppVersion(){
   if(_newVerNotified)return;
