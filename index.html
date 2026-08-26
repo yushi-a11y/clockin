@@ -1364,39 +1364,39 @@ function parseLoc(rec){
   return{lat,lng,acc:parseInt(p[2],10)||0,ts:isFinite(ts)?ts:null};
 }
 // ===== 逆地理编码：将 lat/lng 转为可读地址（管理端展示用）=====
-// 使用 Nominatim (OpenStreetMap) 免费服务，无需 API Key；有频率限制（1 req/s），
+// 使用高德地图 Web 服务 API（国内覆盖好、速度快）；有频率限制，
 // 故加内存缓存 + 请求队列，避免管理端表格渲染时并发打爆。
+const GAODE_KEY='ede8fb59c1d00dae85c74fb30a01a80e';
 const _locAddrCache=new Map(); // key: "lat,lng" → address string
 const _locAddrQueue=[];
 let _locAddrRunning=false;
 function _locAddrKey(lat,lng){return `${lat.toFixed(4)},${lng.toFixed(4)}`}
-function _formatNominatimAddr(addr){
-  if(!addr)return null;
-  // 优先取中文地址组件；Nominatim 对国内 POI 通常返回 state/city/county/road/suburb
+function _formatGaodeAddr(regeo){
+  if(!regeo)return null;
+  // 优先用 formatted_address（高德已拼好，如「北京市朝阳区建国路88号」）
+  if(regeo.formatted_address)return regeo.formatted_address;
+  // 兜底：从 addressComponent 手动拼接
+  const c=regeo.addressComponent||{};
   const parts=[];
-  if(addr.state)parts.push(addr.state);
-  if(addr.city&&addr.city!==addr.state)parts.push(addr.city);
-  else if(addr.town)parts.push(addr.town);
-  else if(addr.county)parts.push(addr.county);
-  if(addr.suburb&&addr.suburb!==addr.city&&addr.suburb!==addr.county)parts.push(addr.suburb);
-  if(addr.road)parts.push(addr.road);
-  if(addr.house_number)parts.push(addr.house_number);
-  // 兜底：用 display_name 截断
-  if(!parts.length&&addr.display_name){
-    const dn=addr.display_name.split(',').map(s=>s.trim()).filter(Boolean);
-    return dn.slice(0,4).join(' ');
-  }
-  return parts.slice(0,5).join(' ')||null;
+  if(c.province)parts.push(c.province);
+  if(c.city&&c.city!==c.province)parts.push(c.city);
+  if(c.district)parts.push(c.district);
+  if(c.township)parts.push(c.township);
+  if(c.street)parts.push(c.street);
+  if(c.streetNumber)parts.push(c.streetNumber);
+  return parts.join('')||null;
 }
 async function _locAddrFetchOne(lat,lng){
   const key=_locAddrKey(lat,lng);
   if(_locAddrCache.has(key))return _locAddrCache.get(key);
   try{
-    const url=`https://nominatim.openstreetmap.org/reverse?format=jsonv2&lat=${lat}&lon=${lng}&zoom=16&addressdetails=1&accept-language=zh-CN`;
-    const res=await fetch(url,{headers:{'Accept-Language':'zh-CN'}});
+    // 高德逆地理编码：location 参数格式为 lng,lat
+    const url=`https://restapi.amap.com/v3/geocode/regeo?key=${GAODE_KEY}&location=${lng.toFixed(6)},${lat.toFixed(6)}&output=json&extensions=all`;
+    const res=await fetch(url);
     if(!res.ok)return null;
     const data=await res.json();
-    const addr=_formatNominatimAddr(data.address||{});
+    if(data.status!=='1'||!data.regeocode)return null;
+    const addr=_formatGaodeAddr(data.regeocode);
     _locAddrCache.set(key,addr);
     return addr;
   }catch(e){return null}
@@ -1411,8 +1411,8 @@ async function _locAddrDrainQueue(){
       el.textContent=addr||`${lat.toFixed(4)},${lng.toFixed(4)}`;
       el.title=addr||`坐标：${lat.toFixed(6)}, ${lng.toFixed(6)}`;
     }
-    // Nominatim 频率限制：1 req/s
-    await new Promise(r=>setTimeout(r,1100));
+    // 高德频率限制：QPS 限制，保守间隔 200ms
+    await new Promise(r=>setTimeout(r,200));
   }
   _locAddrRunning=false;
 }
@@ -5966,7 +5966,7 @@ setMemberPick=function(...args){_origSetMemberPick.apply(this,args);markRenderDi
 
 tick();setInterval(tick,1000);setInterval(renderEmpIfNeeded,3e4);
 // ===== 新版本检测：部署新版后自动提醒用户刷新，避免大家一直跑旧代码 =====
-const APP_VERSION='v2026.08.23.59';
+const APP_VERSION='v2026.08.23.60';
 let _newVerNotified=false;
 async function checkAppVersion(){
   if(_newVerNotified)return;
