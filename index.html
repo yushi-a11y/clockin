@@ -6072,7 +6072,7 @@ setMemberPick=function(...args){_origSetMemberPick.apply(this,args);markRenderDi
 
 tick();setInterval(tick,1000);setInterval(renderEmpIfNeeded,3e4);
 // ===== 新版本检测：部署新版后自动提醒用户刷新，避免大家一直跑旧代码 =====
-const APP_VERSION='v2026.08.26.62';
+const APP_VERSION='v2026.08.28.67';
 let _newVerNotified=false;
 async function checkAppVersion(){
   if(_newVerNotified)return;
