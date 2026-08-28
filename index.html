@@ -4626,9 +4626,10 @@ function getWeekCapData(weekOffset){
   return{days,en,data};
 }
 function previewWeekCap(){
-  const offset=+document.getElementById('capHistoryWeek').value;
+  const sel=document.getElementById('capHistoryWeek');
+  const offset=+sel.value;
   const previewEl=document.getElementById('capHistoryPreview');
-  if(!offset){previewEl.style.display='none';return}
+  if(sel.value===''||sel.value===undefined){previewEl.style.display='none';return}
   const{days,en,data}=getWeekCapData(offset);
   const ws=days[0],we=days[6];
   const label=`${ws.getMonth()+1}/${ws.getDate()}-${we.getMonth()+1}/${we.getDate()}`;
@@ -4648,8 +4649,9 @@ function previewWeekCap(){
   previewEl.style.display='block';
 }
 async function applyWeekCapFromHistory(){
-  const offset=+document.getElementById('capHistoryWeek').value;
-  if(!offset){showToast('请先选择周期');return}
+  const sel=document.getElementById('capHistoryWeek');
+  const offset=+sel.value;
+  if(sel.value===''||sel.value===undefined){showToast('请先选择周期');return}
   const{days:srcDays,en,data}=getWeekCapData(offset);
   const curDays=adminSelWeekDays();
   if(curDays.length!==srcDays.length){showToast('周期天数不匹配');return}
