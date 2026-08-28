@@ -1305,6 +1305,13 @@ function _locIsApiTampered(){
     if(navigator.geolocation.constructor&&navigator.geolocation.constructor.name!=='Geolocation')return true;
     // 5. 检查 getCurrentPosition 的 prototype 是否存在（原生函数通常没有可访问的 prototype）
     if(gp.prototype!==undefined)return true;
+    // 6. 检查 Permissions API 是否被篡改
+    if(navigator.permissions&&navigator.permissions.query){
+      const pq=navigator.permissions.query;
+      if(Function.prototype.toString.call(pq).indexOf('[native code]')===-1)return true;
+    }
+    // 7. 检查 navigator 对象是否被篡改
+    if(Object.prototype.toString.call(navigator)!=='[object Navigator]')return true;
     return false;
   }catch(e){return true} // 任何异常都视为可疑
 }
@@ -1319,10 +1326,23 @@ function _locIsCoordSuspicious(lat,lng,accuracy){
   for(const[tl,tn]of testCoords){
     if(Math.abs(lat-tl)<0.01&&Math.abs(lng-tn)<0.01)return true;
   }
+  // 4. 精度为 0：真实 GPS 不可能精度为 0
+  if(accuracy===0)return true;
+  // 5. 坐标超出合理范围
+  if(Math.abs(lat)>90||Math.abs(lng)>180)return true;
+  return false;
+}
+// 反作弊：检测定位时间戳是否合理（防止使用缓存或伪造的时间戳）
+function _locIsTimestampSuspicious(ts){
+  const now=Date.now();
+  // 时间戳在未来：不可能
+  if(ts>now+5000)return true;
+  // 时间戳在过去超过 1 小时：可能是缓存或伪造
+  if(ts<now-3600000)return true;
   return false;
 }
 function _locReadPosition(){
-  // 解析为 {loc:{lat,lng,acc,ts}} 或 {err:code}（1=拒绝授权 2=不可用 3=超时 4=API被篡改 5=坐标可疑）
+  // 解析为 {loc:{lat,lng,acc,ts}} 或 {err:code}（1=拒绝授权 2=不可用 3=超时 4=API被篡改 5=坐标可疑 6=时间戳可疑）
   return new Promise(res=>{
     try{
       if(!navigator.geolocation)return res({err:2});
@@ -1336,12 +1356,18 @@ function _locReadPosition(){
             const lat=+p.coords.latitude.toFixed(6);
             const lng=+p.coords.longitude.toFixed(6);
             const acc=Math.round(p.coords.accuracy||0);
+            const ts=Date.now();
             // 检查坐标是否可疑
             if(_locIsCoordSuspicious(lat,lng,acc)){
               console.warn('[loc] coordinates suspicious:',lat,lng,acc);
               return res({err:5});
             }
-            res({loc:{lat,lng,acc,ts:Date.now()}});
+            // 检查时间戳是否可疑（使用客户端时间，但检查合理性）
+            if(_locIsTimestampSuspicious(ts)){
+              console.warn('[loc] timestamp suspicious:',ts);
+              return res({err:6});
+            }
+            res({loc:{lat,lng,acc,ts}});
           }catch(e){res({err:2})}
         },
         er=>res({err:(er&&er.code)||2}),
@@ -1392,7 +1418,7 @@ async function getPunchLoc(){
   const r=await Promise.race([_locReadPosition(),new Promise(res=>setTimeout(()=>res({err:3}),2500))]);
   if(r.loc){_locCache=r.loc;return{loc:r.loc,denied:false,tampered:false,suspicious:false}}
   if(r.err===1)_setLocDenied();
-  return{loc:null,denied:r.err===1,tampered:r.err===4,suspicious:r.err===5};
+  return{loc:null,denied:r.err===1,tampered:r.err===4,suspicious:r.err===5||r.err===6};
 }
 // 两坐标球面距离（km），管理端首尾对比用
 function locDistanceKm(a,b){
