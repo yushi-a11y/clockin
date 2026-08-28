@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8"/>
   <meta name="viewport" content="width=device-width,initial-scale=1"/>
-  <meta http-equiv="Content-Security-Policy" content="default-src 'self' https://txtduqfhugjupxdoxdvp.supabase.co https://cdn.jsdelivr.net https://cdnjs.cloudflare.com https://fonts.googleapis.com https://fonts.gstatic.com; script-src 'self' 'unsafe-inline' 'unsafe-eval' https://cdn.jsdelivr.net https://cdnjs.cloudflare.com https://restapi.amap.com blob:; worker-src blob:; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; connect-src https://txtduqfhugjupxdoxdvp.supabase.co wss://txtduqfhugjupxdoxdvp.supabase.co https://cdn.jsdelivr.net https://restapi.amap.com; img-src 'self' data: blob:; frame-ancestors 'none'"/>
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self' https://txtduqfhugjupxdoxdvp.supabase.co https://cdn.jsdelivr.net https://cdnjs.cloudflare.com https://fonts.googleapis.com https://fonts.gstatic.com; script-src 'self' 'unsafe-inline' 'unsafe-eval' https://cdn.jsdelivr.net https://cdnjs.cloudflare.com https://restapi.amap.com blob:; worker-src blob:; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; connect-src 'self' https://txtduqfhugjupxdoxdvp.supabase.co wss://txtduqfhugjupxdoxdvp.supabase.co https://cdn.jsdelivr.net https://restapi.amap.com; img-src 'self' data: blob:; frame-ancestors 'none'"/>
   <title>ClockIn 考勤打卡</title>
   <link rel="preconnect" href="https://fonts.googleapis.com"/>
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet"/>
@@ -1287,27 +1287,88 @@ const LOC_FRESH_MS=5*60*1000; // 缓存新鲜窗口：5 分钟内直接复用（
 const LOC_SAME_KM=0.3;   // 首尾对比「同地」判定阈值（参考值，300 米）
 const LOC_LOW_ACC_M=200; // 定位精度超过此值视为「精度低」，提示管理员复核
 const LOC_STALE_MS=30000;// 定位获取时间与打卡时间相差超过此值视为「非实时」
+const LOC_RETRY_MS=24*60*60*1000; // 拒绝后重试间隔：24 小时（每天尝试一次直到授权）
+// 反作弊：多重检测 geolocation API 是否被 mock/篡改（浏览器 DevTools 虚拟定位常见手法）
+function _locIsApiTampered(){
+  try{
+    // 1. getCurrentPosition 被覆盖：正常应为原生函数，toString 包含 [native code]
+    const gp=navigator.geolocation&&navigator.geolocation.getCurrentPosition;
+    if(!gp)return true;
+    const gpStr=Function.prototype.toString.call(gp);
+    if(!/\[native code\]/.test(gpStr))return true;
+    // 2. watchPosition 被覆盖
+    const wp=navigator.geolocation.watchPosition;
+    if(wp&&Function.prototype.toString.call(wp).indexOf('[native code]')===-1)return true;
+    // 3. geolocation 对象本身被替换（原型链检查）
+    if(Object.prototype.toString.call(navigator.geolocation)!=='[object Geolocation]')return true;
+    // 4. 检查 Geolocation 原型链是否被篡改
+    if(navigator.geolocation.constructor&&navigator.geolocation.constructor.name!=='Geolocation')return true;
+    // 5. 检查 getCurrentPosition 的 prototype 是否存在（原生函数通常没有可访问的 prototype）
+    if(gp.prototype!==undefined)return true;
+    return false;
+  }catch(e){return true} // 任何异常都视为可疑
+}
+// 反作弊：检测坐标是否合理（防止 DevTools 覆盖定位返回的假坐标）
+function _locIsCoordSuspicious(lat,lng,accuracy){
+  // 1. 精度异常高（<1米）：真实 GPS 很少达到亚米级，可能是虚拟定位
+  if(accuracy>0&&accuracy<1)return true;
+  // 2. 坐标为整数或小数位极少：真实 GPS 坐标通常有 6+ 位小数
+  if(Math.abs(lat-Math.round(lat))<1e-10||Math.abs(lng-Math.round(lng))<1e-10)return true;
+  // 3. 坐标为常见测试点（如 0,0 / 39.9,116.4 北京 / 31.2,121.5 上海）
+  const testCoords=[[0,0],[39.9042,116.4074],[31.2304,121.4737],[40.7128,-74.006],[51.5074,-0.1278]];
+  for(const[tl,tn]of testCoords){
+    if(Math.abs(lat-tl)<0.01&&Math.abs(lng-tn)<0.01)return true;
+  }
+  return false;
+}
 function _locReadPosition(){
-  // 解析为 {loc:{lat,lng,acc,ts}} 或 {err:code}（1=拒绝授权 2=不可用 3=超时）
+  // 解析为 {loc:{lat,lng,acc,ts}} 或 {err:code}（1=拒绝授权 2=不可用 3=超时 4=API被篡改 5=坐标可疑）
   return new Promise(res=>{
     try{
       if(!navigator.geolocation)return res({err:2});
+      if(_locIsApiTampered()){
+        console.warn('[loc] geolocation API appears tampered');
+        return res({err:4});
+      }
       navigator.geolocation.getCurrentPosition(
-        p=>{try{res({loc:{lat:+p.coords.latitude.toFixed(6),lng:+p.coords.longitude.toFixed(6),acc:Math.round(p.coords.accuracy||0),ts:Date.now()}})}catch(e){res({err:2})}},
+        p=>{
+          try{
+            const lat=+p.coords.latitude.toFixed(6);
+            const lng=+p.coords.longitude.toFixed(6);
+            const acc=Math.round(p.coords.accuracy||0);
+            // 检查坐标是否可疑
+            if(_locIsCoordSuspicious(lat,lng,acc)){
+              console.warn('[loc] coordinates suspicious:',lat,lng,acc);
+              return res({err:5});
+            }
+            res({loc:{lat,lng,acc,ts:Date.now()}});
+          }catch(e){res({err:2})}
+        },
         er=>res({err:(er&&er.code)||2}),
         {enableHighAccuracy:true,timeout:8000,maximumAge:0}
       );
     }catch(e){res({err:2})}
   });
 }
+let _locDeniedAt=+(localStorage.getItem('_locDeniedAt')||'0'); // 上次拒绝时间戳，用于控制重试间隔（跨会话持久化）
+if(_locDeniedAt>0)_locDenied=true; // 恢复拒绝状态
 function _setLocDenied(){
   if(_locDenied)return;
   _locDenied=true;
+  _locDeniedAt=Date.now();
+  localStorage.setItem('_locDeniedAt',String(_locDeniedAt));
   if(selectedMember&&locEnabledFor(selectedMember.id))renderEmp(); // 立即显示红色警示
 }
 // 预取：员工打卡页渲染时调用；缓存新鲜/正在获取/已知拒绝则直接返回（幂等、低成本）
 async function ensureLocPrefetch(){
-  if(_locDenied||(_locCache&&Date.now()-_locCache.ts<LOC_FRESH_MS)||_locPrefetching)return;
+  // 拒绝后每天重试一次：如果距上次拒绝已超过 24 小时，清除拒绝状态，允许再次请求
+  if(_locDenied&&_locDeniedAt>0){
+    if(Date.now()-_locDeniedAt<LOC_RETRY_MS)return;
+    _locDenied=false;
+    _locDeniedAt=0;
+    localStorage.removeItem('_locDeniedAt');
+  }
+  if((_locCache&&Date.now()-_locCache.ts<LOC_FRESH_MS)||_locPrefetching)return;
   // 先问 Permissions API（不触发弹窗）：此前已拒绝则直接标记，不再请求
   try{
     if(navigator.permissions&&navigator.permissions.query){
@@ -1319,13 +1380,19 @@ async function ensureLocPrefetch(){
   try{const r=await _locReadPosition();if(r.loc)_locCache=r.loc;else if(r.err===1)_setLocDenied()}finally{_locPrefetching=false}
 }
 // 打卡附加定位：打卡场景不直接用缓存，强制重新获取（提高反作弊可信度），
-// 并与 2.5s 超时赛跑；返回 {loc,denied}，永不抛错
+// 并与 2.5s 超时赛跑；返回 {loc,denied,tampered,suspicious}，永不抛错
 async function getPunchLoc(){
-  if(_locDenied)return{loc:null,denied:true};
+  // 拒绝后每天重试一次：如果距上次拒绝已超过 24 小时，清除拒绝状态，允许再次请求
+  if(_locDenied&&_locDeniedAt>0){
+    if(Date.now()-_locDeniedAt<LOC_RETRY_MS)return{loc:null,denied:true,tampered:false,suspicious:false};
+    _locDenied=false;
+    _locDeniedAt=0;
+    localStorage.removeItem('_locDeniedAt');
+  }
   const r=await Promise.race([_locReadPosition(),new Promise(res=>setTimeout(()=>res({err:3}),2500))]);
-  if(r.loc){_locCache=r.loc;return{loc:r.loc,denied:false}}
+  if(r.loc){_locCache=r.loc;return{loc:r.loc,denied:false,tampered:false,suspicious:false}}
   if(r.err===1)_setLocDenied();
-  return{loc:null,denied:r.err===1};
+  return{loc:null,denied:r.err===1,tampered:r.err===4,suspicious:r.err===5};
 }
 // 两坐标球面距离（km），管理端首尾对比用
 function locDistanceKm(a,b){
@@ -1339,7 +1406,7 @@ function locDistanceKm(a,b){
 // 最终库里只有 首+末 两条带 loc。剥离失败不影响打卡与对比（展示端按 ts 取首尾）。
 function stripPrevLastLoc(td,mid){
   const day=(state.punches&&state.punches[td])||[];
-  const withLoc=day.filter(r=>r.mid===mid&&r.loc&&r.loc!=='DENIED').sort((a,b)=>(a.ts||0)-(b.ts||0));
+  const withLoc=day.filter(r=>r.mid===mid&&r.loc&&r.loc!=='DENIED'&&r.loc!=='TAMPERED'&&r.loc!=='SUSPICIOUS').sort((a,b)=>(a.ts||0)-(b.ts||0));
   if(withLoc.length<2)return; // 只有「首」带 loc：保留，新卡自然成为「末」
   const prevLast=withLoc[withLoc.length-1];
   const strip=r=>{const o={...r};delete o.loc;return o};
@@ -2566,9 +2633,13 @@ async function doPunch(){
         const r=await getPunchLoc();
         if(r.loc)pd.loc=`${r.loc.lat},${r.loc.lng},${r.loc.acc||0},${r.loc.ts}`;
         else if(r.denied){pd.loc='DENIED';logEvent('定位未授权',`${selectedMember.name} 首卡时拒绝定位授权，考勤已标记「未授权」`)}
+        else if(r.tampered){pd.loc='TAMPERED';logEvent('定位API被篡改',`${selectedMember.name} 首卡时检测到定位API被篡改（可能使用虚拟定位），考勤已标记「异常」`)}
+        else if(r.suspicious){pd.loc='SUSPICIOUS';logEvent('定位坐标可疑',`${selectedMember.name} 首卡时检测到定位坐标可疑（精度异常/测试坐标），考勤已标记「可疑」`)}
       }else{
         const r=await getPunchLoc();
         if(r.loc){pd.loc=`${r.loc.lat},${r.loc.lng},${r.loc.acc||0},${r.loc.ts}`;stripPrevLastLoc(td,selectedMember.id)}
+        else if(r.tampered){pd.loc='TAMPERED';logEvent('定位API被篡改',`${selectedMember.name} 末卡时检测到定位API被篡改（可能使用虚拟定位），考勤已标记「异常」`)}
+        else if(r.suspicious){pd.loc='SUSPICIOUS';logEvent('定位坐标可疑',`${selectedMember.name} 末卡时检测到定位坐标可疑（精度异常/测试坐标），考勤已标记「可疑」`)}
       }
     }catch(e){}
   }
@@ -4528,12 +4599,13 @@ function populateCapWeekSelector(){
   if(!sel)return;
   const curWs=weekStartOf(new Date());
   const options=['<option value="">选择周期</option>'];
-  // 生成过去 8 周的选项
-  for(let i=1;i<=8;i++){
+  // 生成本周 + 过去 8 周的选项（本周 offset=0，1 周前 offset=-1，以此类推）
+  for(let i=0;i<=8;i++){
     const ws=addDays(curWs,-i*7);
     const we=addDays(ws,6);
     const label=`${ws.getMonth()+1}/${ws.getDate()}-${we.getMonth()+1}/${we.getDate()}`;
-    options.push(`<option value="${-i}">${label}（${i}周前）</option>`);
+    const tag=i===0?'（本周）':`（${i}周前）`;
+    options.push(`<option value="${-i}">${label}${tag}</option>`);
   }
   sel.innerHTML=options.join('');
 }
@@ -5279,7 +5351,13 @@ function renderTable(q,en,td){
     const dayLocRecs=mp.filter(r=>r.date===td&&r.loc);
     if(dayLocRecs.length){
       if(dayLocRecs.some(r=>r.loc==='DENIED')){
-        locHtml+=` <span title="该成员拒绝定位授权，已提示管理员" style="font-size:10px;color:var(--danger)">⚠未授权</span>`;
+        locHtml+=` <span title="该成员拒绝定位授权，已提示管理员" style="font-size:10px;color:var(--danger)">未授权</span>`;
+      }
+      if(dayLocRecs.some(r=>r.loc==='TAMPERED')){
+        locHtml+=` <span title="该成员检测到定位API被篡改（可能使用浏览器虚拟定位），已提示管理员" style="font-size:10px;color:var(--danger)">⚠定位异常</span>`;
+      }
+      if(dayLocRecs.some(r=>r.loc==='SUSPICIOUS')){
+        locHtml+=` <span title="该成员定位坐标可疑（精度异常/测试坐标），已提示管理员" style="font-size:10px;color:var(--warning)">⚠坐标可疑</span>`;
       }
       const geo=dayLocRecs.filter(r=>parseLoc(r)).sort((a,b)=>(a.ts||0)-(b.ts||0));
       if(geo.length){
