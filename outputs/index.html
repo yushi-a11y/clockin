@@ -26,11 +26,22 @@
     .page{display:none}.page.active{display:block}
     .emp{max-width:640px;margin:0 auto;padding:20px}
     .hero{text-align:center;padding:24px 0 16px}.hero .greet{font-size:16px;font-weight:500;margin-bottom:2px}.hero .time{font-family:var(--font-mono);font-size:56px;font-weight:500;letter-spacing:-.03em;line-height:1}.hero .date{font-size:13px;color:var(--muted);margin-top:6px}
-    .member-sel{margin:16px 0;display:flex;align-items:center;gap:10px}
-    .member-sel label{font-size:12px;font-weight:500;color:var(--muted);flex-shrink:0}
-    .member-sel select{flex:1;padding:8px 12px;border:1px solid var(--border);border-radius:var(--radius);font-size:14px;background:var(--surface);outline:none}
-    .member-sel select:focus{border-color:var(--primary)}
-    .member-sel select:disabled{opacity:.6;cursor:not-allowed;background:var(--surface-alt)}
+    .member-sel{margin:20px 0}
+    .member-sel-card{display:flex;align-items:center;gap:14px;padding:14px 18px;background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);transition:all .2s}
+    .member-sel-card:hover{border-color:var(--primary);box-shadow:0 2px 8px rgba(37,99,235,.08)}
+    .member-sel-icon{width:36px;height:36px;display:flex;align-items:center;justify-content:center;background:var(--primary-bg);border-radius:50%;color:var(--primary);flex-shrink:0}
+    .member-sel-icon svg{width:20px;height:20px}
+    .member-sel-content{flex:1;display:flex;flex-direction:column;gap:4px}
+    .member-sel-label{font-size:12px;font-weight:500;color:var(--muted)}
+    .member-sel-dropdown{width:100%;padding:6px 10px;border:none;background:transparent;font-size:15px;font-weight:500;color:var(--fg);outline:none;cursor:pointer}
+    .member-sel-dropdown:focus{outline:none}
+    .member-sel-dropdown option{font-size:14px;padding:8px}
+    .member-sel select:disabled{opacity:.6;cursor:not-allowed}
+    .empty-state{display:flex;flex-direction:column;align-items:center;justify-content:center;padding:60px 20px;text-align:center}
+    .empty-state-icon{width:64px;height:64px;display:flex;align-items:center;justify-content:center;background:var(--surface-alt);border-radius:50%;color:var(--muted);margin-bottom:16px}
+    .empty-state-icon svg{width:32px;height:32px}
+    .empty-state-title{font-size:15px;font-weight:500;color:var(--fg);margin-bottom:6px}
+    .empty-state-desc{font-size:13px;color:var(--muted-light)}
     .emp-tabs{display:flex;gap:4px;background:var(--surface-alt);padding:3px;border-radius:var(--radius);margin:0 0 4px}
     .emp-tab{flex:1;padding:8px 0;border:none;background:none;font-size:13px;font-weight:500;color:var(--muted);border-radius:var(--radius-sm);transition:all .15s}
     .emp-tab.active{background:var(--surface);color:var(--fg);box-shadow:var(--shadow-sm)}
@@ -289,7 +300,22 @@
 <!-- EMPLOYEE -->
 <div class="page active" id="pg-emp"><div class="emp">
   <section class="hero"><div class="greet" id="greeting"></div><div class="time" id="liveClock">--:--:--</div><div class="date" id="liveDate"></div></section>
-  <div class="member-sel"><label>我是</label><select id="memberSelect" onchange="selectMember(this.value)"><option value="">选择你的姓名</option></select></div>
+  <div class="member-sel">
+    <div class="member-sel-card">
+      <div class="member-sel-icon">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+          <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/>
+          <circle cx="12" cy="7" r="4"/>
+        </svg>
+      </div>
+      <div class="member-sel-content">
+        <label class="member-sel-label">我是</label>
+        <select id="memberSelect" onchange="selectMember(this.value)" class="member-sel-dropdown">
+          <option value="">选择你的姓名</option>
+        </select>
+      </div>
+    </div>
+  </div>
   <div class="emp-tabs" id="empTabs" style="display:none">
     <button class="emp-tab active" id="tab-punch" onclick="setEmpTab('punch')">打卡</button>
     <button class="emp-tab" id="tab-pick" onclick="setEmpTab('pick')">选班</button>
@@ -301,7 +327,18 @@
     <button class="emp-tab" id="tab-help" onclick="setEmpTab('help')">帮助</button>
     <button class="emp-tab" id="tab-performance" onclick="setEmpTab('performance')">绩效</button>
   </div>
-  <div id="empContent"><div style="text-align:center;padding:40px;color:var(--muted)">请先选择你的姓名</div></div>
+  <div id="empContent">
+    <div class="empty-state">
+      <div class="empty-state-icon">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+          <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/>
+          <circle cx="12" cy="7" r="4"/>
+        </svg>
+      </div>
+      <div class="empty-state-title">请从上方选择你的姓名</div>
+      <div class="empty-state-desc">灰色账户已被其他设备占用</div>
+    </div>
+  </div>
 </div></div>
 
 <!-- ADMIN -->
@@ -2475,7 +2512,7 @@ async function renderEmp(){
     document.getElementById('navAv').textContent='?';document.getElementById('navName').textContent='未选择';
   }
   const tabsEl=document.getElementById('empTabs');if(tabsEl)tabsEl.style.display=selectedMember?'flex':'none';
-  if(!selectedMember){empTab='punch';document.getElementById('empContent').innerHTML='<div style="text-align:center;padding:40px;color:var(--muted);font-size:14px">请从上方选择你的姓名<br><span style="font-size:12px;color:var(--muted-light);display:block;margin-top:4px">灰色账户已被其他设备占用</span></div>';return}
+  if(!selectedMember){empTab='punch';document.getElementById('empContent').innerHTML='<div class="empty-state"><div class="empty-state-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg></div><div class="empty-state-title">请从上方选择你的姓名</div><div class="empty-state-desc">灰色账户已被其他设备占用</div></div>';return}
   document.getElementById('tab-punch').classList.toggle('active',empTab==='punch');
   document.getElementById('tab-pick').classList.toggle('active',empTab==='pick');
   document.getElementById('tab-count').classList.toggle('active',empTab==='count');
