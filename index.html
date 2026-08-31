@@ -4238,7 +4238,9 @@ function renderPerformanceAdmin(){
     h+='<table class="cnt-tbl"><thead><tr><th>月份</th><th>小二</th><th>出勤</th><th>工时</th><th>迟到</th><th>缺卡</th><th>请假</th><th>评分</th><th>备注</th><th>更新时间</th><th>操作</th></tr></thead><tbody>';
     list.forEach(p=>{
       const m=TEAM.find(x=>+x.id===+p.mid);
-      h+=`<tr><td>${esc(p.month)}</td><td>${esc(m?m.name:'未知')}</td><td>${p.workDays}</td><td>${p.workHours}</td><td>${p.lateCount}</td><td>${p.missCount}</td><td>${p.leaveDays}</td><td>${fmtPerfScore(p.score)}</td><td style="font-size:11px;color:var(--muted);max-width:160px;text-align:left">${esc(p.remark||'—')}</td><td class="wk" style="white-space:nowrap">${fmtTs(p.ts)}</td><td><button class="btn-s" style="color:var(--danger);border-color:var(--danger)" onclick="deletePerformanceRecord('${p.id}')">删除</button></td></tr>`;
+      // 实时计算指标（除了评分是管理员录入的）
+      const calc = calcMonthMetrics(p.mid, p.month);
+      h+=`<tr><td>${esc(p.month)}</td><td>${esc(m?m.name:'未知')}</td><td>${calc.workDays}</td><td>${calc.workHours}</td><td>${calc.lateCount}</td><td>${calc.missCount}</td><td>${calc.leaveDays}</td><td>${fmtPerfScore(p.score)}</td><td style="font-size:11px;color:var(--muted);max-width:160px;text-align:left">${esc(p.remark||'—')}</td><td class="wk" style="white-space:nowrap">${fmtTs(p.ts)}</td><td><button class="btn-s" style="color:var(--danger);border-color:var(--danger)" onclick="deletePerformanceRecord('${p.id}')">删除</button></td></tr>`;
     });
     h+='</tbody></table>';
   }
