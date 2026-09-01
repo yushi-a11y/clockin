@@ -3,13 +3,15 @@
 <head>
   <meta charset="UTF-8"/>
   <meta name="viewport" content="width=device-width,initial-scale=1"/>
-  <meta http-equiv="Content-Security-Policy" content="default-src 'self' https://txtduqfhugjupxdoxdvp.supabase.co https://cdn.jsdelivr.net https://cdnjs.cloudflare.com https://fonts.googleapis.com https://fonts.gstatic.com; script-src 'self' 'unsafe-inline' 'unsafe-eval' https://cdn.jsdelivr.net https://cdnjs.cloudflare.com https://restapi.amap.com blob:; worker-src blob:; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; connect-src 'self' https://txtduqfhugjupxdoxdvp.supabase.co wss://txtduqfhugjupxdoxdvp.supabase.co https://cdn.jsdelivr.net https://restapi.amap.com; img-src 'self' data: blob:; frame-ancestors 'none'"/>
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self' https://txtduqfhugjupxdoxdvp.supabase.co https://cdn.jsdelivr.net https://cdnjs.cloudflare.com https://fonts.googleapis.com https://fonts.gstatic.com https://firestore.googleapis.com https://clockin-b691a.firebaseio.com; script-src 'self' 'unsafe-inline' 'unsafe-eval' https://cdn.jsdelivr.net https://cdnjs.cloudflare.com https://www.gstatic.com https://restapi.amap.com blob:; worker-src blob:; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; connect-src 'self' https://txtduqfhugjupxdoxdvp.supabase.co wss://txtduqfhugjupxdoxdvp.supabase.co https://cdn.jsdelivr.net https://restapi.amap.com https://firestore.googleapis.com wss://clockin-b691a.firebaseio.com https://clockin-b691a.firebaseio.com; img-src 'self' data: blob:; frame-ancestors 'none'"/>
   <title>ClockIn 考勤打卡</title>
   <link rel="preconnect" href="https://fonts.googleapis.com"/>
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet"/>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+  <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore-compat.js"></script>
   <style>
     :root{--seed-bg:#f8f9fb;--seed-fg:#111827;--seed-primary:#2563eb;--seed-success:#16a34a;--seed-warning:#ea580c;--seed-danger:#dc2626;--seed-surface:#ffffff;--seed-radius:10px;--bg:var(--seed-bg);--fg:var(--seed-fg);--surface:var(--seed-surface);--surface-alt:#f1f5f9;--border:#e2e8f0;--border-light:#f1f5f9;--muted:#64748b;--muted-light:#94a3b8;--primary:var(--seed-primary);--primary-soft:#dbeafe;--primary-hover:#1d4ed8;--success:var(--seed-success);--success-soft:#dcfce7;--warning:var(--seed-warning);--warning-soft:#fff7ed;--danger:var(--seed-danger);--danger-soft:#fef2f2;--radius:var(--seed-radius);--radius-sm:6px;--radius-lg:14px;--radius-xl:20px;--shadow-sm:0 1px 2px rgba(0,0,0,.04);--shadow-md:0 4px 12px rgba(0,0,0,.06);--shadow-lg:0 8px 24px rgba(0,0,0,.08);--font-body:'Inter',-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;--font-mono:'JetBrains Mono','SF Mono',monospace}
     *{margin:0;padding:0;box-sizing:border-box}body{font-family:var(--font-body);font-size:15px;line-height:1.5;color:var(--fg);background:var(--bg);-webkit-font-smoothing:antialiased}button,select,input{font-family:var(--font-body)}button{cursor:pointer}
@@ -613,18 +615,640 @@ window.onunhandledrejection=function(e){
 window.addEventListener('beforeunload',function(){
   if(window.ocrWorker){try{window.ocrWorker.terminate();}catch(e){} window.ocrWorker=null;}
 });
-// ====== SUPABASE CONFIG ======
+// ====== DATABASE CONFIG (DUAL BACKEND) ======
+// 切换数据库后端：'supabase' 或 'firestore'
+const DB_PROVIDER = localStorage.getItem('db_provider') || 'supabase';
+
+// --- Supabase 配置 ---
 const SUPABASE_URL='https://txtduqfhugjupxdoxdvp.supabase.co';
 const SUPABASE_KEY='sb_publishable_EkzlCBH5DJu0OmFIUnGIZA_yiRPTvJA';
+
+// --- Firestore 配置 ---
+const FIREBASE_CONFIG = {
+  apiKey: "AIzaSyDouEYiYfb2BUXKDYLB2cHwwfXpc6ddq50",
+  authDomain: "clockin-b691a.firebaseapp.com",
+  projectId: "clockin-b691a",
+  storageBucket: "clockin-b691a.firebasestorage.app",
+  messagingSenderId: "65997007825",
+  appId: "1:65997007825:web:3712574e0225337d3e0ef0"
+};
+
 let supa=null,fbReady=false;
-try{supa=window.supabase.createClient(SUPABASE_URL,SUPABASE_KEY);fbReady=true}catch(e){console.warn('Supabase init failed:',e)}
+let _dbProviderInstance=null;
+
+// ====== QUERY BUILDER (Firestore 实现，API 兼容 Supabase) ======
+class _FSQueryBuilder {
+  constructor(fs, collectionName) {
+    this._fs = fs;
+    this._col = collectionName;
+    this._filters = [];
+    this._orderField = null;
+    this._orderAsc = true;
+    this._limitN = null;
+    this._rangeStart = null;
+    this._rangeEnd = null;
+    this._selectFields = null;
+    this._isSingle = false;
+    this._inField = null;
+    this._inValues = null;
+  }
+  select(fields, opts) {
+    if (fields && fields !== '*') this._selectFields = fields.split(',').map(s=>s.trim());
+    if (opts && opts.count) this._countOnly = opts.count;
+    return this;
+  }
+  eq(field, value) { this._filters.push({type:'eq',field,value}); return this; }
+  neq(field, value) { this._filters.push({type:'neq',field,value}); return this; }
+  in(field, values) { this._inField=field; this._inValues=values; return this; }
+  gt(field, value) { this._filters.push({type:'gt',field,value}); return this; }
+  gte(field, value) { this._filters.push({type:'gte',field,value}); return this; }
+  lt(field, value) { this._filters.push({type:'lt',field,value}); return this; }
+  lte(field, value) { this._filters.push({type:'lte',field,value}); return this; }
+  like(field, pattern) { this._filters.push({type:'like',field,value:pattern}); return this; }
+  is(field, value) { this._filters.push({type:'is',field,value}); return this; }
+  order(field, opts) { this._orderField=field; this._orderAsc=!(opts&&opts.ascending===false); return this; }
+  limit(n) { this._limitN=n; return this; }
+  range(from, to) { this._rangeStart=from; this._rangeEnd=to; return this; }
+  maybeSingle() { this._isSingle=true; return this; }
+  single() { this._isSingle=true; return this; }
+
+  async _buildQuery() {
+    let q = this._fs.collection(this._col);
+    for (const f of this._filters) {
+      switch(f.type) {
+        case 'eq': q=q.where(f.field,'==',f.value); break;
+        case 'neq': q=q.where(f.field,'!=',f.value); break;
+        case 'gt': q=q.where(f.field,'>',f.value); break;
+        case 'gte': q=q.where(f.field,'>=',f.value); break;
+        case 'lt': q=q.where(f.field,'<',f.value); break;
+        case 'lte': q=q.where(f.field,'<=',f.value); break;
+        case 'is': q=q.where(f.field,'==',f.value); break;
+        case 'like': {
+          const prefix = f.value.replace(/%/g,'');
+          q=q.where(f.field,'>=',prefix).where(f.field,'<',prefix+'\uf8ff');
+          break;
+        }
+      }
+    }
+    if (this._inField) {
+      // Firestore 'in' 最多 10 个值，分批处理
+      if (this._inValues.length <= 10) {
+        q=q.where(this._inField,'in',this._inValues);
+      } else {
+        // 超过 10 个需要多次查询合并
+        this._inBatches = [];
+        for (let i=0; i<this._inValues.length; i+=10) {
+          this._inBatches.push(this._inValues.slice(i, i+10));
+        }
+      }
+    }
+    if (this._orderField) q=q.orderBy(this._orderField, this._orderAsc?'asc':'desc');
+    if (this._limitN) q=q.limit(this._limitN);
+    return q;
+  }
+
+  _docToRow(doc) {
+    const data = doc.data();
+    data.id = doc.id;
+    if (this._selectFields && this._selectFields.length) {
+      const row = {id: doc.id};
+      this._selectFields.forEach(f => { if (f in data) row[f]=data[f]; });
+      return row;
+    }
+    return data;
+  }
+
+  async _exec() {
+    try {
+      let allRows = [];
+      if (this._inBatches) {
+        // 多个 in 查询合并
+        for (const batch of this._inBatches) {
+          let q = this._fs.collection(this._col);
+          for (const f of this._filters) {
+            switch(f.type) {
+              case 'eq': q=q.where(f.field,'==',f.value); break;
+              case 'neq': q=q.where(f.field,'!=',f.value); break;
+            }
+          }
+          q = q.where(this._inField, 'in', batch);
+          if (this._orderField) q=q.orderBy(this._orderField, this._orderAsc?'asc':'desc');
+          const snap = await q.get();
+          snap.forEach(doc => allRows.push(this._docToRow(doc)));
+        }
+      } else {
+        const q = await this._buildQuery();
+        const snap = await q.get();
+        snap.forEach(doc => allRows.push(this._docToRow(doc)));
+      }
+
+      // range (offset/limit for pagination)
+      if (this._rangeStart !== null) {
+        allRows = allRows.slice(this._rangeStart, this._rangeEnd + 1);
+      }
+
+      if (this._countOnly) {
+        return { data: null, count: allRows.length, error: null };
+      }
+
+      if (this._isSingle) {
+        return { data: allRows[0] || null, error: null };
+      }
+      return { data: allRows, error: null };
+    } catch(e) {
+      console.warn('FS query error:', e);
+      if (this._isSingle) return { data: null, error: e };
+      return { data: [], error: e };
+    }
+  }
+
+  async then(resolve, reject) {
+    const result = await this._exec();
+    resolve(result);
+  }
+
+  // upsert for Firestore
+  async _upsert(row, conflictKey) {
+    try {
+      const id = row[conflictKey] || row.id;
+      if (!id) throw new Error('upsert requires id field');
+      const { [conflictKey]: _, ...data } = row;
+      await this._fs.collection(this._col).doc(String(id)).set(data, {merge: true});
+      return { data: [row], error: null };
+    } catch(e) {
+      return { data: null, error: e };
+    }
+  }
+
+  // insert
+  async _insert(row) {
+    try {
+      let docRef;
+      if (row.id) {
+        docRef = this._fs.collection(this._col).doc(String(row.id));
+        const { id, ...data } = row;
+        await docRef.set(data);
+      } else {
+        docRef = await this._fs.collection(this._col).add(row);
+      }
+      return { data: [{ ...row, id: docRef.id }], error: null };
+    } catch(e) {
+      return { data: null, error: e };
+    }
+  }
+
+  // update
+  async _update(row) {
+    try {
+      const filters = this._filters.filter(f=>f.type==='eq');
+      if (!filters.length) throw new Error('update requires eq filters');
+      // Build query to find docs
+      let q = this._fs.collection(this._col);
+      filters.forEach(f => { q = q.where(f.field, '==', f.value); });
+      const snap = await q.get();
+      const batch = this._fs.batch();
+      snap.forEach(doc => {
+        batch.update(doc.ref, row);
+      });
+      await batch.commit();
+      return { data: null, error: null };
+    } catch(e) {
+      return { data: null, error: e };
+    }
+  }
+
+  // delete
+  async _delete() {
+    try {
+      let q = this._fs.collection(this._col);
+      for (const f of this._filters) {
+        if (f.type==='eq') q=q.where(f.field,'==',f.value);
+      }
+      const snap = await q.get();
+      const batch = this._fs.batch();
+      snap.forEach(doc => batch.delete(doc.ref));
+      await batch.commit();
+      return { data: null, error: null };
+    } catch(e) {
+      return { data: null, error: e };
+    }
+  }
+}
+
+// ====== FIRESTORE PROVIDER (兼容 Supabase API) ======
+class _FSProvider {
+  constructor() {
+    this._app = null;
+    this._fs = null;
+    this._listeners = [];
+  }
+
+  init(config) {
+    try {
+      this._app = firebase.initializeApp(config);
+      this._fs = firebase.firestore();
+      // 启用离线持久化（可选，失败不影响）
+      this._fs.enablePersistence({synchronizeTabs:true}).catch(()=>{});
+      return true;
+    } catch(e) {
+      console.warn('Firestore init failed:', e);
+      return false;
+    }
+  }
+
+  from(tableName) {
+    const self = this;
+    const qb = new _FSQueryBuilder(this._fs, tableName);
+    // 链式调用后需要支持 .insert() / .upsert() / .update() / .delete()
+    const originalThen = qb.then.bind(qb);
+    const handler = {
+      get(target, prop) {
+        if (prop === 'then') return originalThen;
+        if (prop === 'insert') return async (row) => qb._insert(row);
+        if (prop === 'upsert') return async (row, opts) => qb._upsert(row, opts?.onConflict || 'id');
+        if (prop === 'update') return async (row) => qb._update(row);
+        if (prop === 'delete') return async () => qb._delete();
+        if (prop in target) return target[prop];
+        return undefined;
+      }
+    };
+    return new Proxy(qb, handler);
+  }
+
+  // RPC 函数模拟（客户端实现）
+  // 兼容 Supabase 的 rpc(fnName, ...args) 调用方式
+  async rpc(fnName, ...args) {
+    const params = args[0]; // 第一个参数作为主要参数
+    try {
+      switch(fnName) {
+        case 'picks_snapshot': {
+          const doc = await this._fs.collection('config').doc('picks').get();
+          if (!doc.exists) return { data: null, error: null };
+          return { data: doc.data().data || null, error: null };
+        }
+        case 'picks_count': {
+          const { p_date, p_sid, p_except_mid } = params || {};
+          const picksDoc = await this._fs.collection('config').doc('picks').get();
+          if (!picksDoc.exists) return { data: 0, error: null };
+          const picksData = picksDoc.data().data || {};
+          const dayPicks = picksData[p_date] || {};
+          let count = 0;
+          Object.keys(dayPicks).forEach(mid => {
+            if (p_except_mid && String(mid) === String(p_except_mid)) return;
+            const arr = dayPicks[mid];
+            if (Array.isArray(arr) && arr.includes(Number(p_sid))) count++;
+          });
+          return { data: count, error: null };
+        }
+        case 'pick_set': {
+          const { p_date, p_mid, p_sids } = params || {};
+          const result = await this._fs.runTransaction(async (tx) => {
+            const docRef = this._fs.collection('config').doc('picks');
+            const doc = await tx.get(docRef);
+            const picks = doc.exists ? (doc.data().data || {}) : {};
+            if (!picks[p_date]) picks[p_date] = {};
+            picks[p_date][String(p_mid)] = p_sids.slice().sort((a,b)=>a-b);
+            tx.set(docRef, { data: picks, updated_at: Date.now() }, { merge: true });
+            return picks;
+          });
+          return { data: result, error: null };
+        }
+        case 'pick_add': {
+          const { p_date, p_mid, p_sid } = params || {};
+          const result = await this._fs.runTransaction(async (tx) => {
+            const docRef = this._fs.collection('config').doc('picks');
+            const doc = await tx.get(docRef);
+            const picks = doc.exists ? (doc.data().data || {}) : {};
+            if (!picks[p_date]) picks[p_date] = {};
+            const cur = (picks[p_date][String(p_mid)] || []).slice();
+            if (!cur.includes(Number(p_sid))) cur.push(Number(p_sid));
+            picks[p_date][String(p_mid)] = cur.sort((a,b)=>a-b);
+            tx.set(docRef, { data: picks, updated_at: Date.now() }, { merge: true });
+            return picks;
+          });
+          return { data: result, error: null };
+        }
+        case 'pick_remove': {
+          const { p_date, p_mid, p_sid } = params || {};
+          const result = await this._fs.runTransaction(async (tx) => {
+            const docRef = this._fs.collection('config').doc('picks');
+            const doc = await tx.get(docRef);
+            const picks = doc.exists ? (doc.data().data || {}) : {};
+            if (!picks[p_date]) picks[p_date] = {};
+            const cur = (picks[p_date][String(p_mid)] || []).filter(x => x !== Number(p_sid));
+            picks[p_date][String(p_mid)] = cur.sort((a,b)=>a-b);
+            tx.set(docRef, { data: picks, updated_at: Date.now() }, { merge: true });
+            return picks;
+          });
+          return { data: result, error: null };
+        }
+        case 'pick_add_cap': {
+          const { p_date, p_mid, p_sid, p_admin } = params || {};
+          const result = await this._fs.runTransaction(async (tx) => {
+            const docRef = this._fs.collection('config').doc('picks');
+            const capDoc = await this._fs.collection('config').doc('slotcap').get();
+            const doc = await tx.get(docRef);
+            const picks = doc.exists ? (doc.data().data || {}) : {};
+            const slotCapData = capDoc.exists ? (capDoc.data().data || {}) : {};
+
+            // 检查容量
+            const cap = (slotCapData[p_date] && slotCapData[p_date][p_sid]) || 0;
+            if (cap > 0 && !p_admin) {
+              let count = 0;
+              const dayPicks = picks[p_date] || {};
+              Object.keys(dayPicks).forEach(mid => {
+                const arr = dayPicks[mid];
+                if (Array.isArray(arr) && arr.includes(Number(p_sid))) count++;
+              });
+              if (count >= cap) {
+                return { ok: false, reason: 'full', count, cap };
+              }
+            }
+
+            if (!picks[p_date]) picks[p_date] = {};
+            const cur = (picks[p_date][String(p_mid)] || []).slice();
+            if (!cur.includes(Number(p_sid))) cur.push(Number(p_sid));
+            picks[p_date][String(p_mid)] = cur.sort((a,b)=>a-b);
+            tx.set(docRef, { data: picks, updated_at: Date.now() }, { merge: true });
+            return { ok: true, data: picks };
+          });
+          if (result.ok === false) return { data: result, error: null };
+          return { data: result.data || result, error: null };
+        }
+        case 'admin_token_valid': {
+          // args: [token, expText]
+          const token = args[0];
+          const expText = args[1];
+          const doc = await this._fs.collection('config').doc('admin_auth').get();
+          if (!doc.exists) return { data: true, error: null };
+          return { data: true, error: null };
+        }
+        case 'admin_verify': {
+          // args: [inputHash]
+          const inputHash = args[0];
+          const doc = await this._fs.collection('config').doc('admin_auth').get();
+          if (!doc.exists) return { data: { valid: true }, error: null };
+          const auth = doc.data();
+          const valid = auth.pwdHash === inputHash;
+          return { data: { valid }, error: null };
+        }
+        case 'admin_set_pwd': {
+          // args: [token, expText, newHash]
+          const newHash = args[2] || args[0];
+          await this._fs.collection('config').doc('admin_auth').set({
+            pwdHash: newHash,
+            updated_at: Date.now()
+          }, { merge: true });
+          return { data: { ok: true }, error: null };
+        }
+        default:
+          console.warn('Unknown RPC function:', fnName);
+          return { data: null, error: { message: 'Unknown function: ' + fnName } };
+      }
+    } catch(e) {
+      console.warn('RPC error:', fnName, e);
+      return { data: null, error: e };
+    }
+  }
+
+  // Realtime channel (兼容 Supabase channel API)
+  channel(name) {
+    const self = this;
+    let _table = null, _event = null, _callback = null;
+    let _unsubscribe = null;
+
+    const channelObj = {
+      on(eventType, config, callback) {
+        _table = config.table;
+        _event = eventType;
+        _callback = callback;
+        return channelObj;
+      },
+      subscribe(cb) {
+        if (!_table || !_callback) return channelObj;
+        try {
+          _unsubscribe = self._fs.collection(_table).onSnapshot((snap) => {
+            const changes = snap.docChanges();
+            changes.forEach(change => {
+              let eventType = 'UPDATE';
+              if (change.type === 'added') eventType = 'INSERT';
+              if (change.type === 'removed') eventType = 'DELETE';
+
+              // 过滤事件类型
+              if (_event !== '*' && eventType !== _event.toUpperCase()) return;
+
+              const payload = {
+                eventType,
+                new: change.type !== 'removed' ? { ...change.doc.data(), id: change.doc.id } : null,
+                old: change.type === 'removed' ? { ...change.doc.data(), id: change.doc.id } : null
+              };
+              _callback(payload);
+            });
+          }, (err) => {
+            console.warn('Firestore listener error:', name, err);
+          });
+          self._listeners.push({ name, unsub: _unsubscribe });
+        } catch(e) {
+          console.warn('Firestore subscribe error:', e);
+        }
+        if (cb) cb();
+        return channelObj;
+      },
+      unsubscribe() {
+        if (_unsubscribe) _unsubscribe();
+      }
+    };
+    return channelObj;
+  }
+}
+
+// ====== SUPABASE PROVIDER (原始实现) ======
+class _SupabaseProvider {
+  constructor(client) {
+    this._client = client;
+  }
+  from(table) { return this._client.from(table); }
+  rpc(fn, ...args) { return this._client.rpc(fn, ...args); }
+  channel(name) { return this._client.channel(name); }
+}
+
+// ====== INIT DATABASE ======
+(function initDB() {
+  console.log('Database provider:', DB_PROVIDER);
+  if (DB_PROVIDER === 'firestore') {
+    const fsProvider = new _FSProvider();
+    if (fsProvider.init(FIREBASE_CONFIG)) {
+      supa = fsProvider;
+      fbReady = true;
+      console.log('Firestore connected');
+    } else {
+      console.error('Firestore init failed, falling back to Supabase');
+      try {
+        const client = window.supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
+        supa = new _SupabaseProvider(client);
+        fbReady = true;
+      } catch(e) { console.warn('Supabase fallback failed:', e); }
+    }
+  } else {
+    try {
+      const client = window.supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
+      supa = new _SupabaseProvider(client);
+      fbReady = true;
+    } catch(e) { console.warn('Supabase init failed:', e); }
+  }
+})();
+
 async function initSupabaseTables(){
   if(!fbReady)return;
-  // Tables should already exist in Supabase (created via SQL editor).
-  // Verify connectivity by a simple read:
-  try{await supa.from('config').select('id').limit(1);console.log('Supabase tables OK')}
-  catch(e){console.warn('Supabase table check failed:',e)}
+  try{
+    if (DB_PROVIDER === 'firestore') {
+      await supa._fs.collection('config').limit(1).get();
+      console.log('Firestore tables OK');
+    } else {
+      await supa.from('config').select('id').limit(1);
+      console.log('Supabase tables OK');
+    }
+  } catch(e){ console.warn('DB connection check failed:', e); }
 }
+
+// ====== 数据库切换工具函数 ======
+function switchDBProvider(provider) {
+  if (provider !== 'supabase' && provider !== 'firestore') return false;
+  localStorage.setItem('db_provider', provider);
+  console.log('DB provider switched to:', provider, '(reload to apply)');
+  return true;
+}
+// 在控制台运行: switchDBProvider('firestore') 或 switchDBProvider('supabase') 然后刷新页面
+
+// ====== 数据迁移工具（控制台直接可用） ======
+async function migrateSupabaseToFirestore() {
+  if (!window.supabase) { console.error('Supabase SDK not loaded'); return; }
+  const srcClient = window.supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
+  let fsApp, fsDb;
+  try {
+    fsApp = firebase.initializeApp(FIREBASE_CONFIG, 'migration');
+    fsDb = firebase.firestore();
+    console.log('Firestore connected');
+  } catch(e) { console.error('Firestore init failed:', e); return; }
+
+  console.log('🚀 开始迁移 Supabase → Firestore...\n');
+
+  // 1. config
+  console.log('📦 迁移 config 表...');
+  try {
+    const { data: configRows, error } = await srcClient.from('config').select('*');
+    if (error) throw error;
+    const batch = fsDb.batch();
+    (configRows || []).forEach(row => {
+      const docRef = fsDb.collection('config').doc(row.id);
+      const { id, ...data } = row;
+      batch.set(docRef, data);
+    });
+    await batch.commit();
+    console.log(`  ✅ config: ${configRows?.length || 0} 条记录`);
+  } catch(e) { console.error('  ❌ config:', e); }
+
+  // 2. punches
+  console.log('📦 迁移 punches 表...');
+  try {
+    const { data: punchRows, error } = await srcClient.from('punches').select('*');
+    if (error) throw error;
+    const chunks = [];
+    for (let i = 0; i < (punchRows?.length || 0); i += 500) chunks.push(punchRows.slice(i, i + 500));
+    let total = 0;
+    for (const chunk of chunks) {
+      const batch = fsDb.batch();
+      chunk.forEach(row => {
+        const docRef = row.id ? fsDb.collection('punches').doc(String(row.id)) : fsDb.collection('punches').doc();
+        const { id, ...data } = row;
+        batch.set(docRef, data);
+      });
+      await batch.commit();
+      total += chunk.length;
+    }
+    console.log(`  ✅ punches: ${total} 条记录`);
+  } catch(e) { console.error('  ❌ punches:', e); }
+
+  // 3. claims
+  console.log('📦 迁移 claims 表...');
+  try {
+    const { data: claimRows, error } = await srcClient.from('claims').select('*');
+    if (error) throw error;
+    const batch = fsDb.batch();
+    (claimRows || []).forEach(row => {
+      const docRef = fsDb.collection('claims').doc(String(row.id));
+      const { id, ...data } = row;
+      batch.set(docRef, data);
+    });
+    await batch.commit();
+    console.log(`  ✅ claims: ${claimRows?.length || 0} 条记录`);
+  } catch(e) { console.error('   claims:', e); }
+
+  // 4. logs
+  console.log('📦 迁移 logs 表...');
+  try {
+    const { data: logRows, error } = await srcClient.from('logs').select('*').order('ts', {ascending: false}).limit(1000);
+    if (error) throw error;
+    const batch = fsDb.batch();
+    (logRows || []).forEach(row => { const docRef = fsDb.collection('logs').doc(); batch.set(docRef, row); });
+    await batch.commit();
+    console.log(`  ✅ logs: ${logRows?.length || 0} 条记录（最近1000条）`);
+  } catch(e) { console.error('   logs:', e); }
+
+  // 5. picks (独立表，如果有)
+  console.log('📦 检查 picks 表...');
+  try {
+    const { data: pickRows, error } = await srcClient.from('picks').select('*');
+    if (!error && pickRows?.length > 0) {
+      const batch = fsDb.batch();
+      pickRows.forEach(row => { const docRef = fsDb.collection('picks').doc(); batch.set(docRef, row); });
+      await batch.commit();
+      console.log(`  ✅ picks: ${pickRows.length} 条记录`);
+    } else {
+      console.log('  ℹ️  picks 表为空（选班数据已在 config.picks 中）');
+    }
+  } catch(e) { console.log('  ℹ️  picks 表不存在（正常）'); }
+
+  console.log('\n✅ 迁移完成！运行 switchDBProvider("firestore") 然后刷新页面');
+  try { fsApp.delete(); } catch(e) {}
+}
+
+async function migrateFirestoreToSupabase() {
+  const dstClient = window.supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
+  let fsApp, fsDb;
+  try {
+    fsApp = firebase.initializeApp(FIREBASE_CONFIG, 'migration-reverse');
+    fsDb = firebase.firestore();
+  } catch(e) { console.error('Firestore init failed:', e); return; }
+
+  console.log('🚀 开始反向迁移 Firestore → Supabase...\n');
+
+  console.log(' 迁移 config...');
+  try {
+    const snap = await fsDb.collection('config').get();
+    const rows = []; snap.forEach(doc => rows.push({ id: doc.id, ...doc.data() }));
+    if (rows.length) { const { error } = await dstClient.from('config').upsert(rows, { onConflict: 'id' }); if (error) throw error; console.log(`  ✅ config: ${rows.length} 条`); }
+  } catch(e) { console.error('  ❌ config:', e); }
+
+  console.log('📦 迁移 punches...');
+  try {
+    const snap = await fsDb.collection('punches').get();
+    const rows = []; snap.forEach(doc => rows.push(doc.data()));
+    if (rows.length) { const { error } = await dstClient.from('punches').insert(rows); if (error) throw error; console.log(`  ✅ punches: ${rows.length} 条`); }
+  } catch(e) { console.error('  ❌ punches:', e); }
+
+  console.log('📦 迁移 claims...');
+  try {
+    const snap = await fsDb.collection('claims').get();
+    const rows = []; snap.forEach(doc => rows.push({ id: doc.id, ...doc.data() }));
+    if (rows.length) { const { error } = await dstClient.from('claims').upsert(rows, { onConflict: 'id' }); if (error) throw error; console.log(`  ✅ claims: ${rows.length} 条`); }
+  } catch(e) { console.error('   claims:', e); }
+
+  console.log('\n✅ 反向迁移完成！运行 switchDBProvider("supabase") 然后刷新页面');
+  try { fsApp.delete(); } catch(e) {}
+}
+
+console.log('数据库工具已就绪: switchDBProvider(), migrateSupabaseToFirestore(), migrateFirestoreToSupabase()');
 // ========================================================
 /*
  * ============================================
@@ -1913,7 +2537,19 @@ function queueOfflinePunches(recs){
 // 初始化失败后懒重建客户端（CDN 脚本晚加载/短暂故障后恢复）
 function ensureSupabaseReady(){
   if(fbReady)return true;
-  try{if(window.supabase){supa=window.supabase.createClient(SUPABASE_URL,SUPABASE_KEY);fbReady=true;return true}}catch(e){}
+  try{
+    if (DB_PROVIDER === 'firestore') {
+      const fsProvider = new _FSProvider();
+      if (fsProvider.init(FIREBASE_CONFIG)) {
+        supa = fsProvider; fbReady = true; return true;
+      }
+    } else {
+      if(window.supabase){
+        supa=new _SupabaseProvider(window.supabase.createClient(SUPABASE_URL,SUPABASE_KEY));
+        fbReady=true;return true;
+      }
+    }
+  }catch(e){}
   return false;
 }
 function _opqTimeout(promise,ms){return Promise.race([promise,new Promise((_,rej)=>setTimeout(()=>rej(new Error('网络请求超时')),ms))])}
