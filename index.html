@@ -2439,15 +2439,29 @@ async function initFBListeners(){
   schedulePoll();
 }
 async function testFBConnection(){
-  if(!fbReady){showToast('Supabase 未初始化');return}
+  if(!fbReady){showToast('数据库未初始化');return}
+  const btn=document.querySelector('[onclick="testFBConnection()"]');
+  if(btn){btn.disabled=true;btn.textContent='测试中...'}
   try{
-    // Write test (upsert a timestamp, then read it back — no delete since RLS blocks it)
     const ts=Date.now();
-    await supa.from('config').upsert({id:'_test',data:{ts},updated_at:ts},{onConflict:'id'});
-    const {data}=await supa.from('config').select('data').eq('id','_test').maybeSingle();
-    if(data?.data?.ts===ts){showToast('连接正常 · Supabase 已连接')}
-    else{showToast('连接异常：写入验证失败')}
-  }catch(e){showToast('连接失败：'+e.message)}
+    // 写入测试数据
+    await supa.from('config').upsert({id:'_conn_test',data:{ts,provider:DB_PROVIDER},updated_at:ts},{onConflict:'id'});
+    // Firestore 需要短暂延迟确保读取一致性
+    if(DB_PROVIDER==='firestore')await new Promise(r=>setTimeout(r,500));
+    // 读取验证
+    const {data}=await supa.from('config').select('*').eq('id','_conn_test').maybeSingle();
+    if(data&&data.data&&data.data.ts===ts){
+      showToast(`连接正常 · ${DB_PROVIDER==='firestore'?'Firestore':'Supabase'} 已连接`);
+    }else{
+      showToast('连接异常：写入验证失败');
+    }
+    // 清理测试数据
+    await supa.from('config').eq('id','_conn_test').delete();
+  }catch(e){
+    showToast('连接失败：'+e.message);
+  }finally{
+    if(btn){btn.disabled=false;btn.textContent='测试连接'}
+  }
 }
 
 // Account claiming via Supabase (daily reset)
