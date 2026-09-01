@@ -774,10 +774,8 @@ class _FSQueryBuilder {
     try {
       const id = row[conflictKey] || row.id;
       if (!id) throw new Error('upsert requires id field');
-      // 创建不含 id 的数据副本
+      // 保留 id 字段在文档数据中，以便查询过滤
       const data = { ...row };
-      delete data[conflictKey];
-      delete data.id;
       await this._fs.collection(this._col).doc(String(id)).set(data, { merge: true });
       return { data: [row], error: null };
     } catch(e) {
@@ -790,11 +788,9 @@ class _FSQueryBuilder {
     try {
       let docRef;
       if (row.id) {
-        // 如果指定了 id，使用 set 并合并（避免覆盖）
+        // 保留 id 字段在文档数据中
         docRef = this._fs.collection(this._col).doc(String(row.id));
-        const data = { ...row };
-        delete data.id;
-        await docRef.set(data, { merge: true });
+        await docRef.set(row, { merge: true });
       } else {
         docRef = await this._fs.collection(this._col).add(row);
       }
@@ -814,9 +810,8 @@ class _FSQueryBuilder {
       filters.forEach(f => { q = q.where(f.field, '==', f.value); });
       const snap = await q.get();
       const batch = this._fs.batch();
-      // 创建不含 id 的更新数据
+      // 保留 id 字段
       const updateData = { ...row };
-      delete updateData.id;
       snap.forEach(doc => {
         batch.update(doc.ref, updateData);
       });
