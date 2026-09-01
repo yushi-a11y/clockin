@@ -2442,14 +2442,21 @@ async function testFBConnection(){
   if(!fbReady){showToast('数据库未初始化');return}
   const btn=document.querySelector('[onclick="testFBConnection()"]');
   if(btn){btn.disabled=true;btn.textContent='测试中...'}
+  const timeout=ms=>new Promise((_,r)=>setTimeout(()=>r(new Error('超时('+ms+'ms)')),ms));
   try{
     const ts=Date.now();
-    // 写入测试数据
-    await supa.from('config').upsert({id:'_conn_test',data:{ts,provider:DB_PROVIDER},updated_at:ts},{onConflict:'id'});
+    // 写入测试数据（5 秒超时）
+    await Promise.race([
+      supa.from('config').upsert({id:'_conn_test',data:{ts,provider:DB_PROVIDER},updated_at:ts},{onConflict:'id'}),
+      timeout(5000)
+    ]);
     // Firestore 需要短暂延迟确保读取一致性
-    if(DB_PROVIDER==='firestore')await new Promise(r=>setTimeout(r,500));
-    // 读取验证
-    const {data}=await supa.from('config').select('*').eq('id','_conn_test').maybeSingle();
+    if(DB_PROVIDER==='firestore')await new Promise(r=>setTimeout(r,300));
+    // 读取验证（5 秒超时）
+    const {data}=await Promise.race([
+      supa.from('config').select('*').eq('id','_conn_test').maybeSingle(),
+      timeout(5000)
+    ]);
     if(data&&data.data&&data.data.ts===ts){
       showToast(`连接正常 · ${DB_PROVIDER==='firestore'?'Firestore':'Supabase'} 已连接`);
     }else{
