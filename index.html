@@ -709,13 +709,14 @@ class _FSQueryBuilder {
 
   _docToRow(doc) {
     const data = doc.data();
-    data.id = doc.id;
+    // 不修改原始数据，创建新对象
+    const row = { ...data, id: doc.id };
     if (this._selectFields && this._selectFields.length) {
-      const row = {id: doc.id};
-      this._selectFields.forEach(f => { if (f in data) row[f]=data[f]; });
-      return row;
+      const filtered = { id: doc.id };
+      this._selectFields.forEach(f => { if (f in row) filtered[f] = row[f]; });
+      return filtered;
     }
-    return data;
+    return row;
   }
 
   async _exec() {
@@ -733,6 +734,7 @@ class _FSQueryBuilder {
           }
           q = q.where(this._inField, 'in', batch);
           if (this._orderField) q=q.orderBy(this._orderField, this._orderAsc?'asc':'desc');
+          if (this._limitN) q=q.limit(this._limitN);
           const snap = await q.get();
           snap.forEach(doc => allRows.push(this._docToRow(doc)));
         }
@@ -772,8 +774,11 @@ class _FSQueryBuilder {
     try {
       const id = row[conflictKey] || row.id;
       if (!id) throw new Error('upsert requires id field');
-      const { [conflictKey]: _, ...data } = row;
-      await this._fs.collection(this._col).doc(String(id)).set(data, {merge: true});
+      // 创建不含 id 的数据副本
+      const data = { ...row };
+      delete data[conflictKey];
+      delete data.id;
+      await this._fs.collection(this._col).doc(String(id)).set(data, { merge: true });
       return { data: [row], error: null };
     } catch(e) {
       return { data: null, error: e };
@@ -785,9 +790,11 @@ class _FSQueryBuilder {
     try {
       let docRef;
       if (row.id) {
+        // 如果指定了 id，使用 set 并合并（避免覆盖）
         docRef = this._fs.collection(this._col).doc(String(row.id));
-        const { id, ...data } = row;
-        await docRef.set(data);
+        const data = { ...row };
+        delete data.id;
+        await docRef.set(data, { merge: true });
       } else {
         docRef = await this._fs.collection(this._col).add(row);
       }
@@ -807,8 +814,11 @@ class _FSQueryBuilder {
       filters.forEach(f => { q = q.where(f.field, '==', f.value); });
       const snap = await q.get();
       const batch = this._fs.batch();
+      // 创建不含 id 的更新数据
+      const updateData = { ...row };
+      delete updateData.id;
       snap.forEach(doc => {
-        batch.update(doc.ref, row);
+        batch.update(doc.ref, updateData);
       });
       await batch.commit();
       return { data: null, error: null };
@@ -1016,6 +1026,7 @@ class _FSProvider {
     const self = this;
     let _table = null, _event = null, _callback = null;
     let _unsubscribe = null;
+    let _isInitial = true; // 标记是否是初始快照
 
     const channelObj = {
       on(eventType, config, callback) {
@@ -1029,6 +1040,14 @@ class _FSProvider {
         try {
           _unsubscribe = self._fs.collection(_table).onSnapshot((snap) => {
             const changes = snap.docChanges();
+            
+            // 跳过初始快照（所有文档都会显示为 added）
+            if (_isInitial) {
+              _isInitial = false;
+              if (cb) cb(); // 初始加载完成回调
+              return;
+            }
+            
             changes.forEach(change => {
               let eventType = 'UPDATE';
               if (change.type === 'added') eventType = 'INSERT';
@@ -1051,7 +1070,6 @@ class _FSProvider {
         } catch(e) {
           console.warn('Firestore subscribe error:', e);
         }
-        if (cb) cb();
         return channelObj;
       },
       unsubscribe() {
