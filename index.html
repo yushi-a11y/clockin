@@ -1026,7 +1026,7 @@ class _FSProvider {
     const self = this;
     let _table = null, _event = null, _callback = null;
     let _unsubscribe = null;
-    let _isInitial = true; // 标记是否是初始快照
+    let _initialized = false;
 
     const channelObj = {
       on(eventType, config, callback) {
@@ -1041,19 +1041,19 @@ class _FSProvider {
           _unsubscribe = self._fs.collection(_table).onSnapshot((snap) => {
             const changes = snap.docChanges();
             
-            // 跳过初始快照（所有文档都会显示为 added）
-            if (_isInitial) {
-              _isInitial = false;
-              if (cb) cb(); // 初始加载完成回调
+            // 第一次快照是初始加载，标记为已初始化
+            if (!_initialized) {
+              _initialized = true;
+              if (cb) cb();
               return;
             }
             
+            // 处理后续变更
             changes.forEach(change => {
               let eventType = 'UPDATE';
               if (change.type === 'added') eventType = 'INSERT';
               if (change.type === 'removed') eventType = 'DELETE';
 
-              // 过滤事件类型
               if (_event !== '*' && eventType !== _event.toUpperCase()) return;
 
               const payload = {
@@ -6852,7 +6852,7 @@ chkSess();initSupabaseTables().then(()=>{initFBListeners();syncServerTime(true)}
   if(!fbReady)return;
   try{
     await Promise.race([supa.from('config').upsert({id:'_diag',data:{t:Date.now()},updated_at:Date.now()},{onConflict:'id'}),new Promise((_,r)=>setTimeout(()=>r(new Error('超时')),5000))]);
-    await Promise.race([supa.from('config').delete().eq('id','_diag'),new Promise((_,r)=>setTimeout(()=>r(new Error('超时')),3000))]);
+    await Promise.race([supa.from('config').eq('id','_diag').delete(),new Promise((_,r)=>setTimeout(()=>r(new Error('超时')),3000))]);
   }catch(e){console.warn('Supabase写入不可用:',e.message)}
 })();
 if(!fbReady)document.getElementById('syncBadge').innerHTML='<span class="dot"></span>单机版';
