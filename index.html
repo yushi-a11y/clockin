@@ -1858,8 +1858,8 @@ function dayEditable(dateStr){
   if(dateStr<tdStr())return false;
   return true;
 }
-// 成员在某天的有效班次（picks 为准；无 picks 记录时，仅今天回退到旧的 shiftIds 以兼容存量数据）
-function memberShifts(m,dateStr){const p=picks[dateStr];if(p&&p[m.id]!==undefined)return p[m.id]||[];if(dateStr===tdStr()&&Array.isArray(m.shiftIds))return m.shiftIds;return[]}
+// 成员在某天的有效班次（严格以 picks 选班数据为准，无选班记录则无班次）
+function memberShifts(m,dateStr){const p=picks[dateStr];if(p&&p[m.id]!==undefined)return p[m.id]||[];return[]}
 let picksOptSeq=0; // 乐观写入序号：每次本地改写 picks 自增；服务器返回快照时若序号已变大，说明有更新的本地写入，不用旧快照覆盖（杜绝快速连点时班次"闪掉"）
 function setMemberPick(dateStr,mid,sids){if(!picks[dateStr])picks[dateStr]={};picks[dateStr][mid]=sids.slice().sort((a,b)=>a-b);picksOptSeq++;_invalidateMonthCache()}
 // 并发选班原子写入：调用服务器端 pick_set 函数（行锁排队，杜绝多人同时选班互相覆盖）。
