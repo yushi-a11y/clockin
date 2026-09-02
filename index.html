@@ -1014,17 +1014,29 @@ class _FSProvider {
           const token = args[0];
           const expText = args[1];
           const doc = await this._fs.collection('config').doc('admin_auth').get();
-          if (!doc.exists) return { data: true, error: null };
-          return { data: true, error: null };
+          if (!doc.exists) return { data: { ok: true }, error: null };
+          const auth = doc.data();
+          // 验证 token 是否匹配且未过期
+          const valid = auth.token === token && auth.exp === expText;
+          return { data: { ok: valid }, error: null };
         }
         case 'admin_verify': {
           // args: [inputHash]
           const inputHash = args[0];
           const doc = await this._fs.collection('config').doc('admin_auth').get();
-          if (!doc.exists) return { data: { valid: true }, error: null };
+          if (!doc.exists) return { data: { ok: true, token: 'local', exp: '' }, error: null };
           const auth = doc.data();
           const valid = auth.pwdHash === inputHash;
-          return { data: { valid }, error: null };
+          if (valid) {
+            const token = 'fs_' + Date.now().toString(36);
+            const exp = new Date(Date.now() + 2 * 3600000).toISOString();
+            // 存储 token 供 admin_token_valid 验证
+            await this._fs.collection('config').doc('admin_auth').set({
+              token, exp, pwdHash: auth.pwdHash, updated_at: Date.now()
+            }, { merge: true });
+            return { data: { ok: true, token, exp }, error: null };
+          }
+          return { data: { ok: false, reason: 'bad_credentials' }, error: null };
         }
         case 'admin_set_pwd': {
           // args: [token, expText, newHash]
@@ -2640,9 +2652,10 @@ async function flushOfflinePunches(silent){
     for(const rec of q){
       try{
         if(!validatePunch(rec)){dropped++;logSecurityEvent('invalid_opq_punch',`Offline queue punch dropped by validation: mid=${rec.mid}, date=${rec.date}`);continue}
-        // 云端去重：同键打卡已存在（可能经其它途径写入）则直接销账
-        const {data:ex}=await _opqTimeout(supa.from('punches').select('id').eq('sid',rec.sid).eq('t',rec.t).eq('mid',rec.mid).eq('date',rec.date).limit(1),8000);
-        if(ex&&ex.length){dropped++;continue}
+        // 云端去重：按指纹匹配，避免多字段复合索引问题
+        const fp=`${rec.sid}_${rec.t}_${rec.mid}_${rec.date}_${rec.time}`;
+        const {data:ex}=await _opqTimeout(supa.from('punches').select('*').eq('mid',rec.mid).eq('date',rec.date).limit(50),8000);
+        if(ex&&ex.some(p=>`${p.sid}_${p.t}_${p.mid}_${p.date}_${p.time}`===fp)){dropped++;continue}
         let insRes=await _opqTimeout(supa.from('punches').insert(_opqSanitize(rec)),8000).then(r=>({error:r.error||null})).catch(err=>({error:err}));
         // 降级保护：loc 列尚未建立时，丢弃定位重试一次，避免整条打卡被误判为永久失败
         if(insRes.error&&rec.loc){
