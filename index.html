@@ -719,11 +719,29 @@ class _FSQueryBuilder {
     return row;
   }
 
+  // 辅助：检测是否有针对 id 字段的 eq/in 过滤（迁移后的文档没有 id 字段，需用 doc() 直接查找）
+  _idFilter() {
+    const eqId = this._filters.find(f => f.type === 'eq' && f.field === 'id');
+    if (eqId) return { type: 'eq', value: String(eqId.value) };
+    if (this._inField === 'id' && this._inValues) return { type: 'in', values: this._inValues.map(String) };
+    return null;
+  }
+
   async _exec() {
     try {
       let allRows = [];
-      if (this._inBatches) {
-        // 多个 in 查询合并
+      const idF = this._idFilter();
+
+      if (idF && idF.type === 'eq') {
+        // 直接按文档 ID 查找，避免 .where('id','==',...) 查不到迁移后无 id 字段的文档
+        const doc = await this._fs.collection(this._col).doc(idF.value).get();
+        if (doc.exists) allRows.push(this._docToRow(doc));
+      } else if (idF && idF.type === 'in') {
+        // in('id', [...]) → 逐个按文档 ID 查找
+        const results = await Promise.all(idF.values.map(v => this._fs.collection(this._col).doc(v).get()));
+        results.forEach(doc => { if (doc.exists) allRows.push(this._docToRow(doc)); });
+      } else if (this._inBatches) {
+        // 多个 in 查询合并（非 id 字段）
         for (const batch of this._inBatches) {
           let q = this._fs.collection(this._col);
           for (const f of this._filters) {
@@ -805,16 +823,20 @@ class _FSQueryBuilder {
     try {
       const filters = this._filters.filter(f=>f.type==='eq');
       if (!filters.length) throw new Error('update requires eq filters');
-      // Build query to find docs
-      let q = this._fs.collection(this._col);
-      filters.forEach(f => { q = q.where(f.field, '==', f.value); });
-      const snap = await q.get();
+      const idF = filters.find(f => f.field === 'id');
       const batch = this._fs.batch();
-      // 保留 id 字段
       const updateData = { ...row };
-      snap.forEach(doc => {
-        batch.update(doc.ref, updateData);
-      });
+      if (idF) {
+        // 直接按文档 ID 查找，兼容迁移后无 id 字段的文档
+        const docRef = this._fs.collection(this._col).doc(String(idF.value));
+        const doc = await docRef.get();
+        if (doc.exists) batch.update(doc.ref, updateData);
+      } else {
+        let q = this._fs.collection(this._col);
+        filters.forEach(f => { q = q.where(f.field, '==', f.value); });
+        const snap = await q.get();
+        snap.forEach(doc => { batch.update(doc.ref, updateData); });
+      }
       await batch.commit();
       return { data: null, error: null };
     } catch(e) {
@@ -825,13 +847,20 @@ class _FSQueryBuilder {
   // delete
   async _delete() {
     try {
-      let q = this._fs.collection(this._col);
-      for (const f of this._filters) {
-        if (f.type==='eq') q=q.where(f.field,'==',f.value);
-      }
-      const snap = await q.get();
+      const idF = this._filters.find(f => f.type === 'eq' && f.field === 'id');
       const batch = this._fs.batch();
-      snap.forEach(doc => batch.delete(doc.ref));
+      if (idF) {
+        // 直接按文档 ID 删除，兼容迁移后无 id 字段的文档
+        const docRef = this._fs.collection(this._col).doc(String(idF.value));
+        batch.delete(docRef);
+      } else {
+        let q = this._fs.collection(this._col);
+        for (const f of this._filters) {
+          if (f.type==='eq') q=q.where(f.field,'==',f.value);
+        }
+        const snap = await q.get();
+        snap.forEach(doc => batch.delete(doc.ref));
+      }
       await batch.commit();
       return { data: null, error: null };
     } catch(e) {
@@ -1718,6 +1747,8 @@ function slotCount(dateStr,sid,exceptMid){let n=0;TEAM.forEach(m=>{if(exceptMid!
 function slotCapOf(dateStr,sid){const d=slotCap[dateStr];const v=d&&d[sid];return v>0?v:0}
 function setSlotCap(dateStr,sid,n){if(!slotCap[dateStr])slotCap[dateStr]={};if(n>0)slotCap[dateStr][sid]=n;else delete slotCap[dateStr][sid];if(!Object.keys(slotCap[dateStr]).length)delete slotCap[dateStr]}
 function pruneSlotCap(){const cutoff=ymd(addDays(new Date(),-60));Object.keys(slotCap).forEach(d=>{if(d<cutoff)delete slotCap[d]})}
+// 自动校正 slotCap：(1) 容量值不得低于实际选班人数 (2) 为 picks 中有记录但 slotCap 缺失的日期创建条目
+function reconcileSlotCap(){let changed=false;const en=state.shifts.filter(s=>s.enabled);Object.keys(picks).forEach(ds=>{if(!slotCap[ds])slotCap[ds]={};en.forEach(sh=>{const actual=slotCount(ds,sh.id);const cur=slotCap[ds][sh.id]||0;if(actual>0&&cur<actual){slotCap[ds][sh.id]=actual;changed=true}})});if(changed){sv('csc6',slotCap);syncSlotCap()}}
 // 实时满员校验：直接从 Supabase 拉取最新选班数据统计某时段人数，规避本地缓存延迟（并发抢班防护）
 async function freshSlotCount(dateStr,sid,exceptMid){
   if(!fbReady)return slotCount(dateStr,sid,exceptMid);
@@ -2339,6 +2370,7 @@ async function initFBListeners(){
     await pullPicksSelCfg();
     prunePicks();
     pruneSlotCap();
+    reconcileSlotCap();
     pruneSwaps();
     pruneLeaves();
     pruneLocalPunches();
@@ -2539,11 +2571,15 @@ async function fbPunch(punchData){
     return false;
   }
   for(let attempt=0;attempt<3;attempt++){
-    // sd / offline 是本地专有字段（punches 表无此列），写云端前统一剔除
-    try{await supa.from('punches').insert(_opqSanitize(punchData));return true}catch(e){
+    // offline 是本地专有字段（punches 表无此列），写云端前统一剔除；sd（班次实例日期）已加入 OPQ_PUNCH_COLS 以支持跨天班次准确匹配
+    try{
+      const res=await supa.from('punches').insert(_opqSanitize(punchData));
+      if(res.error)throw res.error;  // 适配器不抛异常，需手动检查 error
+      return true;
+    }catch(e){
       // 降级保护：若 punches 表尚未添加 loc 列（SQL 未执行），丢弃定位后重试，
       // 保证打卡本体永远不因定位字段而失败
-      if(punchData.loc){const fb={...punchData};delete fb.loc;try{await supa.from('punches').insert(_opqSanitize(fb));return true}catch(e2){}}
+      if(punchData.loc){const fb={...punchData};delete fb.loc;try{const r2=await supa.from('punches').insert(_opqSanitize(fb));if(r2.error)throw r2.error;return true}catch(e2){}}
       if(attempt===2){showToast('打卡已保存本地 · 云端同步失败，联网后将自动重试');return false}
       else await new Promise(r=>setTimeout(r,1000*(attempt+1)));
     }
@@ -2588,7 +2624,7 @@ function ensureSupabaseReady(){
 }
 function _opqTimeout(promise,ms){return Promise.race([promise,new Promise((_,rej)=>setTimeout(()=>rej(new Error('网络请求超时')),ms))])}
 // punches 表实际列（见建表脚本）：云端写入前剔除 offline 等非表字段，避免 insert 报错
-const OPQ_PUNCH_COLS=['sid','t','time','ts','mid','date','name','makeup','loc'];
+const OPQ_PUNCH_COLS=['sid','t','time','ts','mid','date','name','makeup','loc','sd'];
 function _opqSanitize(rec){const o={};for(const k of OPQ_PUNCH_COLS){if(rec[k]!==undefined)o[k]=rec[k]}return o}
 async function flushOfflinePunches(silent){
   if(_opqFlushing)return;
@@ -2951,9 +2987,11 @@ function fbPunchKey(p){return `${p.sid}_${p.t}_${p.mid}_${p.date}_${p.time}`}
 // 将 Supabase 拉取到的打卡记录合并到 fbPunches，避免覆盖其他日期的缓存
 function mergeFbPunches(rows){
   if(!Array.isArray(rows)||!rows.length)return;
-  const seen=new Set(fbPunches.map(p=>p.id||fbPunchKey(p)));
+  // 统一用 fbPunchKey（指纹）去重，不能用 p.id：Firestore 文档 ID 是自动生成的，
+  // 与本地 push 的 punch 指纹不同，会导致同一笔打卡出现两条记录
+  const seen=new Set(fbPunches.map(p=>fbPunchKey(p)));
   rows.forEach(r=>{
-    const key=r.id||fbPunchKey(r);
+    const key=fbPunchKey(r);
     if(!seen.has(key)){seen.add(key);fbPunches.push(r)}
   });
 }
@@ -4950,19 +4988,17 @@ function calcMonthMetrics(mid, monthStr) {
       const shift = state.shifts.find(s => s.id === sid);
       if (!shift) return;
 
-      const startPunch = dayPunches.find(p => p.sid === sid && p.t === 's');
-      const endPunch = dayPunches.find(p => p.sid === sid && p.t === 'e');
+      const startPunch = instPunch(dayPunches, shift, ds, 's');
+      const endPunch = instPunch(dayPunches, shift, ds, 'e');
       const shiftTol = shift.tolerance || 5;
 
-      // 工时：有任意一条打卡即按排班时长计入（与 ss 状态保持一致）
-      if (startPunch || endPunch) {
-        dayWorked = true;
-        const [sh, sm] = shift.start.split(':').map(Number);
-        const [eh, em] = shift.end.split(':').map(Number);
-        let hours = (eh * 60 + em - sh * 60 - sm) / 60;
-        if (hours <= 0) hours += 24; // 跨天或 00:00 结束
-        workHours += hours;
-      }
+      // 工时：只要是选班就算，不论是否打卡
+      dayWorked = true;
+      const [sh, sm] = shift.start.split(':').map(Number);
+      const [eh, em] = shift.end.split(':').map(Number);
+      let hours = (eh * 60 + em - sh * 60 - sm) / 60;
+      if (hours <= 0) hours += 24; // 跨天或 00:00 结束
+      workHours += hours;
 
       // 迟到判断：使用班次自身容忍值，与打卡页 ss() 保持一致
       if (startPunch && startPunch.time) {
@@ -6577,7 +6613,7 @@ async function fetchAllPunches(){
   }
   const rows=[];const PAGE=1000;let offset=0;
   while(true){
-    const {data,error}=await supa.from('punches').select('*').order('id',{ascending:true}).range(offset,offset+PAGE-1);
+    const {data,error}=await supa.from('punches').select('*').order('ts',{ascending:true}).range(offset,offset+PAGE-1);
     if(error)throw error;
     if(!data||!data.length)break;
     rows.push(...data);
