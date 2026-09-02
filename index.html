@@ -1747,8 +1747,8 @@ function slotCount(dateStr,sid,exceptMid){let n=0;TEAM.forEach(m=>{if(exceptMid!
 function slotCapOf(dateStr,sid){const d=slotCap[dateStr];const v=d&&d[sid];return v>0?v:0}
 function setSlotCap(dateStr,sid,n){if(!slotCap[dateStr])slotCap[dateStr]={};if(n>0)slotCap[dateStr][sid]=n;else delete slotCap[dateStr][sid];if(!Object.keys(slotCap[dateStr]).length)delete slotCap[dateStr]}
 function pruneSlotCap(){const cutoff=ymd(addDays(new Date(),-60));Object.keys(slotCap).forEach(d=>{if(d<cutoff)delete slotCap[d]})}
-// 自动校正 slotCap：(1) 容量值不得低于实际选班人数 (2) 为 picks 中有记录但 slotCap 缺失的日期创建条目
-function reconcileSlotCap(){let changed=false;const en=state.shifts.filter(s=>s.enabled);Object.keys(picks).forEach(ds=>{if(!slotCap[ds])slotCap[ds]={};en.forEach(sh=>{const actual=slotCount(ds,sh.id);const cur=slotCap[ds][sh.id]||0;if(actual>0&&cur<actual){slotCap[ds][sh.id]=actual;changed=true}})});if(changed){sv('csc6',slotCap);syncSlotCap()}}
+// 自动同步 slotCap 为实际选班人数（选班人数=容量上限，保持一致）
+function reconcileSlotCap(){let changed=false;const en=state.shifts.filter(s=>s.enabled);Object.keys(picks).forEach(ds=>{if(!slotCap[ds])slotCap[ds]={};en.forEach(sh=>{const actual=slotCount(ds,sh.id);const cur=slotCap[ds][sh.id]||0;if(actual!==cur){slotCap[ds][sh.id]=actual;changed=true}})});if(changed){sv('csc6',slotCap);syncSlotCap()}}
 // 实时满员校验：直接从 Supabase 拉取最新选班数据统计某时段人数，规避本地缓存延迟（并发抢班防护）
 async function freshSlotCount(dateStr,sid,exceptMid){
   if(!fbReady)return slotCount(dateStr,sid,exceptMid);
