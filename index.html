@@ -731,17 +731,26 @@ class _FSQueryBuilder {
     try {
       let allRows = [];
       const idF = this._idFilter();
+      
+      // 日志：记录查询参数
+      const filterDesc = this._filters.map(f => `${f.field} ${f.type} ${JSON.stringify(f.value)}`).join(', ');
+      console.log(`[FS._exec] 集合: ${this._col}, 过滤: [${filterDesc}], idFilter:`, idF);
 
       if (idF && idF.type === 'eq') {
         // 直接按文档 ID 查找，避免 .where('id','==',...) 查不到迁移后无 id 字段的文档
+        console.log(`[FS._exec] 路径: 按文档 ID 查找 (${idF.value})`);
         const doc = await this._fs.collection(this._col).doc(idF.value).get();
         if (doc.exists) allRows.push(this._docToRow(doc));
+        console.log(`[FS._exec] 结果: ${allRows.length} 条`);
       } else if (idF && idF.type === 'in') {
         // in('id', [...]) → 逐个按文档 ID 查找
+        console.log(`[FS._exec] 路径: 批量文档 ID 查找 (${idF.values.length} 个)`);
         const results = await Promise.all(idF.values.map(v => this._fs.collection(this._col).doc(v).get()));
         results.forEach(doc => { if (doc.exists) allRows.push(this._docToRow(doc)); });
+        console.log(`[FS._exec] 结果: ${allRows.length} 条`);
       } else if (this._inBatches) {
         // 多个 in 查询合并（非 id 字段）
+        console.log(`[FS._exec] 路径: 批量 in 查询 (${this._inBatches.length} 批)`);
         for (const batch of this._inBatches) {
           let q = this._fs.collection(this._col);
           for (const f of this._filters) {
@@ -756,10 +765,13 @@ class _FSQueryBuilder {
           const snap = await q.get();
           snap.forEach(doc => allRows.push(this._docToRow(doc)));
         }
+        console.log(`[FS._exec] 结果: ${allRows.length} 条`);
       } else {
         const q = await this._buildQuery();
+        console.log(`[FS._exec] 路径: 普通查询`);
         const snap = await q.get();
         snap.forEach(doc => allRows.push(this._docToRow(doc)));
+        console.log(`[FS._exec] 结果: ${allRows.length} 条 (快照 ${snap.size} 条)`);
       }
 
       // range (offset/limit for pagination)
@@ -776,7 +788,7 @@ class _FSQueryBuilder {
       }
       return { data: allRows, error: null };
     } catch(e) {
-      console.warn('FS query error:', e);
+      console.error('[FS._exec] ✗ 查询失败:', e);
       if (this._isSingle) return { data: null, error: e };
       return { data: [], error: e };
     }
