@@ -1,0 +1,302 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>批量补录打卡</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #f5f5f5; padding: 20px; max-width: 800px; margin: 0 auto; }
+    .card { background: white; border-radius: 8px; padding: 20px; margin-bottom: 16px; box-shadow: 0 1px 3px rgba(0,0,0,0.1); }
+    h1 { font-size: 22px; margin-bottom: 16px; color: #333; }
+    h2 { font-size: 16px; margin-bottom: 12px; color: #555; }
+    textarea { width: 100%; padding: 12px; border: 1px solid #ddd; border-radius: 4px; font-family: monospace; font-size: 13px; resize: vertical; }
+    button { background: #007bff; color: white; border: none; padding: 10px 20px; border-radius: 4px; cursor: pointer; font-size: 14px; margin: 4px; }
+    button:hover { background: #0056b3; }
+    button:disabled { background: #ccc; cursor: not-allowed; }
+    button.success { background: #28a745; }
+    button.danger { background: #dc3545; }
+    .status { padding: 12px; border-radius: 4px; margin: 12px 0; font-size: 14px; }
+    .status.ok { background: #d4edda; color: #155724; }
+    .status.error { background: #f8d7da; color: #721c24; }
+    .status.info { background: #d1ecf1; color: #0c5460; }
+    .log { background: #f8f9fa; border: 1px solid #dee2e6; border-radius: 4px; padding: 12px; font-family: monospace; font-size: 12px; max-height: 300px; overflow-y: auto; margin: 12px 0; }
+    .log-entry { margin: 4px 0; padding: 4px 0; border-bottom: 1px solid #eee; }
+    .log-entry.error { color: #dc3545; }
+    .log-entry.success { color: #28a745; }
+    pre { background: #f8f9fa; padding: 12px; border-radius: 4px; font-size: 12px; overflow-x: auto; margin: 12px 0; }
+    table { width: 100%; border-collapse: collapse; margin: 12px 0; }
+    th, td { border: 1px solid #ddd; padding: 8px; text-align: left; font-size: 13px; }
+    th { background: #f8f9fa; font-weight: 600; }
+    .hint { background: #fff3cd; border: 1px solid #ffc107; border-radius: 4px; padding: 12px; font-size: 13px; margin: 12px 0; }
+  </style>
+</head>
+<body>
+  <h1>📝 批量补录打卡数据</h1>
+  
+  <div class="card">
+    <h2>使用说明</h2>
+    <div class="hint">
+      <strong>数据格式（JSON 数组）：</strong><br>
+      每条记录包含：mid（员工ID）、sid（班次ID）、t（s=上班，e=下班）、time（HH:MM）、date（YYYY-MM-DD）、name（员工姓名）、sd（班次日期，通常与 date 相同）<br><br>
+      <strong>示例：</strong><br>
+      <pre>[
+  {"mid": 1, "sid": 7, "t": "s", "time": "08:00", "date": "2026-09-03", "name": "张三", "sd": "2026-09-03"},
+  {"mid": 1, "sid": 7, "t": "e", "time": "09:00", "date": "2026-09-03", "name": "张三", "sd": "2026-09-03"}
+]</pre>
+    </div>
+  </div>
+  
+  <div class="card">
+    <h2>1. 输入打卡数据</h2>
+    <textarea id="punchData" rows="15" placeholder='[
+  {"mid": 1, "sid": 7, "t": "s", "time": "08:00", "date": "2026-09-03", "name": "张三", "sd": "2026-09-03"},
+  {"mid": 1, "sid": 7, "t": "e", "time": "09:00", "date": "2026-09-03", "name": "张三", "sd": "2026-09-03"}
+]'></textarea>
+    <div>
+      <button onclick="validateData()">验证数据</button>
+      <button onclick="loadTemplate()">加载模板</button>
+      <button onclick="clearData()" class="danger">清空</button>
+    </div>
+    <div id="validationResult"></div>
+  </div>
+  
+  <div class="card">
+    <h2>2. 执行补录</h2>
+    <div>
+      <button onclick="executeImport()" id="importBtn" disabled>开始补录</button>
+      <button onclick="dryRun()" id="dryRunBtn" disabled>试运行（不写入）</button>
+    </div>
+    <div id="importStatus"></div>
+  </div>
+  
+  <div class="card">
+    <h2>3. 执行日志</h2>
+    <div class="log" id="log"></div>
+    <button onclick="copyLog()">复制日志</button>
+  </div>
+  
+  <script type="module">
+    import { initializeApp } from 'https://www.gstatic.com/firebasejs/10.7.1/firebase-app.js';
+    import { getFirestore, collection, addDoc, getDocs, query, where } from 'https://www.gstatic.com/firebasejs/10.7.1/firebase-firestore.js';
+    
+    const firebaseConfig = {
+      projectId: "clockin-b691a",
+    };
+    
+    const app = initializeApp(firebaseConfig);
+    const db = getFirestore(app);
+    
+    window.logEntries = [];
+    window.validatedData = null;
+    
+    function log(msg, type = 'info') {
+      const timestamp = new Date().toLocaleTimeString('zh-CN');
+      const entry = { time: timestamp, msg, type };
+      window.logEntries.push(entry);
+      
+      const logEl = document.getElementById('log');
+      const div = document.createElement('div');
+      div.className = `log-entry ${type}`;
+      div.textContent = `[${timestamp}] ${msg}`;
+      logEl.appendChild(div);
+      logEl.scrollTop = logEl.scrollHeight;
+    }
+    
+    window.validateData = function() {
+      const textarea = document.getElementById('punchData');
+      const resultEl = document.getElementById('validationResult');
+      const importBtn = document.getElementById('importBtn');
+      const dryRunBtn = document.getElementById('dryRunBtn');
+      
+      try {
+        const data = JSON.parse(textarea.value);
+        
+        if (!Array.isArray(data)) {
+          resultEl.innerHTML = '<div class="status error"> 数据必须是 JSON 数组</div>';
+          return;
+        }
+        
+        if (data.length === 0) {
+          resultEl.innerHTML = '<div class="status error">✗ 数据不能为空</div>';
+          return;
+        }
+        
+        // 验证每条记录
+        const errors = [];
+        const requiredFields = ['mid', 'sid', 't', 'time', 'date', 'name', 'sd'];
+        
+        data.forEach((record, index) => {
+          for (const field of requiredFields) {
+            if (record[field] === undefined || record[field] === null || record[field] === '') {
+              errors.push(`记录 ${index + 1}: 缺少字段 "${field}"`);
+            }
+          }
+          
+          if (record.t && !['s', 'e'].includes(record.t)) {
+            errors.push(`记录 ${index + 1}: t 必须是 "s" 或 "e"`);
+          }
+          
+          if (record.time && !/^\d{2}:\d{2}$/.test(record.time)) {
+            errors.push(`记录 ${index + 1}: time 格式必须是 HH:MM`);
+          }
+          
+          if (record.date && !/^\d{4}-\d{2}-\d{2}$/.test(record.date)) {
+            errors.push(`记录 ${index + 1}: date 格式必须是 YYYY-MM-DD`);
+          }
+        });
+        
+        if (errors.length > 0) {
+          resultEl.innerHTML = `<div class="status error">✗ 验证失败 (${errors.length} 个错误):<br>${errors.slice(0, 10).join('<br>')}${errors.length > 10 ? '<br>...' : ''}</div>`;
+          window.validatedData = null;
+          importBtn.disabled = true;
+          dryRunBtn.disabled = true;
+        } else {
+          resultEl.innerHTML = `<div class="status ok">✓ 验证通过！共 ${data.length} 条记录</div>`;
+          window.validatedData = data;
+          importBtn.disabled = false;
+          dryRunBtn.disabled = false;
+          log(`数据验证通过：${data.length} 条记录`);
+        }
+      } catch (e) {
+        resultEl.innerHTML = `<div class="status error">✗ JSON 解析失败：${e.message}</div>`;
+        window.validatedData = null;
+        importBtn.disabled = true;
+        dryRunBtn.disabled = true;
+      }
+    };
+    
+    window.loadTemplate = function() {
+      const template = [
+        {"mid": 1, "sid": 7, "t": "s", "time": "08:00", "date": "2026-09-03", "name": "员工1", "sd": "2026-09-03"},
+        {"mid": 1, "sid": 7, "t": "e", "time": "09:00", "date": "2026-09-03", "name": "员工1", "sd": "2026-09-03"},
+        {"mid": 2, "sid": 8, "t": "s", "time": "09:00", "date": "2026-09-03", "name": "员工2", "sd": "2026-09-03"},
+        {"mid": 2, "sid": 8, "t": "e", "time": "10:00", "date": "2026-09-03", "name": "员工2", "sd": "2026-09-03"}
+      ];
+      document.getElementById('punchData').value = JSON.stringify(template, null, 2);
+      log('已加载模板数据');
+    };
+    
+    window.clearData = function() {
+      document.getElementById('punchData').value = '';
+      document.getElementById('validationResult').innerHTML = '';
+      document.getElementById('importStatus').innerHTML = '';
+      document.getElementById('importBtn').disabled = true;
+      document.getElementById('dryRunBtn').disabled = true;
+      window.validatedData = null;
+      log('数据已清空');
+    };
+    
+    window.dryRun = function() {
+      if (!window.validatedData) {
+        alert('请先验证数据');
+        return;
+      }
+      
+      const statusEl = document.getElementById('importStatus');
+      statusEl.innerHTML = '<div class="status info">试运行中...</div>';
+      
+      log('=== 试运行开始 ===');
+      log(`待补录记录数：${window.validatedData.length}`);
+      
+      // 按员工分组统计
+      const byMember = {};
+      window.validatedData.forEach(record => {
+        const key = `${record.mid}_${record.name}`;
+        if (!byMember[key]) byMember[key] = { start: 0, end: 0 };
+        if (record.t === 's') byMember[key].start++;
+        else if (record.t === 'e') byMember[key].end++;
+      });
+      
+      log('按员工统计:');
+      Object.entries(byMember).forEach(([key, counts]) => {
+        log(`  ${key}: 上班${counts.start}次，下班${counts.end}次`);
+      });
+      
+      statusEl.innerHTML = `<div class="status ok">✓ 试运行完成，共 ${window.validatedData.length} 条记录</div>`;
+      log('=== 试运行结束 ===');
+    };
+    
+    window.executeImport = async function() {
+      if (!window.validatedData) {
+        alert('请先验证数据');
+        return;
+      }
+      
+      if (!confirm(`确定要补录 ${window.validatedData.length} 条打卡记录吗？\n\n此操作将直接写入 Firestore，无法撤销！`)) {
+        return;
+      }
+      
+      const importBtn = document.getElementById('importBtn');
+      const dryRunBtn = document.getElementById('dryRunBtn');
+      const statusEl = document.getElementById('importStatus');
+      
+      importBtn.disabled = true;
+      dryRunBtn.disabled = true;
+      statusEl.innerHTML = '<div class="status info">补录中...</div>';
+      
+      log('=== 开始补录 ===');
+      log(`待补录记录数：${window.validatedData.length}`);
+      
+      let success = 0;
+      let failed = 0;
+      const errors = [];
+      
+      for (let i = 0; i < window.validatedData.length; i++) {
+        const record = window.validatedData[i];
+        try {
+          // 生成时间戳
+          const [hours, minutes] = record.time.split(':').map(Number);
+          const date = new Date(record.date);
+          date.setHours(hours, minutes, 0, 0);
+          const ts = date.getTime();
+          
+          // 写入 Firestore
+          const docRef = await addDoc(collection(db, 'punches'), {
+            mid: record.mid,
+            sid: record.sid,
+            t: record.t,
+            time: record.time,
+            date: record.date,
+            name: record.name,
+            sd: record.sd,
+            ts: ts,
+            makeup: true,  // 标记为补录
+            imported_at: Date.now()
+          });
+          
+          success++;
+          log(`✓ 记录 ${i + 1}: ${record.name} ${record.t === 's' ? '上班' : '下班'} ${record.time} (文档ID: ${docRef.id})`, 'success');
+        } catch (e) {
+          failed++;
+          errors.push(`记录 ${i + 1}: ${e.message}`);
+          log(`✗ 记录 ${i + 1} 失败：${e.message}`, 'error');
+        }
+      }
+      
+      const resultMsg = `补录完成：成功 ${success} 条，失败 ${failed} 条`;
+      if (failed === 0) {
+        statusEl.innerHTML = `<div class="status ok">✓ ${resultMsg}</div>`;
+      } else {
+        statusEl.innerHTML = `<div class="status error">⚠ ${resultMsg}<br>错误：${errors.slice(0, 5).join('<br>')}${errors.length > 5 ? '<br>...' : ''}</div>`;
+      }
+      
+      log(`=== 补录结束：成功${success}条，失败${failed}条 ===`);
+      
+      importBtn.disabled = false;
+      dryRunBtn.disabled = false;
+    };
+    
+    window.copyLog = function() {
+      const logText = window.logEntries.map(e => `[${e.time}] ${e.msg}`).join('\n');
+      navigator.clipboard.writeText(logText).then(() => {
+        alert('日志已复制到剪贴板');
+      }).catch(() => {
+        alert('复制失败，请手动选择复制');
+      });
+    };
+    
+    log('批量补录工具已加载');
+  </script>
+</body>
+</html>
