@@ -1,0 +1,163 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <title>补全 9/3 打卡数据</title>
+  <style>
+    body { font-family: monospace; padding: 20px; background: #1a1a1a; color: #eee; max-width: 800px; margin: 0 auto; }
+    .log { background: #2a2a2a; padding: 10px; border-radius: 4px; margin: 10px 0; font-size: 13px; white-space: pre-wrap; }
+    .success { color: #51cf66; }
+    .error { color: #ff6b6b; }
+    .info { color: #74c0fc; }
+    button { background: #4a9eff; color: white; border: none; padding: 10px 20px; border-radius: 4px; cursor: pointer; margin: 5px; }
+    button:hover { background: #3a8eef; }
+  </style>
+</head>
+<body>
+  <h1>补全 9/3 打卡数据</h1>
+  <p>根据排班数据，为所有员工补全缺失的上下班打卡</p>
+  <button onclick="startFix()">开始补全</button>
+  <div id="output"></div>
+  
+  <script type="module">
+    import { initializeApp } from 'https://www.gstatic.com/firebasejs/10.7.1/firebase-app.js';
+    import { getFirestore, collection, addDoc, getDocs, query, where } from 'https://www.gstatic.com/firebasejs/10.7.1/firebase-firestore.js';
+    
+    const output = document.getElementById('output');
+    function log(msg, cls = '') {
+      const div = document.createElement('div');
+      div.className = 'log ' + cls;
+      div.textContent = msg;
+      output.appendChild(div);
+    }
+    
+    const firebaseConfig = { projectId: "clockin-b691a" };
+    const app = initializeApp(firebaseConfig);
+    const db = getFirestore(app);
+    
+    // 9/3 排班数据（从 picks 获取）
+    const picks_9_3 = {
+      1: [11, 12, 13, 22],
+      2: [9],
+      3: [8, 10, 13, 14, 16, 17],
+      4: [9, 10, 11, 12, 18, 19],
+      7: [7, 8, 9, 14, 15, 20],
+      8: [13, 14, 15, 19, 21],
+      9: [10, 11, 16, 20, 23, 24],
+      10: [12, 13, 16, 17, 18, 19, 20],
+      11: [10, 11, 12, 13, 16, 17, 18],
+      12: [18, 19, 20, 21, 22],
+      13: [11, 12, 21, 22, 23, 24, 25],
+      14: [7, 17, 18, 19, 20, 24, 25],
+      15: [8, 9, 14, 15, 21, 22, 23],
+      16: [15, 17]
+    };
+    
+    // 员工姓名映射
+    const memberNames = {
+      1: '133122', 2: '3051105', 3: '3060017', 4: '3065861',
+      5: '3072437', 6: '8027356', 7: '8094271', 8: '8139540',
+      9: '8191272', 10: '8191398', 11: '8593490', 12: '8596120',
+      13: '8597644', 14: '8598314', 15: '8600441', 16: '8091129'
+    };
+    
+    // 班次时间映射
+    const shiftTimes = {};
+    for (let h = 7; h < 24; h++) {
+      shiftTimes[h] = { start: `${String(h).padStart(2,'0')}:00`, end: `${String(h+1).padStart(2,'0')}:00` };
+    }
+    shiftTimes[24] = { start: '00:00', end: '01:00' };
+    shiftTimes[25] = { start: '01:00', end: '02:00' };
+    
+    window.startFix = async function() {
+      log('=== 开始补全 9/3 打卡数据 ===', 'info');
+      
+      // 获取 Firestore 中已有的 9/3 打卡
+      log('正在获取 Firestore 现有数据...');
+      const snapshot = await getDocs(query(collection(db, 'punches'), where('date', '==', '2026-09-03')));
+      const existingPunches = [];
+      snapshot.forEach(doc => existingPunches.push({ id: doc.id, ...doc.data() }));
+      log(`Firestore 现有 ${existingPunches.length} 条记录`, 'info');
+      
+      // 创建现有打卡的索引
+      const existingIndex = new Set();
+      existingPunches.forEach(p => {
+        existingIndex.add(`${p.mid}_${p.sid}_${p.t}`);
+      });
+      
+      // 计算需要补全的打卡
+      const missingPunches = [];
+      let totalShifts = 0;
+      
+      for (const [midStr, sids] of Object.entries(picks_9_3)) {
+        const mid = parseInt(midStr);
+        const name = memberNames[mid] || `员工${mid}`;
+        
+        for (const sid of sids) {
+          totalShifts++;
+          const times = shiftTimes[sid] || { start: '08:00', end: '17:00' };
+          
+          // 检查上班卡
+          const startKey = `${mid}_${sid}_s`;
+          if (!existingIndex.has(startKey)) {
+            missingPunches.push({
+              mid, sid, t: 's', time: times.start, date: '2026-09-03',
+              name, sd: '2026-09-03', ts: new Date(`2026-09-03T${times.start}:00`).getTime()
+            });
+          }
+          
+          // 检查下班卡
+          const endKey = `${mid}_${sid}_e`;
+          if (!existingIndex.has(endKey)) {
+            missingPunches.push({
+              mid, sid, t: 'e', time: times.end, date: '2026-09-03',
+              name, sd: '2026-09-03', ts: new Date(`2026-09-03T${times.end}:00`).getTime()
+            });
+          }
+        }
+      }
+      
+      log(`\n总班次数: ${totalShifts}`, 'info');
+      log(`已有打卡: ${existingPunches.length} 条`, 'info');
+      log(`需要补全: ${missingPunches.length} 条`, missingPunches.length > 0 ? 'error' : 'success');
+      
+      if (missingPunches.length === 0) {
+        log('\n✓ 所有打卡已完整，无需补全', 'success');
+        return;
+      }
+      
+      // 补全缺失的打卡
+      log('\n开始补全...', 'info');
+      let success = 0;
+      let failed = 0;
+      
+      for (let i = 0; i < missingPunches.length; i++) {
+        const punch = missingPunches[i];
+        try {
+          await addDoc(collection(db, 'punches'), {
+            ...punch,
+            makeup: true,
+            auto_filled: true,
+            filled_at: Date.now()
+          });
+          success++;
+          if (success % 10 === 0 || i === missingPunches.length - 1) {
+            log(`  进度: ${i + 1}/${missingPunches.length} (成功${success}, 失败${failed})`);
+          }
+        } catch (e) {
+          failed++;
+          log(`  ✗ ${punch.name} 班次${punch.sid} ${punch.t === 's' ? '上班' : '下班'}: ${e.message}`, 'error');
+        }
+      }
+      
+      log(`\n=== 补全完成 ===`, 'info');
+      log(`成功: ${success} 条`, success === missingPunches.length ? 'success' : 'error');
+      log(`失败: ${failed} 条`, failed === 0 ? 'success' : 'error');
+      log(`总计: ${existingPunches.length + success} 条`, 'info');
+      log('\n请刷新管理后台查看更新后的出勤率', 'info');
+    };
+    
+    log('页面已加载，点击"开始补全"按钮执行', 'info');
+  </script>
+</body>
+</html>
