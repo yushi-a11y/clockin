@@ -1,0 +1,212 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <title>Firestore 写入测试</title>
+  <style>
+    body { font-family: monospace; padding: 20px; background: #1a1a1a; color: #eee; max-width: 800px; margin: 0 auto; }
+    .log { background: #2a2a2a; padding: 10px; border-radius: 4px; margin: 10px 0; }
+    .error { color: #ff6b6b; }
+    .success { color: #51cf66; }
+    .info { color: #74c0fc; }
+    button { background: #4a9eff; color: white; border: none; padding: 10px 20px; border-radius: 4px; cursor: pointer; margin: 5px; font-size: 14px; }
+    button:hover { background: #3a8eef; }
+    button:disabled { background: #666; cursor: not-allowed; }
+  </style>
+</head>
+<body>
+  <h1>Firestore 写入测试</h1>
+  <p>此页面测试打卡数据能否成功写入 Firestore</p>
+  
+  <div>
+    <button id="testWrite" onclick="testWrite()">测试写入打卡</button>
+    <button id="testRead" onclick="testRead()">测试读取 9/3</button>
+    <button id="testAll" onclick="testAll()">完整测试</button>
+  </div>
+  
+  <div id="output"></div>
+  
+  <script type="module">
+    import { initializeApp } from 'https://www.gstatic.com/firebasejs/10.7.1/firebase-app.js';
+    import { getFirestore, collection, addDoc, getDocs, query, where, deleteDoc, doc } from 'https://www.gstatic.com/firebasejs/10.7.1/firebase-firestore.js';
+    
+    const output = document.getElementById('output');
+    
+    function log(msg, cls = '') {
+      const div = document.createElement('div');
+      div.className = 'log ' + cls;
+      div.textContent = msg;
+      output.appendChild(div);
+      console.log(msg);
+    }
+    
+    const firebaseConfig = {
+      projectId: "clockin-b691a",
+    };
+    
+    const app = initializeApp(firebaseConfig);
+    const db = getFirestore(app);
+    
+    window.testWrite = async function() {
+      output.innerHTML = '';
+      log('=== 测试写入打卡 ===', 'info');
+      
+      const testPunch = {
+        sid: 999,
+        t: 's',
+        time: '09:00',
+        ts: Date.now(),
+        mid: 999999,
+        date: '2026-09-03',
+        name: '测试员工',
+        makeup: false,
+        sd: '2026-09-03'
+      };
+      
+      log('准备写入测试数据: ' + JSON.stringify(testPunch));
+      
+      try {
+        const docRef = await addDoc(collection(db, 'punches'), testPunch);
+        log('✓ 写入成功! 文档 ID: ' + docRef.id, 'success');
+        
+        // 立即查询验证
+        log('正在验证写入...');
+        const q = query(collection(db, 'punches'), where('date', '==', '2026-09-03'));
+        const snapshot = await getDocs(q);
+        
+        let found = false;
+        snapshot.forEach(d => {
+          if (d.id === docRef.id) {
+            found = true;
+            log('✓ 验证成功! 可以查询到刚写入的记录', 'success');
+            log('  文档 ID: ' + d.id);
+            log('  数据: ' + JSON.stringify(d.data()));
+          }
+        });
+        
+        if (!found) {
+          log('✗ 验证失败! 无法查询到刚写入的记录', 'error');
+        }
+        
+        // 删除测试数据
+        log('正在清理测试数据...');
+        await deleteDoc(doc(db, 'punches', docRef.id));
+        log('✓ 测试数据已删除', 'success');
+        
+      } catch (e) {
+        log('✗ 写入失败: ' + e.message, 'error');
+        console.error(e);
+      }
+    };
+    
+    window.testRead = async function() {
+      output.innerHTML = '';
+      log('=== 测试读取 9/3 数据 ===', 'info');
+      
+      try {
+        const q = query(collection(db, 'punches'), where('date', '==', '2026-09-03'));
+        const snapshot = await getDocs(q);
+        
+        log(`9/3 记录数: ${snapshot.size}`, snapshot.size > 0 ? 'success' : 'error');
+        
+        if (snapshot.size > 0) {
+          log('9/3 记录详情:');
+          snapshot.forEach(d => {
+            const data = d.data();
+            log(`  ${d.id}: mid=${data.mid}, time=${data.time}, t=${data.t}, sid=${data.sid}`);
+          });
+        } else {
+          log('9/3 没有任何记录!', 'error');
+        }
+        
+        // 也检查一下最近的记录
+        log('');
+        log('=== 检查所有日期的记录数 ===', 'info');
+        const allQ = collection(db, 'punches');
+        const allSnapshot = await getDocs(allQ);
+        
+        const dateCounts = {};
+        allSnapshot.forEach(d => {
+          const data = d.data();
+          const date = data.date || 'unknown';
+          dateCounts[date] = (dateCounts[date] || 0) + 1;
+        });
+        
+        log(`总记录数: ${allSnapshot.size}`);
+        Object.entries(dateCounts).sort().forEach(([date, count]) => {
+          log(`  ${date}: ${count} 条`);
+        });
+        
+      } catch (e) {
+        log('✗ 查询失败: ' + e.message, 'error');
+        console.error(e);
+      }
+    };
+    
+    window.testAll = async function() {
+      output.innerHTML = '';
+      log('=== 完整测试 ===', 'info');
+      
+      // 1. 测试写入
+      log('');
+      log('步骤 1: 测试写入', 'info');
+      const testPunch = {
+        sid: 999,
+        t: 's',
+        time: '09:00',
+        ts: Date.now(),
+        mid: 999999,
+        date: '2026-09-03',
+        name: '测试员工',
+        makeup: false,
+        sd: '2026-09-03'
+      };
+      
+      let docId;
+      try {
+        const docRef = await addDoc(collection(db, 'punches'), testPunch);
+        docId = docRef.id;
+        log('✓ 写入成功: ' + docId, 'success');
+      } catch (e) {
+        log('✗ 写入失败: ' + e.message, 'error');
+        return;
+      }
+      
+      // 2. 测试读取
+      log('');
+      log('步骤 2: 测试读取', 'info');
+      try {
+        const q = query(collection(db, 'punches'), where('date', '==', '2026-09-03'));
+        const snapshot = await getDocs(q);
+        
+        let found = false;
+        snapshot.forEach(d => {
+          if (d.id === docId) {
+            found = true;
+            log('✓ 读取成功: 可以查询到刚写入的记录', 'success');
+          }
+        });
+        
+        if (!found) {
+          log('✗ 读取失败: 无法查询到刚写入的记录', 'error');
+        }
+      } catch (e) {
+        log('✗ 读取失败: ' + e.message, 'error');
+      }
+      
+      // 3. 清理
+      log('');
+      log('步骤 3: 清理测试数据', 'info');
+      try {
+        await deleteDoc(doc(db, 'punches', docId));
+        log('✓ 测试数据已删除', 'success');
+      } catch (e) {
+        log('✗ 删除失败: ' + e.message, 'error');
+      }
+      
+      log('');
+      log('=== 测试完成 ===', 'info');
+    };
+  </script>
+</body>
+</html>
