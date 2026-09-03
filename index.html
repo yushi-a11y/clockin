@@ -2385,13 +2385,13 @@ async function initFBListeners(){
   document.getElementById('syncBadge').className='sync-badge on';document.getElementById('syncBadge').innerHTML='<span class="dot"></span>已同步';
   try{
     // [性能] 启动的 4 个请求改为并行发起：加载耗时从"4 个请求之和"降为"最慢的那 1 个"
-    const [claimR,punchR,shiftR,teamR]=await Promise.all([
+    const [claimR,punchRows,shiftR,teamR]=await Promise.all([
       supa.from('claims').select('*'),
-      supa.from('punches').select('*').eq('date',tdStr()),
+      queryPunchesByDate(tdStr()),
       supa.from('config').select('*').eq('id','shifts').maybeSingle(),
       supa.from('config').select('*').eq('id','team').maybeSingle()
     ]);
-    const claimRows=claimR.data,punchRows=punchR.data,shiftConfig=shiftR.data,teamConfig=teamR.data;
+    const claimRows=claimR.data,shiftConfig=shiftR.data,teamConfig=teamR.data;
     claims={};(claimRows||[]).forEach(r=>{if(!isClaimExpired(r))claims[r.id]=r});
     mergeFbPunches(punchRows||[]);
     if(shiftConfig?.data){state.shifts=shiftConfig.data;sv('cv6',state)}
@@ -2414,13 +2414,13 @@ async function initFBListeners(){
   }).subscribe();
   supa.channel('punches-sync').on('postgres_changes',{event:'*',schema:'public',table:'punches'},async(payload)=>{
     try{
-      const {data:rows}=await supa.from('punches').select('*').eq('date',tdStr());
+      const rows = await queryPunchesByDate(tdStr());
       mergeFbPunches(rows||[]);
       // 如果员工正在查看历史日期，也刷新该日期的打卡记录，避免补卡通过后历史日期仍显示缺卡
       const viewDateObj=new Date();viewDateObj.setDate(viewDateObj.getDate()+punchDateOffset);
       const viewDate=ymd(viewDateObj);
       if(viewDate!==tdStr()){
-        const {data:rows2}=await supa.from('punches').select('*').eq('date',viewDate);
+        const rows2 = await queryPunchesByDate(viewDate);
         mergeFbPunches(rows2||[]);
       }
       renderAll();
@@ -2476,7 +2476,7 @@ async function initFBListeners(){
       try{
         const {data:cr}=await supa.from('claims').select('*');
         claims={};(cr||[]).forEach(r=>{if(!isClaimExpired(r))claims[r.id]=r});
-        const {data:pr}=await supa.from('punches').select('*').eq('date',tdStr());
+        const pr = await queryPunchesByDate(tdStr());
         mergeFbPunches(pr||[]);
         const {data:sc}=await supa.from('config').select('*').eq('id','shifts').maybeSingle();
         if(sc?.data){state.shifts=sc.data;sv('cv6',state)}
@@ -3052,15 +3052,42 @@ function mergeFbPunches(rows){
   });
 }
 
-// 管理后台查看历史日期时，按需从 Supabase 加载对应日期的打卡记录
+// 辅助函数：使用 Firestore SDK 直接查询指定日期的打卡记录
+async function queryPunchesByDate(date) {
+  if (!fbReady) return [];
+  try {
+    if (DB_PROVIDER === 'firestore' && supa._fs) {
+      const snapshot = await supa._fs.collection('punches').where('date', '==', date).get();
+      const rows = [];
+      snapshot.forEach(doc => {
+        const data = doc.data();
+        rows.push({ ...data, id: doc.id });
+      });
+      return rows;
+    } else {
+      const {data:rows,error} = await supa.from('punches').select('*').eq('date',date);
+      if (error) {
+        console.warn('[queryPunchesByDate] 查询错误:', error);
+        return [];
+      }
+      return rows || [];
+    }
+  } catch (e) {
+    console.error('[queryPunchesByDate] 失败:', e);
+    return [];
+  }
+}
+
+// 管理后台查看历史日期时，按需从 Firestore 加载对应日期的打卡记录
 async function ensurePunchesForDate(date){
   if(!fbReady){console.log('[ensurePunchesForDate] fb not ready',date);return}
   try{
-    const {data:rows,error}=await supa.from('punches').select('*').eq('date',date);
-    if(error){console.warn('[ensurePunchesForDate] query error',date,error);return}
-    console.log('[ensurePunchesForDate]',date,'rows',(rows||[]).length,rows||[]);
-    mergeFbPunches(rows||[]);
-  }catch(e){console.warn('ensurePunchesForDate failed:',e)}
+    const rows = await queryPunchesByDate(date);
+    console.log('[ensurePunchesForDate]',date,'rows',rows.length,rows);
+    mergeFbPunches(rows);
+  }catch(e){
+    console.error('[ensurePunchesForDate] 失败:',e);
+  }
 }
 
 async function selectMember(id){
@@ -3485,8 +3512,8 @@ async function doPunch(){
   const unsynced=[];
   for(const rec of pdList){const ok=await fbPunch(rec);if(!ok)unsynced.push(rec)}
   if(unsynced.length)queueOfflinePunches(unsynced);
-  // 回拉验证：确保打卡数据已写入 Supabase，管理后台可见
-  if(fbReady){try{const {data:pr}=await supa.from('punches').select('*').eq('date',tdStr());mergeFbPunches(pr||[])}catch(e){}}
+  // 回拉验证：确保打卡数据已写入 Firestore，管理后台可见
+  if(fbReady){try{const pr = await queryPunchesByDate(tdStr());mergeFbPunches(pr||[])}catch(e){}}
   renderAll();
   const label=action.t==='s'?'上班打卡':'下班打卡';
   logEvent('打卡',`${selectedMember.name} ${label} · ${action.sh.name}${action.shared?' → '+action.shared.name+'（连班共用）':''} · ${time}${isOfflinePunch?' · 离线打卡（本地时钟，待复核）':''}`);
@@ -4550,8 +4577,8 @@ async function acceptMakeup(id){
     return; // 不标记为 accepted，保持 pending 状态供重试
   }
   m.status='accepted';m.decidedTs=Date.now();m.decidedBy=adminDisplayName();svMakeups();await syncMakeups();
-  // 补卡通过后，从 Supabase 重新拉取该日期的打卡记录，确保多端/多标签页同步
-  if(fbReady){try{const {data:rows}=await supa.from('punches').select('*').eq('date',punchDate);if(rows&&rows.length)mergeFbPunches(rows)}catch(e){}}
+  // 补卡通过后，从 Firestore 重新拉取该日期的打卡记录，确保多端/多标签页同步
+  if(fbReady){try{const rows = await queryPunchesByDate(punchDate);if(rows&&rows.length)mergeFbPunches(rows)}catch(e){}}
   const isHandover=recs.length>1;
   logEvent('批准补卡',`管理员批准 ${m.name} 在 ${m.date} ${shiftNameOf(m.sid)} 的${m.t==='s'?'上班':'下班'}卡（${m.time}）${isHandover?' · 连班交接同步补卡':''}${syncOk?'':' · 离线模式，联网后自动同步'}`);
   showToast(`已批准，打卡记录已补上${isHandover?'（连班交接同步）':''}${syncOk?'':' · 离线模式'}`);renderMakeupAdmin();updateMakeupAdminBadge();renderAll();
@@ -6780,7 +6807,7 @@ async function importPunchesBackup(){
       }
     }catch(e){fail++;errors.push(`${r.date} ${r.name} ${r.t}: ${e.message}`)}
   }
-  if(fbReady){try{const {data:pr}=await supa.from('punches').select('*').eq('date',tdStr());mergeFbPunches(pr||[])}catch(e){}}
+  if(fbReady){try{const pr = await queryPunchesByDate(tdStr());mergeFbPunches(pr||[])}catch(e){}}
   logEvent('数据恢复',`管理员导入打卡备份：成功 ${ok} 条，失败 ${fail} 条${rlsFail?`（其中 ${rlsFail} 条因日期超出 RLS 限制）`:''}`);
   showToast(`导入完成：成功 ${ok} 条，失败 ${fail} 条${rlsFail?'（含 RLS 超期）':''}`);
   renderBackupPanel();renderAll();
