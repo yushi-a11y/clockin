@@ -1,0 +1,146 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <title>Firestore 9/3 数据检查</title>
+  <style>
+    body { font-family: monospace; padding: 20px; background: #1a1a1a; color: #eee; }
+    pre { background: #2a2a2a; padding: 10px; border-radius: 4px; overflow: auto; }
+    .error { color: #ff6b6b; }
+    .success { color: #51cf66; }
+    .info { color: #74c0fc; }
+  </style>
+</head>
+<body>
+  <h1>Firestore 9/3 数据检查</h1>
+  <div id="output"></div>
+  
+  <script type="module">
+    import { initializeApp } from 'https://www.gstatic.com/firebasejs/10.7.1/firebase-app.js';
+    import { getFirestore, collection, getDocs, query, where, orderBy, limit } from 'https://www.gstatic.com/firebasejs/10.7.1/firebase-firestore.js';
+    
+    const output = document.getElementById('output');
+    function log(msg, cls = '') {
+      const div = document.createElement('div');
+      if (cls) div.className = cls;
+      div.textContent = msg;
+      output.appendChild(div);
+    }
+    
+    const firebaseConfig = {
+      projectId: "clockin-b691a",
+    };
+    
+    const app = initializeApp(firebaseConfig);
+    const db = getFirestore(app);
+    
+    async function check() {
+      log('=== 开始检查 Firestore punches 集合 ===', 'info');
+      log('');
+      
+      try {
+        // 查询所有 9/3 的记录
+        log('查询 date = 2026-09-03 ...');
+        const q = query(collection(db, 'punches'), where('date', '==', '2026-09-03'));
+        const snapshot = await getDocs(q);
+        
+        log(`9/3 记录数: ${snapshot.size}`, snapshot.size > 0 ? 'success' : 'error');
+        
+        if (snapshot.size > 0) {
+          log('');
+          log('9/3 记录详情:');
+          const records = [];
+          snapshot.forEach(doc => {
+            const data = doc.data();
+            records.push(data);
+            log(`  ${doc.id}: mid=${data.mid}, sid=${data.sid}, t=${data.t}, time=${data.time}, date=${data.date}, sd=${data.sd || 'N/A'}`);
+          });
+          
+          // 按员工分组统计
+          const byMember = {};
+          records.forEach(r => {
+            if (!byMember[r.mid]) byMember[r.mid] = [];
+            byMember[r.mid].push(r);
+          });
+          
+          log('');
+          log('按员工分组:');
+          Object.entries(byMember).forEach(([mid, punches]) => {
+            log(`  ${mid}: ${punches.length} 条`);
+            punches.forEach(p => {
+              log(`    - ${p.time} ${p.t === 's' ? '上班' : '下班'} sid=${p.sid}`);
+            });
+          });
+        }
+        
+        // 检查最近的记录
+        log('');
+        log('=== 查询最近的 punches ===', 'info');
+        
+        // Firestore 不支持直接 orderBy 没有索引的字段，我们先获取所有数据
+        const allQ = collection(db, 'punches');
+        const allSnapshot = await getDocs(allQ);
+        
+        const allPunches = [];
+        allSnapshot.forEach(doc => {
+          allPunches.push({ id: doc.id, ...doc.data() });
+        });
+        
+        log(`总记录数: ${allPunches.length}`);
+        
+        // 按 ts 排序
+        allPunches.sort((a, b) => (b.ts || 0) - (a.ts || 0));
+        
+        log('');
+        log('最新的 30 条记录:');
+        allPunches.slice(0, 30).forEach(p => {
+          const date = p.ts ? new Date(p.ts).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' }) : 'N/A';
+          log(`  ${p.id}: mid=${p.mid}, date=${p.date}, time=${p.time}, t=${p.t}, ts=${date}`);
+        });
+        
+        // 统计各日期的记录数
+        const dateCounts = {};
+        allPunches.forEach(p => {
+          const d = p.date || 'unknown';
+          dateCounts[d] = (dateCounts[d] || 0) + 1;
+        });
+        
+        log('');
+        log('=== 各日期记录数统计 ===', 'info');
+        Object.entries(dateCounts).sort().forEach(([date, count]) => {
+          log(`  ${date}: ${count} 条`);
+        });
+        
+        // 检查 9/2 的数据
+        log('');
+        log('=== 检查 9/2 数据 ===', 'info');
+        const q92 = query(collection(db, 'punches'), where('date', '==', '2026-09-02'));
+        const snapshot92 = await getDocs(q92);
+        log(`9/2 记录数: ${snapshot92.size}`);
+        
+        // 检查是否有今天新打卡但 date 字段错误的情况
+        log('');
+        log('=== 检查可能的日期格式问题 ===', 'info');
+        const today = new Date();
+        const todayStr = today.toISOString().split('T')[0];
+        log(`今天日期: ${todayStr}`);
+        
+        // 查找最近 24 小时内的记录
+        const oneDayAgo = Date.now() - 24 * 60 * 60 * 1000;
+        const recentPunches = allPunches.filter(p => p.ts && p.ts >= oneDayAgo);
+        log(`最近 24 小时内的记录: ${recentPunches.length}`);
+        recentPunches.forEach(p => {
+          const date = new Date(p.ts).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' });
+          log(`  mid=${p.mid}, date=${p.date}, time=${p.time}, ts=${date}`);
+        });
+        
+      } catch (e) {
+        log(`错误: ${e.message}`, 'error');
+        console.error(e);
+      }
+    }
+    
+    check();
+  </script>
+</body>
+</html>

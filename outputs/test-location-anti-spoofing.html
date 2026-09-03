@@ -1,0 +1,172 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>定位反作弊测试</title>
+<style>
+  body { font-family: -apple-system, sans-serif; max-width: 800px; margin: 40px auto; padding: 0 20px; }
+  h1 { color: #1a1a1a; }
+  .test-case { border: 1px solid #e0e0e0; border-radius: 8px; padding: 16px; margin: 12px 0; }
+  .test-case h3 { margin: 0 0 8px 0; color: #333; }
+  .result { font-family: monospace; padding: 8px; background: #f5f5f5; border-radius: 4px; margin-top: 8px; }
+  .pass { color: #16a34a; font-weight: bold; }
+  .fail { color: #dc2626; font-weight: bold; }
+  .warn { color: #d97706; font-weight: bold; }
+  button { background: #2563eb; color: white; border: none; padding: 10px 20px; border-radius: 6px; cursor: pointer; font-size: 14px; }
+  button:hover { background: #1d4ed8; }
+  #runAll { margin: 20px 0; padding: 12px 24px; font-size: 16px; }
+</style>
+</head>
+<body>
+<h1>定位反作弊自动化测试</h1>
+<p>测试 <code>_locIsApiTampered()</code> 和 <code>_locIsCoordSuspicious()</code> 函数的检测能力</p>
+
+<button id="runAll">运行全部测试</button>
+
+<div id="results"></div>
+
+<script>
+// 从 index.html 复制的检测函数
+function _locIsApiTampered(){
+  try{
+    const gp=navigator.geolocation&&navigator.geolocation.getCurrentPosition;
+    if(!gp)return true;
+    const gpStr=Function.prototype.toString.call(gp);
+    if(!/\[native code\]/.test(gpStr))return true;
+    const wp=navigator.geolocation.watchPosition;
+    if(wp&&Function.prototype.toString.call(wp).indexOf('[native code]')===-1)return true;
+    if(Object.prototype.toString.call(navigator.geolocation)!=='[object Geolocation]')return true;
+    if(navigator.geolocation.constructor&&navigator.geolocation.constructor.name!=='Geolocation')return true;
+    if(gp.prototype!==undefined)return true;
+    return false;
+  }catch(e){return true}
+}
+
+function _locIsCoordSuspicious(lat,lng,accuracy){
+  if(accuracy>0&&accuracy<1)return true;
+  if(Math.abs(lat-Math.round(lat))<1e-10||Math.abs(lng-Math.round(lng))<1e-10)return true;
+  const testCoords=[[0,0],[39.9042,116.4074],[31.2304,121.4737],[40.7128,-74.006],[51.5074,-0.1278]];
+  for(const[tl,tn]of testCoords){
+    if(Math.abs(lat-tl)<0.01&&Math.abs(lng-tn)<0.01)return true;
+  }
+  return false;
+}
+
+// 测试用例
+const tests = [
+  // API 篡改检测
+  {
+    name: '正常 geolocation API',
+    fn: () => {
+      const original = navigator.geolocation;
+      const result = _locIsApiTampered();
+      return { expected: false, actual: result, note: '原生 API 应返回 false' };
+    }
+  },
+  {
+    name: 'getCurrentPosition 被 mock',
+    fn: () => {
+      const original = navigator.geolocation.getCurrentPosition;
+      navigator.geolocation.getCurrentPosition = function(){};
+      const result = _locIsApiTampered();
+      navigator.geolocation.getCurrentPosition = original;
+      return { expected: true, actual: result, note: 'mock 函数应返回 true' };
+    }
+  },
+  {
+    name: 'geolocation 对象被替换',
+    fn: () => {
+      const original = navigator.geolocation;
+      navigator.geolocation = { getCurrentPosition: function(){}, watchPosition: function(){} };
+      const result = _locIsApiTampered();
+      navigator.geolocation = original;
+      return { expected: true, actual: result, note: '替换对象应返回 true' };
+    }
+  },
+  
+  // 坐标可疑检测
+  {
+    name: '坐标 (0, 0) - 测试点',
+    fn: () => ({ expected: true, actual: _locIsCoordSuspicious(0, 0, 10), note: '原点应标记可疑' })
+  },
+  {
+    name: '坐标 (39.9042, 116.4074) - 北京测试点',
+    fn: () => ({ expected: true, actual: _locIsCoordSuspicious(39.9042, 116.4074, 10), note: '北京测试点应标记可疑' })
+  },
+  {
+    name: '坐标 (31.2304, 121.4737) - 上海测试点',
+    fn: () => ({ expected: true, actual: _locIsCoordSuspicious(31.2304, 121.4737, 10), note: '上海测试点应标记可疑' })
+  },
+  {
+    name: '坐标 (40.0, 116.0) - 整数坐标',
+    fn: () => ({ expected: true, actual: _locIsCoordSuspicious(40.0, 116.0, 10), note: '整数坐标应标记可疑' })
+  },
+  {
+    name: '精度 0.5 米 - 异常高精度',
+    fn: () => ({ expected: true, actual: _locIsCoordSuspicious(39.904213, 116.407425, 0.5), note: '亚米级精度应标记可疑' })
+  },
+  {
+    name: '坐标 (39.904213, 116.407425) + 精度 15 米 - 正常',
+    fn: () => ({ expected: false, actual: _locIsCoordSuspicious(39.904213, 116.407425, 15), note: '正常坐标应通过' })
+  },
+  {
+    name: '坐标 (39.91, 116.41) + 精度 20 米 - 正常',
+    fn: () => ({ expected: false, actual: _locIsCoordSuspicious(39.91, 116.41, 20), note: '正常坐标应通过' })
+  },
+  {
+    name: '坐标 (40.7128, -74.006) - 纽约测试点',
+    fn: () => ({ expected: true, actual: _locIsCoordSuspicious(40.7128, -74.006, 10), note: '纽约测试点应标记可疑' })
+  },
+  {
+    name: '坐标 (51.5074, -0.1278) - 伦敦测试点',
+    fn: () => ({ expected: true, actual: _locIsCoordSuspicious(51.5074, -0.1278, 10), note: '伦敦测试点应标记可疑' })
+  }
+];
+
+function runTests() {
+  const resultsDiv = document.getElementById('results');
+  resultsDiv.innerHTML = '';
+  
+  let passCount = 0;
+  let failCount = 0;
+  
+  tests.forEach((test, idx) => {
+    const result = test.fn();
+    const passed = result.expected === result.actual;
+    if (passed) passCount++; else failCount++;
+    
+    const div = document.createElement('div');
+    div.className = 'test-case';
+    div.innerHTML = `
+      <h3>测试 ${idx + 1}: ${test.name}</h3>
+      <div class="result">
+        <span class="${passed ? 'pass' : 'fail'}">${passed ? '✓ 通过' : '✗ 失败'}</span><br>
+        期望: ${result.expected ? '可疑/篡改' : '正常'}<br>
+        实际: ${result.actual ? '可疑/篡改' : '正常'}<br>
+        <small style="color: #666">${result.note}</small>
+      </div>
+    `;
+    resultsDiv.appendChild(div);
+  });
+  
+  const summary = document.createElement('div');
+  summary.className = 'test-case';
+  summary.style.background = failCount === 0 ? '#f0fdf4' : '#fef2f2';
+  summary.innerHTML = `
+    <h3>测试总结</h3>
+    <div class="result">
+      <span class="${failCount === 0 ? 'pass' : 'fail'}">
+        ${passCount} 通过, ${failCount} 失败 (共 ${tests.length} 项)
+      </span>
+    </div>
+  `;
+  resultsDiv.insertBefore(summary, resultsDiv.firstChild);
+}
+
+document.getElementById('runAll').addEventListener('click', runTests);
+
+// 自动运行
+runTests();
+</script>
+</body>
+</html>
