@@ -1,0 +1,275 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>打卡诊断工具</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #f5f5f5; padding: 20px; max-width: 600px; margin: 0 auto; }
+    .card { background: white; border-radius: 8px; padding: 16px; margin-bottom: 12px; box-shadow: 0 1px 3px rgba(0,0,0,0.1); }
+    h1 { font-size: 20px; margin-bottom: 16px; color: #333; }
+    h2 { font-size: 16px; margin-bottom: 12px; color: #555; }
+    .status { padding: 8px 12px; border-radius: 4px; margin: 8px 0; font-size: 14px; }
+    .status.ok { background: #d4edda; color: #155724; }
+    .status.error { background: #f8d7da; color: #721c24; }
+    .status.warn { background: #fff3cd; color: #856404; }
+    .status.info { background: #d1ecf1; color: #0c5460; }
+    button { background: #007bff; color: white; border: none; padding: 10px 16px; border-radius: 4px; cursor: pointer; font-size: 14px; margin: 4px; }
+    button:hover { background: #0056b3; }
+    button:disabled { background: #ccc; cursor: not-allowed; }
+    .log { background: #f8f9fa; border: 1px solid #dee2e6; border-radius: 4px; padding: 8px; font-family: monospace; font-size: 12px; max-height: 200px; overflow-y: auto; margin: 8px 0; }
+    .log-entry { margin: 4px 0; padding: 2px 0; border-bottom: 1px solid #eee; }
+    .log-entry.error { color: #dc3545; }
+    .log-entry.success { color: #28a745; }
+    .log-entry.info { color: #17a2b8; }
+    pre { background: #f8f9fa; padding: 8px; border-radius: 4px; font-size: 12px; overflow-x: auto; margin: 8px 0; }
+  </style>
+</head>
+<body>
+  <h1>🔍 打卡诊断工具</h1>
+  
+  <div class="card">
+    <h2>1. 基础状态检查</h2>
+    <div id="basicStatus"></div>
+    <button onclick="checkBasicStatus()">检查基础状态</button>
+  </div>
+  
+  <div class="card">
+    <h2>2. Firestore 写入测试</h2>
+    <div id="writeTest"></div>
+    <button onclick="testWrite()">测试写入</button>
+  </div>
+  
+  <div class="card">
+    <h2>3. 离线队列状态</h2>
+    <div id="offlineQueue"></div>
+    <button onclick="checkOfflineQueue()">检查离线队列</button>
+    <button onclick="flushQueue()" id="flushBtn" disabled>手动同步</button>
+  </div>
+  
+  <div class="card">
+    <h2>4. 今日打卡记录</h2>
+    <div id="todayPunches"></div>
+    <button onclick="checkTodayPunches()">检查今日打卡</button>
+  </div>
+  
+  <div class="card">
+    <h2>5. 完整诊断日志</h2>
+    <div class="log" id="diagLog"></div>
+    <button onclick="runFullDiagnosis()">运行完整诊断</button>
+    <button onclick="copyLog()">复制日志</button>
+  </div>
+  
+  <script type="module">
+    // 等待主应用加载完成后注入诊断功能
+    window.diagLog = [];
+    
+    function log(msg, type = 'info') {
+      const timestamp = new Date().toLocaleTimeString('zh-CN');
+      const entry = { time: timestamp, msg, type };
+      window.diagLog.push(entry);
+      
+      const logEl = document.getElementById('diagLog');
+      if (logEl) {
+        const div = document.createElement('div');
+        div.className = `log-entry ${type}`;
+        div.textContent = `[${timestamp}] ${msg}`;
+        logEl.appendChild(div);
+        logEl.scrollTop = logEl.scrollHeight;
+      }
+      console.log(`[诊断] ${msg}`);
+    }
+    
+    window.checkBasicStatus = function() {
+      const statusEl = document.getElementById('basicStatus');
+      statusEl.innerHTML = '';
+      
+      // 检查 fbReady
+      const fbReady = typeof window.fbReady !== 'undefined' ? window.fbReady : false;
+      statusEl.innerHTML += `<div class="status ${fbReady ? 'ok' : 'error'}">fbReady: ${fbReady ? '✓ 已连接' : '✗ 未连接'}</div>`;
+      
+      // 检查 DB_PROVIDER
+      const dbProvider = typeof window.DB_PROVIDER !== 'undefined' ? window.DB_PROVIDER : 'unknown';
+      statusEl.innerHTML += `<div class="status info">数据库类型: ${dbProvider}</div>`;
+      
+      // 检查 TEAM 数据
+      const team = typeof window.TEAM !== 'undefined' ? window.TEAM : [];
+      statusEl.innerHTML += `<div class="status info">团队成员数: ${team.length}</div>`;
+      
+      // 检查 selectedMember
+      const selectedMember = typeof window.selectedMember !== 'undefined' ? window.selectedMember : null;
+      if (selectedMember) {
+        statusEl.innerHTML += `<div class="status ok">当前员工: ${selectedMember.name} (ID: ${selectedMember.id})</div>`;
+      } else {
+        statusEl.innerHTML += `<div class="status warn">未选择员工</div>`;
+      }
+      
+      log(`基础状态检查完成: fbReady=${fbReady}, dbProvider=${dbProvider}, team=${team.length}`);
+    };
+    
+    window.testWrite = function() {
+      const testEl = document.getElementById('writeTest');
+      testEl.innerHTML = '<div class="status info">测试中...</div>';
+      
+      if (!window.fbReady) {
+        testEl.innerHTML = '<div class="status error">数据库未连接，无法测试</div>';
+        log('写入测试失败: 数据库未连接', 'error');
+        return;
+      }
+      
+      const testData = {
+        id: '_diag_test_' + Date.now(),
+        data: {
+          ts: Date.now(),
+          test: true,
+          userAgent: navigator.userAgent.substring(0, 50)
+        },
+        updated_at: Date.now()
+      };
+      
+      window.supa.from('config').upsert(testData, { onConflict: 'id' })
+        .then(res => {
+          if (res.error) throw res.error;
+          testEl.innerHTML = '<div class="status ok">✓ 写入成功</div>';
+          log('写入测试成功', 'success');
+          
+          // 清理测试数据
+          setTimeout(() => {
+            window.supa.from('config').eq('id', testData.id).delete();
+          }, 1000);
+        })
+        .catch(err => {
+          testEl.innerHTML = `<div class="status error">✗ 写入失败: ${err.message}</div>`;
+          log(`写入测试失败: ${err.message}`, 'error');
+        });
+    };
+    
+    window.checkOfflineQueue = function() {
+      const queueEl = document.getElementById('offlineQueue');
+      const flushBtn = document.getElementById('flushBtn');
+      
+      if (typeof window.offlinePunchQueue === 'undefined') {
+        queueEl.innerHTML = '<div class="status error">离线队列函数未定义</div>';
+        return;
+      }
+      
+      const queue = window.offlinePunchQueue();
+      if (queue.length === 0) {
+        queueEl.innerHTML = '<div class="status ok">✓ 离线队列为空</div>';
+        flushBtn.disabled = true;
+      } else {
+        queueEl.innerHTML = `<div class="status warn">⚠ 离线队列有 ${queue.length} 条待同步</div>`;
+        queueEl.innerHTML += '<pre>' + JSON.stringify(queue.slice(-5), null, 2) + '</pre>';
+        flushBtn.disabled = false;
+      }
+      
+      log(`离线队列检查: ${queue.length} 条`);
+    };
+    
+    window.flushQueue = function() {
+      if (typeof window.flushOfflinePunches === 'undefined') {
+        log('flushOfflinePunches 函数未定义', 'error');
+        return;
+      }
+      
+      const flushBtn = document.getElementById('flushBtn');
+      flushBtn.disabled = true;
+      flushBtn.textContent = '同步中...';
+      
+      window.flushOfflinePunches().then(() => {
+        const remaining = window.offlinePunchQueue();
+        if (remaining.length === 0) {
+          document.getElementById('offlineQueue').innerHTML = '<div class="status ok">✓ 同步完成，队列已清空</div>';
+          log('离线队列同步成功', 'success');
+        } else {
+          document.getElementById('offlineQueue').innerHTML = `<div class="status warn">⚠ 同步完成，剩余 ${remaining.length} 条</div>`;
+          log(`离线队列同步完成，剩余 ${remaining.length} 条`, 'warn');
+        }
+        flushBtn.textContent = '手动同步';
+        flushBtn.disabled = false;
+      }).catch(err => {
+        document.getElementById('offlineQueue').innerHTML = `<div class="status error">✗ 同步失败: ${err.message}</div>`;
+        log(`离线队列同步失败: ${err.message}`, 'error');
+        flushBtn.textContent = '手动同步';
+        flushBtn.disabled = false;
+      });
+    };
+    
+    window.checkTodayPunches = function() {
+      const punchesEl = document.getElementById('todayPunches');
+      
+      if (typeof window.fbPunches === 'undefined') {
+        punchesEl.innerHTML = '<div class="status error">fbPunches 未定义</div>';
+        return;
+      }
+      
+      const today = new Date().toISOString().split('T')[0];
+      const todayPunches = window.fbPunches.filter(p => p.date === today);
+      
+      if (todayPunches.length === 0) {
+        punchesEl.innerHTML = '<div class="status warn">今日暂无打卡记录</div>';
+      } else {
+        punchesEl.innerHTML = `<div class="status ok">✓ 今日有 ${todayPunches.length} 条打卡</div>`;
+        punchesEl.innerHTML += '<pre>' + JSON.stringify(todayPunches, null, 2) + '</pre>';
+      }
+      
+      // 也检查 state.punches
+      if (typeof window.state !== 'undefined' && window.state.punches) {
+        const localPunches = window.state.punches[today] || [];
+        punchesEl.innerHTML += `<div class="status info">本地存储: ${localPunches.length} 条</div>`;
+      }
+      
+      log(`今日打卡检查: fbPunches=${todayPunches.length}`);
+    };
+    
+    window.runFullDiagnosis = function() {
+      document.getElementById('diagLog').innerHTML = '';
+      log('开始完整诊断...');
+      
+      window.checkBasicStatus();
+      
+      setTimeout(() => {
+        window.testWrite();
+      }, 500);
+      
+      setTimeout(() => {
+        window.checkOfflineQueue();
+      }, 1000);
+      
+      setTimeout(() => {
+        window.checkTodayPunches();
+      }, 1500);
+      
+      setTimeout(() => {
+        log('完整诊断完成');
+      }, 2000);
+    };
+    
+    window.copyLog = function() {
+      const logText = window.diagLog.map(e => `[${e.time}] ${e.msg}`).join('\n');
+      navigator.clipboard.writeText(logText).then(() => {
+        alert('日志已复制到剪贴板');
+      }).catch(() => {
+        alert('复制失败，请手动选择复制');
+      });
+    };
+    
+    // 自动运行基础检查
+    setTimeout(() => {
+      if (typeof window.fbReady !== 'undefined') {
+        window.checkBasicStatus();
+      } else {
+        log('等待主应用加载...', 'info');
+        setTimeout(() => {
+          if (typeof window.fbReady !== 'undefined') {
+            window.checkBasicStatus();
+          } else {
+            log('主应用未加载，请刷新页面', 'error');
+          }
+        }, 2000);
+      }
+    }, 1000);
+  </script>
+</body>
+</html>
