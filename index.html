@@ -616,8 +616,8 @@ window.addEventListener('beforeunload',function(){
   if(window.ocrWorker){try{window.ocrWorker.terminate();}catch(e){} window.ocrWorker=null;}
 });
 // ====== DATABASE CONFIG (DUAL BACKEND) ======
-// 切换数据库后端：'supabase' 或 'firestore'
-const DB_PROVIDER = localStorage.getItem('db_provider') || 'supabase';
+// 强制使用 Firestore，不再依赖 localStorage 设置（v2026.09.03 修复）
+const DB_PROVIDER = 'firestore';
 
 // --- Supabase 配置 ---
 const SUPABASE_URL='https://txtduqfhugjupxdoxdvp.supabase.co';
