@@ -1,0 +1,224 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <title>Firestore 数据诊断</title>
+  <style>
+    body { font-family: monospace; padding: 20px; background: #1a1a1a; color: #eee; max-width: 1200px; margin: 0 auto; }
+    pre { background: #2a2a2a; padding: 10px; border-radius: 4px; overflow: auto; font-size: 12px; }
+    .error { color: #ff6b6b; font-weight: bold; }
+    .success { color: #51cf66; }
+    .info { color: #74c0fc; }
+    .warn { color: #ffd43b; }
+    table { border-collapse: collapse; width: 100%; margin: 10px 0; }
+    th, td { border: 1px solid #444; padding: 6px 10px; text-align: left; font-size: 12px; }
+    th { background: #333; }
+    button { background: #4a9eff; color: white; border: none; padding: 8px 16px; border-radius: 4px; cursor: pointer; margin: 5px; }
+    button:hover { background: #3a8eef; }
+  </style>
+</head>
+<body>
+  <h1>Firestore  punches 数据诊断</h1>
+  
+  <div>
+    <button onclick="checkAll()">检查所有数据</button>
+    <button onclick="checkDate('2026-09-03')">检查 9/3</button>
+    <button onclick="checkDate('2026-09-02')">检查 9/2</button>
+    <button onclick="checkRecent()">检查最近记录</button>
+  </div>
+  
+  <div id="output"></div>
+  
+  <script type="module">
+    import { initializeApp } from 'https://www.gstatic.com/firebasejs/10.7.1/firebase-app.js';
+    import { getFirestore, collection, getDocs, query, where, getDoc, doc } from 'https://www.gstatic.com/firebasejs/10.7.1/firebase-firestore.js';
+    
+    window.outputEl = document.getElementById('output');
+    
+    window.log = function(msg, cls = '') {
+      const div = document.createElement('div');
+      if (cls) div.className = cls;
+      div.textContent = msg;
+      window.outputEl.appendChild(div);
+    };
+    
+    window.logTable = function(headers, rows) {
+      const table = document.createElement('table');
+      const thead = document.createElement('thead');
+      const tr = document.createElement('tr');
+      headers.forEach(h => {
+        const th = document.createElement('th');
+        th.textContent = h;
+        tr.appendChild(th);
+      });
+      thead.appendChild(tr);
+      table.appendChild(thead);
+      
+      const tbody = document.createElement('tbody');
+      rows.forEach(row => {
+        const tr = document.createElement('tr');
+        row.forEach(cell => {
+          const td = document.createElement('td');
+          td.textContent = cell;
+          tr.appendChild(td);
+        });
+        tbody.appendChild(tr);
+      });
+      table.appendChild(tbody);
+      window.outputEl.appendChild(table);
+    };
+    
+    const firebaseConfig = {
+      projectId: "clockin-b691a",
+    };
+    
+    const app = initializeApp(firebaseConfig);
+    const db = getFirestore(app);
+    
+    window.checkAll = async function() {
+      window.outputEl.innerHTML = '';
+      log('=== 开始全面检查 ===', 'info');
+      
+      try {
+        // 获取所有 punches
+        const allQ = collection(db, 'punches');
+        const allSnapshot = await getDocs(allQ);
+        
+        const allPunches = [];
+        allSnapshot.forEach(doc => {
+          allPunches.push({ id: doc.id, ...doc.data() });
+        });
+        
+        log(`总记录数: ${allPunches.length}`, 'success');
+        
+        // 按日期统计
+        const dateCounts = {};
+        allPunches.forEach(p => {
+          const d = p.date || 'unknown';
+          dateCounts[d] = (dateCounts[d] || 0) + 1;
+        });
+        
+        log('');
+        log('=== 各日期记录数 ===', 'info');
+        const dateRows = Object.entries(dateCounts).sort().map(([date, count]) => [date, count + ' 条']);
+        logTable(['日期', '记录数'], dateRows);
+        
+        // 检查最近 24 小时
+        const oneDayAgo = Date.now() - 24 * 60 * 60 * 1000;
+        const recentPunches = allPunches.filter(p => p.ts && p.ts >= oneDayAgo);
+        log('');
+        log(`最近 24 小时记录数: ${recentPunches.length}`, recentPunches.length > 0 ? 'success' : 'warn');
+        
+        if (recentPunches.length > 0) {
+          log('最近 24 小时记录详情:');
+          const recentRows = recentPunches.map(p => {
+            const date = p.ts ? new Date(p.ts).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' }) : 'N/A';
+            return [p.id, p.mid, p.date, p.time, p.t === 's' ? '上班' : '下班', p.sid, date];
+          });
+          logTable(['ID', '员工', '日期', '时间', '类型', '班次ID', '时间戳'], recentRows);
+        }
+        
+        // 检查 9/3
+        log('');
+        log('=== 检查 2026-09-03 ===', 'info');
+        const q93 = query(collection(db, 'punches'), where('date', '==', '2026-09-03'));
+        const snapshot93 = await getDocs(q93);
+        log(`9/3 记录数: ${snapshot93.size}`, snapshot93.size > 0 ? 'success' : 'error');
+        
+        if (snapshot93.size > 0) {
+          const records = [];
+          snapshot93.forEach(doc => {
+            records.push(doc.data());
+          });
+          const rows = records.map(p => [p.mid, p.time, p.t === 's' ? '上班' : '下班', p.sid, p.sd || 'N/A']);
+          logTable(['员工', '时间', '类型', '班次ID', '班次日期'], rows);
+        }
+        
+      } catch (e) {
+        log(`错误: ${e.message}`, 'error');
+        console.error(e);
+      }
+    };
+    
+    window.checkDate = async function(date) {
+      window.outputEl.innerHTML = '';
+      log(`=== 检查 ${date} ===`, 'info');
+      
+      try {
+        const q = query(collection(db, 'punches'), where('date', '==', date));
+        const snapshot = await getDocs(q);
+        
+        log(`${date} 记录数: ${snapshot.size}`, snapshot.size > 0 ? 'success' : 'error');
+        
+        if (snapshot.size > 0) {
+          const records = [];
+          snapshot.forEach(doc => {
+            records.push({ id: doc.id, ...doc.data() });
+          });
+          
+          // 按员工分组
+          const byMember = {};
+          records.forEach(r => {
+            if (!byMember[r.mid]) byMember[r.mid] = [];
+            byMember[r.mid].push(r);
+          });
+          
+          log('');
+          log('按员工分组统计:');
+          const memberRows = Object.entries(byMember).map(([mid, punches]) => {
+            return [mid, punches.length + ' 条'];
+          });
+          logTable(['员工ID', '记录数'], memberRows);
+          
+          log('');
+          log('详细记录:');
+          const detailRows = records.map(p => {
+            const ts = p.ts ? new Date(p.ts).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' }) : 'N/A';
+            return [p.id, p.mid, p.time, p.t === 's' ? '上班' : '下班', p.sid, p.sd || 'N/A', ts];
+          });
+          logTable(['ID', '员工', '时间', '类型', '班次ID', '班次日期', '时间戳'], detailRows);
+        }
+        
+      } catch (e) {
+        log(`错误: ${e.message}`, 'error');
+        console.error(e);
+      }
+    };
+    
+    window.checkRecent = async function() {
+      window.outputEl.innerHTML = '';
+      log('=== 检查最近记录 ===', 'info');
+      
+      try {
+        const allQ = collection(db, 'punches');
+        const allSnapshot = await getDocs(allQ);
+        
+        const allPunches = [];
+        allSnapshot.forEach(doc => {
+          allPunches.push({ id: doc.id, ...doc.data() });
+        });
+        
+        // 按 ts 排序
+        allPunches.sort((a, b) => (b.ts || 0) - (a.ts || 0));
+        
+        log(`总记录数: ${allPunches.length}`);
+        log('');
+        log('最新的 50 条记录:');
+        
+        const rows = allPunches.slice(0, 50).map(p => {
+          const date = p.ts ? new Date(p.ts).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' }) : 'N/A';
+          return [p.id, p.mid, p.date, p.time, p.t === 's' ? '上班' : '下班', p.sid, date];
+        });
+        logTable(['ID', '员工', '日期', '时间', '类型', '班次ID', '时间戳'], rows);
+        
+      } catch (e) {
+        log(`错误: ${e.message}`, 'error');
+        console.error(e);
+      }
+    };
+    
+    // 自动运行全面检查
+    window.checkAll();
+  </script>
+</body>
+</html>
