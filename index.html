@@ -7009,7 +7009,7 @@ let lastResetDay='';
   }
   setTimeout(checkReset,6e4);
 })();
-chkSess();initSupabaseTables().then(()=>{initFBListeners();syncServerTime(true)});initOfflinePunchSync();renderAll();
+chkSess();initSupabaseTables().then(()=>{initFBListeners();syncServerTime(true);setTimeout(()=>flushOfflinePunches(true),2000)});initOfflinePunchSync();renderAll();
 // Supabase write diagnostic test (silent)
 (async function testWrite(){
   if(!fbReady)return;
