@@ -7009,7 +7009,52 @@ let lastResetDay='';
   }
   setTimeout(checkReset,6e4);
 })();
-chkSess();initSupabaseTables().then(()=>{initFBListeners();syncServerTime(true);setTimeout(()=>flushOfflinePunches(true),2000)});initOfflinePunchSync();renderAll();
+// 同步 localStorage 中的历史打卡到 Firestore（v2026.09.03 新增）
+async function syncHistoricalPunches() {
+  if (!fbReady) return;
+  try {
+    const localPunches = state.punches || {};
+    const dates = Object.keys(localPunches);
+    if (!dates.length) return;
+    
+    console.log(`[syncHistoricalPunches] 发现 ${dates.length} 个日期有本地打卡`);
+    
+    let synced = 0;
+    let skipped = 0;
+    
+    for (const date of dates) {
+      const punches = localPunches[date] || [];
+      if (!punches.length) continue;
+      
+      // 获取 Firestore 中该日期的现有打卡
+      const existingPunches = await queryPunchesByDate(date);
+      const existingKeys = new Set(existingPunches.map(p => `${p.mid}_${p.sid}_${p.t}_${p.time}`));
+      
+      // 同步缺失的打卡
+      for (const punch of punches) {
+        const key = `${punch.mid}_${punch.sid}_${punch.t}_${punch.time}`;
+        if (!existingKeys.has(key)) {
+          try {
+            await supa.from('punches').insert(_opqSanitize(punch));
+            synced++;
+          } catch (e) {
+            console.warn(`[syncHistoricalPunches] 同步失败 ${key}:`, e.message);
+          }
+        } else {
+          skipped++;
+        }
+      }
+    }
+    
+    if (synced > 0) {
+      console.log(`[syncHistoricalPunches] 同步完成：${synced} 条新增，${skipped} 条已存在`);
+    }
+  } catch (e) {
+    console.error('[syncHistoricalPunches] 错误:', e);
+  }
+}
+
+chkSess();initSupabaseTables().then(()=>{initFBListeners();syncServerTime(true);setTimeout(()=>{flushOfflinePunches(true);syncHistoricalPunches()},2000)});initOfflinePunchSync();renderAll();
 // Supabase write diagnostic test (silent)
 (async function testWrite(){
   if(!fbReady)return;
