@@ -369,7 +369,7 @@
   </aside>
   <main class="ma">
     <div class="panel active" id="ap-overview">
-      <div class="ph"><h1 class="pt">出勤概览</h1><div class="ha"><button class="btn-s" onclick="testFBConnection()">测试连接</button><span class="btn-s" id="dateBtn"></span><button class="btn-p" onclick="exportReport()">导出报表</button></div></div>
+      <div class="ph"><h1 class="pt">出勤概览</h1><div class="ha"><button class="btn-s" onclick="testFBConnection()">测试连接</button><button class="btn-s" onclick="checkOfflineQueue()" style="margin-left:8px">离线队列</button><span class="btn-s" id="dateBtn"></span><button class="btn-p" onclick="exportReport()">导出报表</button></div></div>
       <div class="kpi-toolbar">
         <div class="pill-group" id="kpiModeGroup">
           <button class="pill cur" id="kpiTabTotal" onclick="setKpiMode('total')">总表 · 全天</button>
@@ -2527,6 +2527,30 @@ async function testFBConnection(){
   }
 }
 
+// 离线队列诊断和刷新
+async function checkOfflineQueue(){
+  const q=offlinePunchQueue();
+  if(!q.length){
+    showToast('离线队列为空 ✓');
+    return;
+  }
+  
+  const msg=`离线队列有 ${q.length} 条待同步打卡\n\n最近 5 条:\n${q.slice(-5).map(r=>`${r.date} ${r.name} ${r.t==='s'?'上班':'下班'} ${r.time} sid=${r.sid}`).join('\n')}\n\n点击确定尝试同步`;
+  
+  if(confirm(msg)){
+    showToast('正在同步离线队列...');
+    await flushOfflinePunches();
+    const remaining=offlinePunchQueue();
+    if(remaining.length){
+      showToast(`同步完成，剩余 ${remaining.length} 条失败`);
+    }else{
+      showToast('离线队列已全部同步 ✓');
+    }
+    // 刷新页面数据
+    await renderAdmin();
+  }
+}
+
 // Account claiming via Supabase (daily reset)
 async function claimAccount(memberId){
   const expAt=nextResetTime();
@@ -2690,15 +2714,19 @@ async function flushOfflinePunches(silent){
   try{
     // 连通性探测：离线时直接返回，避免逐条 insert 空转超时
     const probe=await _opqTimeout(supa.from('config').select('id').limit(1),8000);
-    if(probe&&probe.error)return;
+    if(probe&&probe.error){console.log('[flushOfflinePunches] 连通性探测失败');return}
     const remain=[];
     for(const rec of q){
       try{
         if(!validatePunch(rec)){dropped++;logSecurityEvent('invalid_opq_punch',`Offline queue punch dropped by validation: mid=${rec.mid}, date=${rec.date}`);continue}
-        // 云端去重：按指纹匹配，避免多字段复合索引问题
+        // 云端去重：使用 queryPunchesByDate 避免复合索引问题
         const fp=`${rec.sid}_${rec.t}_${rec.mid}_${rec.date}_${rec.time}`;
-        const {data:ex}=await _opqTimeout(supa.from('punches').select('*').eq('mid',rec.mid).eq('date',rec.date).limit(50),8000);
-        if(ex&&ex.some(p=>`${p.sid}_${p.t}_${p.mid}_${p.date}_${p.time}`===fp)){dropped++;continue}
+        const dayPunches = await queryPunchesByDate(rec.date);
+        if(dayPunches.some(p=>`${p.sid}_${p.t}_${p.mid}_${p.date}_${p.time}`===fp)){
+          console.log('[flushOfflinePunches] 跳过重复:', fp);
+          dropped++;continue;
+        }
+        console.log('[flushOfflinePunches] 写入:', rec);
         let insRes=await _opqTimeout(supa.from('punches').insert(_opqSanitize(rec)),8000).then(r=>({error:r.error||null})).catch(err=>({error:err}));
         // 降级保护：loc 列尚未建立时，丢弃定位重试一次，避免整条打卡被误判为永久失败
         if(insRes.error&&rec.loc){
