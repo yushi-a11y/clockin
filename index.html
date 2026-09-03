@@ -3194,19 +3194,32 @@ async function confirmPwd(){
   // 密码正确 → 关闭弹窗，走绑定流程
   document.getElementById('pwdOverlay').style.display='none';
   pendingPwdMid=null;
-  const result=await claimAccount(mid);
-  if(!result.ok){
-    const expTime=result.expiresAt?new Date(result.expiresAt).toLocaleString('zh-CN',{month:'numeric',day:'numeric',hour:'2-digit',minute:'2-digit'}):'明早重置';
-    showToast(`「${result.by||'他人'}」正在使用此账号（${expTime}后可选）`);
-    document.getElementById('memberSelect').value='';
-    document.getElementById('empContent').innerHTML=`<div style="text-align:center;padding:40px"><div style="font-size:32px;margin-bottom:12px">🔒</div><div style="font-size:15px;font-weight:600;color:var(--danger);margin-bottom:8px">该账号已被「${esc(result.by||'他人')}」占用</div><div style="font-size:13px;color:var(--muted)">预计 ${expTime} 后自动释放，届时可重新选择<br>或联系管理员在后台手动解绑</div></div>`;
-    return;
+  // 显示加载提示（v2026.09.03 修复：防止 claimAccount 卡住时无反馈）
+  showToast('登录中...');
+  try {
+    const result = await Promise.race([
+      claimAccount(mid),
+      new Promise((_, reject) => setTimeout(() => reject(new Error('超时')), 10000))
+    ]);
+    if(!result.ok){
+      const expTime=result.expiresAt?new Date(result.expiresAt).toLocaleString('zh-CN',{month:'numeric',day:'numeric',hour:'2-digit',minute:'2-digit'}):'明早重置';
+      showToast(`「${result.by||'他人'}」正在使用此账号（${expTime}后可选）`);
+      document.getElementById('memberSelect').value='';
+      document.getElementById('empContent').innerHTML=`<div style="text-align:center;padding:40px"><div style="font-size:32px;margin-bottom:12px"></div><div style="font-size:15px;font-weight:600;color:var(--danger);margin-bottom:8px">该账号已被「${esc(result.by||'他人')}」占用</div><div style="font-size:13px;color:var(--muted)">预计 ${expTime} 后自动释放，届时可重新选择<br>或联系管理员在后台手动解绑</div></div>`;
+      return;
+    }
+    localStorage.setItem('cb6auth','1');localStorage.setItem('cb6authTs',String(Date.now()));
+    selectedMember=TEAM.find(x=>x.id===m.id)||m;sv('cu6',{memberId:mid});renderEmp();startReminderTimer();
+    logEvent('选择账号',`${m.name}（${m.dept||''}）密码验证通过并登录`);
+    showToast(`已选择 ${m.name}${result.fallback?'（离线模式）':''}`);
+  } catch(e) {
+    console.warn('Claim account error:', e.message);
+    // 超时或错误时，使用本地 fallback 登录
+    localStorage.setItem('cb6auth','1');localStorage.setItem('cb6authTs',String(Date.now()));
+    selectedMember=TEAM.find(x=>x.id===m.id)||m;sv('cu6',{memberId:mid});renderEmp();startReminderTimer();
+    showToast('登录成功（离线模式）');
+    logEvent('选择账号',`${m.name}（${m.dept||''}）密码验证通过并登录（离线 fallback）`);
   }
-  localStorage.setItem('cb6auth','1');localStorage.setItem('cb6authTs',String(Date.now()));
-  selectedMember=TEAM.find(x=>x.id===m.id)||m;sv('cu6',{memberId:mid});renderEmp();startReminderTimer();
-  logEvent('选择账号',`${m.name}（${m.dept||''}）密码验证通过并登录`);
-  const expDate=new Date(result.expiresAt||nextResetTime());
-  showToast(`已选择 ${m.name}，${result.fallback?'离线模式':'设备已绑定（'+expDate.getMonth()+'/'+expDate.getDate()+' '+String(expDate.getHours()).padStart(2,'0')+':00 自动重置）'}`);
 }
 // 员工自助修改登录密码（新密码以 SHA-256 哈希存储）
 async function changeOwnPwd(){
