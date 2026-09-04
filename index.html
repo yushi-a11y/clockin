@@ -933,7 +933,10 @@ class _FSProvider {
     try {
       switch(fnName) {
         case 'picks_snapshot': {
-          const doc = await this._fs.collection('config').doc('picks').get();
+          const doc = await Promise.race([
+            this._fs.collection('config').doc('picks').get(),
+            new Promise((_, reject) => setTimeout(() => reject(new Error('查询超时')), 10000))
+          ]);
           if (!doc.exists) return { data: null, error: null };
           return { data: doc.data().data || null, error: null };
         }
