@@ -10,7 +10,7 @@ from pathlib import Path
 from playwright.async_api import async_playwright, expect
 
 ROOT = Path(__file__).resolve().parent.parent
-BASE_URL = 'http://127.0.0.1:8765/index.html'
+BASE_URL = 'http://127.0.0.1:8766/index.html'
 SHOTS = ROOT / 'test_outputs'
 SHOTS.mkdir(exist_ok=True)
 
@@ -20,7 +20,10 @@ def log(msg):
 
 
 async def block_external(page):
-    blocked_hosts = {'fonts.googleapis.com', 'fonts.gstatic.com'}
+    blocked_hosts = {
+        'fonts.googleapis.com', 'fonts.gstatic.com', 'www.gstatic.com',
+        'firestore.googleapis.com', 'firebase.googleapis.com'
+    }
 
     async def handle_route(route):
         url = route.request.url
@@ -64,14 +67,16 @@ async def goto_robust(page, url=BASE_URL, tries=3):
 
 async def clear_state(page):
     await goto_robust(page)
+    await page.wait_for_function("() => typeof TEAM !== 'undefined' && typeof genShifts === 'function'", timeout=15000)
     await page.evaluate("""() => {
+        const currentTeam = JSON.parse(JSON.stringify(TEAM));
         localStorage.clear();
-        state = { punches: {}, shifts: DEF_SHIFTS };
+        state = { punches: {}, shifts: genShifts() };
         picks = {};
         makeups = [];
         leaves = [];
         performances = [];
-        TEAM = JSON.parse(JSON.stringify(DEF_TEAM));
+        TEAM = currentTeam;
         selectedMember = null;
         sv('cv6', state);
         sv('cp6', picks);
@@ -137,8 +142,8 @@ async def test_normal_and_late_punch(page):
     log('--- 正常打卡 + 迟到检测测试 ---')
     real_now = dt.datetime.now()
     t_0902 = real_now.replace(hour=9, minute=2, second=0, microsecond=0)
-    await set_mock_clock(page, t_0902)
     await clear_state(page)
+    await set_mock_clock(page, t_0902)
     mid = 1
     today = await today_str(page)
     await seed_picks(page, today, mid, [9, 12])  # 09:00-10:00, 12:00-13:00（不连班）
@@ -221,8 +226,8 @@ async def test_makeup_flow(page):
     log('--- 补卡申请 + 管理员审批测试 ---')
     real_now = dt.datetime.now()
     t_1200 = real_now.replace(hour=12, minute=0, second=0, microsecond=0)
-    await set_mock_clock(page, t_1200)
     await clear_state(page)
+    await set_mock_clock(page, t_1200)
     mid = 1
     today = await today_str(page)
     yesterday = (dt.date.fromisoformat(today) - dt.timedelta(days=1)).isoformat()
@@ -302,8 +307,8 @@ async def test_leave_flow(page):
     log('--- 请假申请 + 管理员审批测试 ---')
     real_now = dt.datetime.now()
     t_1200 = real_now.replace(hour=12, minute=0, second=0, microsecond=0)
-    await set_mock_clock(page, t_1200)
     await clear_state(page)
+    await set_mock_clock(page, t_1200)
     mid = 1
     today = await today_str(page)
     tomorrow = (dt.date.fromisoformat(today) + dt.timedelta(days=1)).isoformat()
@@ -350,8 +355,8 @@ async def test_performance_crud(page):
     log('--- 绩效录入 + 员工查看测试 ---')
     real_now = dt.datetime.now()
     t_1200 = real_now.replace(hour=12, minute=0, second=0, microsecond=0)
-    await set_mock_clock(page, t_1200)
     await clear_state(page)
+    await set_mock_clock(page, t_1200)
     await login_admin(page)
 
     await page.evaluate('() => switchPanel("performance")')

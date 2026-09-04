@@ -30,11 +30,10 @@ async def main():
         page.on('pageerror', lambda e: log(f'[pageerror] {e}'))
 
         async def block_external(route):
-            u = route.request.url
-            if 'fonts.g' in u or 'supabase' in u:
-                await route.abort()
-            else:
+            if route.request.url.startswith('http://127.0.0.1:9876/'):
                 await route.continue_()
+            else:
+                await route.abort()
         await page.route('**/*', block_external)
         await page.clock.install(time=dt.datetime(2026, 8, 7, 9, 0))
         await page.goto(BASE_URL, wait_until='domcontentloaded', timeout=20000)

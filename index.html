@@ -739,13 +739,19 @@ class _FSQueryBuilder {
       if (idF && idF.type === 'eq') {
         // 直接按文档 ID 查找，避免 .where('id','==',...) 查不到迁移后无 id 字段的文档
         console.log(`[FS._exec] 路径: 按文档 ID 查找 (${idF.value})`);
-        const doc = await this._fs.collection(this._col).doc(idF.value).get();
+        const doc = await Promise.race([
+          this._fs.collection(this._col).doc(idF.value).get(),
+          new Promise((_, reject) => setTimeout(() => reject(new Error('查询超时')), 10000))
+        ]);
         if (doc.exists) allRows.push(this._docToRow(doc));
         console.log(`[FS._exec] 结果: ${allRows.length} 条`);
       } else if (idF && idF.type === 'in') {
         // in('id', [...]) → 逐个按文档 ID 查找
         console.log(`[FS._exec] 路径: 批量文档 ID 查找 (${idF.values.length} 个)`);
-        const results = await Promise.all(idF.values.map(v => this._fs.collection(this._col).doc(v).get()));
+        const results = await Promise.race([
+          Promise.all(idF.values.map(v => this._fs.collection(this._col).doc(v).get())),
+          new Promise((_, reject) => setTimeout(() => reject(new Error('查询超时')), 12000))
+        ]);
         results.forEach(doc => { if (doc.exists) allRows.push(this._docToRow(doc)); });
         console.log(`[FS._exec] 结果: ${allRows.length} 条`);
       } else if (this._inBatches) {
@@ -806,7 +812,10 @@ class _FSQueryBuilder {
       if (!id) throw new Error('upsert requires id field');
       // 保留 id 字段在文档数据中，以便查询过滤
       const data = { ...row };
-      await this._fs.collection(this._col).doc(String(id)).set(data, { merge: true });
+      await Promise.race([
+        this._fs.collection(this._col).doc(String(id)).set(data, { merge: true }),
+        new Promise((_, reject) => setTimeout(() => reject(new Error('写入超时')), 10000))
+      ]);
       return { data: [row], error: null };
     } catch(e) {
       return { data: null, error: e };
@@ -822,10 +831,16 @@ class _FSQueryBuilder {
         // 保留 id 字段在文档数据中
         console.log('[FS._insert] 使用自定义 ID:', row.id);
         docRef = this._fs.collection(this._col).doc(String(row.id));
-        await docRef.set(row, { merge: true });
+        await Promise.race([
+          docRef.set(row, { merge: true }),
+          new Promise((_, reject) => setTimeout(() => reject(new Error('写入超时')), 10000))
+        ]);
       } else {
         console.log('[FS._insert] 自动生成文档 ID');
-        docRef = await this._fs.collection(this._col).add(row);
+        docRef = await Promise.race([
+          this._fs.collection(this._col).add(row),
+          new Promise((_, reject) => setTimeout(() => reject(new Error('写入超时')), 10000))
+        ]);
       }
       console.log('[FS._insert] ✓ 写入成功, 文档 ID:', docRef.id);
       return { data: [{ ...row, id: docRef.id }], error: null };
@@ -937,8 +952,37 @@ class _FSProvider {
             this._fs.collection('config').doc('picks').get(),
             new Promise((_, reject) => setTimeout(() => reject(new Error('查询超时')), 10000))
           ]);
-          if (!doc.exists) return { data: null, error: null };
-          return { data: doc.data().data || null, error: null };
+          if (!doc.exists) return { data: null, error: { message: 'picks snapshot document missing' } };
+          const snapshot = doc.data();
+          // 文档存在但 data 字段缺失属于损坏快照，不能伪装成空排班覆盖本地有效数据。
+          if (!snapshot || !Object.prototype.hasOwnProperty.call(snapshot, 'data')) {
+            return { data: null, error: { message: 'picks snapshot missing data field' } };
+          }
+          if(!snapshot.data||typeof snapshot.data!=='object'||Array.isArray(snapshot.data)){
+            return {data:null,error:{message:'picks snapshot data must be an object'}};
+          }
+          return { data: { id: 'picks', data: snapshot.data }, error: null };
+        }
+        case 'claims_unbind_atomic': {
+          const targetIds=[...new Set((params?.p_target_ids||[]).map(String).filter(Boolean))];
+          const forceIds=[...new Set((params?.p_force_ids||[]).map(String).filter(Boolean))];
+          if(!forceIds.length)return {data:null,error:{message:'invalid unbind payload'}};
+          const reason=String(params?.p_reason||''),ts=Date.now();
+          const result=await this._fs.runTransaction(async tx=>{
+            const forceRef=this._fs.collection('config').doc('forceout');
+            const targetRefs=targetIds.map(id=>this._fs.collection('claims').doc(id));
+            // Firestore 事务要求所有读取先于写入；读取目标 claim 也可建立并发冲突检测。
+            const docs=await Promise.all([tx.get(forceRef),...targetRefs.map(ref=>tx.get(ref))]);
+            const forceDoc=docs[0];
+            const current=forceDoc.exists&&forceDoc.data()?.data&&typeof forceDoc.data().data==='object'
+              ?forceDoc.data().data:{};
+            const next={...current};
+            forceIds.forEach(id=>{next[id]={ts,reason}});
+            targetRefs.forEach(ref=>tx.delete(ref));
+            tx.set(forceRef,{data:next,updated_at:ts},{merge:true});
+            return next;
+          });
+          return {data:result,error:null};
         }
         case 'picks_count': {
           const { p_date, p_sid, p_except_mid } = params || {};
@@ -949,7 +993,7 @@ class _FSProvider {
           let count = 0;
           Object.keys(dayPicks).forEach(mid => {
             if (p_except_mid && String(mid) === String(p_except_mid)) return;
-            const arr = dayPicks[mid];
+            const arr = dayPicks[String(mid)];
             if (Array.isArray(arr) && arr.includes(Number(p_sid))) count++;
           });
           return { data: count, error: null };
@@ -961,7 +1005,25 @@ class _FSProvider {
             const doc = await tx.get(docRef);
             const picks = doc.exists ? (doc.data().data || {}) : {};
             if (!picks[p_date]) picks[p_date] = {};
-            picks[p_date][String(p_mid)] = p_sids.slice().sort((a,b)=>a-b);
+            picks[p_date][String(p_mid)] = [...new Set((Array.isArray(p_sids) ? p_sids : []).map(Number).filter(Number.isFinite))].sort((a,b)=>a-b);
+            tx.set(docRef, { data: picks, updated_at: Date.now() }, { merge: true });
+            return picks;
+          });
+          return { data: result, error: null };
+        }
+        case 'picks_import_day': {
+          const { p_date, p_members } = params || {};
+          if (!/^\d{4}-\d{2}-\d{2}$/.test(String(p_date || '')) || !p_members || typeof p_members !== 'object' || Array.isArray(p_members)) {
+            return { data: null, error: { message: 'invalid picks import payload' } };
+          }
+          const result = await this._fs.runTransaction(async (tx) => {
+            const docRef = this._fs.collection('config').doc('picks');
+            const doc = await tx.get(docRef);
+            const picks = doc.exists ? (doc.data().data || {}) : {};
+            if (!picks[p_date] || typeof picks[p_date] !== 'object' || Array.isArray(picks[p_date])) picks[p_date] = {};
+            Object.keys(p_members).forEach(mid => {
+              picks[p_date][String(mid)] = [...new Set((Array.isArray(p_members[mid]) ? p_members[mid] : []).map(Number).filter(Number.isFinite))].sort((a,b)=>a-b);
+            });
             tx.set(docRef, { data: picks, updated_at: Date.now() }, { merge: true });
             return picks;
           });
@@ -974,7 +1036,7 @@ class _FSProvider {
             const doc = await tx.get(docRef);
             const picks = doc.exists ? (doc.data().data || {}) : {};
             if (!picks[p_date]) picks[p_date] = {};
-            const cur = (picks[p_date][String(p_mid)] || []).slice();
+            const cur = [...new Set((picks[p_date][String(p_mid)] || []).map(Number).filter(Number.isFinite))];
             if (!cur.includes(Number(p_sid))) cur.push(Number(p_sid));
             picks[p_date][String(p_mid)] = cur.sort((a,b)=>a-b);
             tx.set(docRef, { data: picks, updated_at: Date.now() }, { merge: true });
@@ -989,7 +1051,8 @@ class _FSProvider {
             const doc = await tx.get(docRef);
             const picks = doc.exists ? (doc.data().data || {}) : {};
             if (!picks[p_date]) picks[p_date] = {};
-            const cur = (picks[p_date][String(p_mid)] || []).filter(x => x !== Number(p_sid));
+            const cur = [...new Set((picks[p_date][String(p_mid)] || []).map(Number).filter(Number.isFinite))]
+              .filter(x => x !== Number(p_sid));
             picks[p_date][String(p_mid)] = cur.sort((a,b)=>a-b);
             tx.set(docRef, { data: picks, updated_at: Date.now() }, { merge: true });
             return picks;
@@ -998,36 +1061,161 @@ class _FSProvider {
         }
         case 'pick_add_cap': {
           const { p_date, p_mid, p_sid, p_admin } = params || {};
+          const sid = Number(p_sid), mid = String(p_mid);
+          if (!isValidDate(p_date) || p_mid == null || !Number.isFinite(sid)) return { data: { ok: false, reason: 'invalid' }, error: null };
           const result = await this._fs.runTransaction(async (tx) => {
             const docRef = this._fs.collection('config').doc('picks');
-            const capDoc = await this._fs.collection('config').doc('slotcap').get();
-            const doc = await tx.get(docRef);
+            const capRef = this._fs.collection('config').doc('slotcap');
+            const [doc, capDoc] = await Promise.all([tx.get(docRef), tx.get(capRef)]);
             const picks = doc.exists ? (doc.data().data || {}) : {};
             const slotCapData = capDoc.exists ? (capDoc.data().data || {}) : {};
+            if (!picks[p_date]) picks[p_date] = {};
+            const original = Array.isArray(picks[p_date][mid]) ? picks[p_date][mid] : [];
+            const cur = [...new Set(original.map(Number).filter(Number.isFinite))].sort((a,b)=>a-b);
 
-            // 检查容量
-            const cap = (slotCapData[p_date] && slotCapData[p_date][p_sid]) || 0;
+            // 重试幂等：已存在即成功；顺便将历史字符串/重复 sid 规范化回写为 Number。
+            if (cur.includes(sid)) {
+              const canonical = original.length === cur.length && original.every((item, i) => typeof item === 'number' && item === cur[i]);
+              if (!canonical) {
+                picks[p_date][mid] = cur;
+                tx.set(docRef, { data: picks, updated_at: Date.now() }, { merge: true });
+              }
+              return { ok: true, data: picks, alreadyExists: true };
+            }
+
+            // 日/周硬上限必须在事务内校验，避免并发客户端同时通过本地预检。
+            if (cur.length >= MAX_PER_DAY) return { ok: false, reason: 'dayfull', count: cur.length, max: MAX_PER_DAY };
+            const weekTotal = weekDaysArr(weekStartOf(parseYmd(p_date))).reduce((total, day) => {
+              const arr = (picks[ymd(day)] || {})[mid];
+              return total + (Array.isArray(arr) ? new Set(arr.map(Number).filter(Number.isFinite)).size : 0);
+            }, 0);
+            if (weekTotal >= MAX_PER_WEEK) return { ok: false, reason: 'weekfull', count: weekTotal, max: MAX_PER_WEEK };
+
+            // 检查容量；容量配置和 picks 必须来自同一个事务快照。
+            const cap = (slotCapData[p_date] && Number(slotCapData[p_date][sid])) || 0;
             if (cap > 0 && !p_admin) {
               let count = 0;
               const dayPicks = picks[p_date] || {};
-              Object.keys(dayPicks).forEach(mid => {
-                const arr = dayPicks[mid];
-                if (Array.isArray(arr) && arr.includes(Number(p_sid))) count++;
+              Object.keys(dayPicks).forEach(memberId => {
+                const arr = dayPicks[memberId];
+                if (Array.isArray(arr) && arr.some(itemSid => Number(itemSid) === sid)) count++;
               });
-              if (count >= cap) {
-                return { ok: false, reason: 'full', count, cap };
-              }
+              if (count >= cap) return { ok: false, reason: 'full', count, cap };
             }
 
-            if (!picks[p_date]) picks[p_date] = {};
-            const cur = (picks[p_date][String(p_mid)] || []).slice();
-            if (!cur.includes(Number(p_sid))) cur.push(Number(p_sid));
-            picks[p_date][String(p_mid)] = cur.sort((a,b)=>a-b);
+            cur.push(sid);
+            picks[p_date][mid] = cur.sort((a,b)=>a-b);
             tx.set(docRef, { data: picks, updated_at: Date.now() }, { merge: true });
             return { ok: true, data: picks };
           });
           if (result.ok === false) return { data: result, error: null };
           return { data: result.data || result, error: null };
+        }
+        case 'pick_transfer': {
+          const { p_date, p_from_mid, p_to_mid, p_sid } = params || {};
+          const sid = Number(p_sid), fromMid = String(p_from_mid), toMid = String(p_to_mid);
+          if (!p_date || !Number.isFinite(sid) || fromMid === toMid) return { data: { ok: false, reason: 'invalid' }, error: null };
+          const result = await this._fs.runTransaction(async (tx) => {
+            const picksRef = this._fs.collection('config').doc('picks');
+            const capRef = this._fs.collection('config').doc('slotcap');
+            const [picksDoc, capDoc] = await Promise.all([tx.get(picksRef), tx.get(capRef)]);
+            const picks = picksDoc.exists ? (picksDoc.data().data || {}) : {};
+            const caps = capDoc.exists ? (capDoc.data().data || {}) : {};
+            if (!picks[p_date]) picks[p_date] = {};
+            const fromArr = [...new Set((picks[p_date][fromMid] || []).map(Number).filter(Number.isFinite))];
+            const toArr = [...new Set((picks[p_date][toMid] || []).map(Number).filter(Number.isFinite))];
+            if (!fromArr.includes(sid) && toArr.includes(sid)) return { ok: true, data: picks, alreadyApplied: true };
+            if (!fromArr.includes(sid)) return { ok: false, reason: 'not_owner' };
+            if (toArr.includes(sid)) return { ok: false, reason: 'duplicate' };
+            if (toArr.length >= MAX_PER_DAY) return { ok: false, reason: 'dayfull' };
+            const cap = (caps[p_date] && Number(caps[p_date][sid])) || 0;
+            if (cap > 0) {
+              const count = Object.keys(picks[p_date]).reduce((n, mid) => {
+                if (String(mid) === fromMid) return n;
+                const arr = picks[p_date][mid];
+                return n + (Array.isArray(arr) && arr.some(itemSid => Number(itemSid) === sid) ? 1 : 0);
+              }, 0);
+              if (count >= cap) return { ok: false, reason: 'full', count, cap };
+            }
+            picks[p_date][fromMid] = fromArr.filter(itemSid => itemSid !== sid).sort((a,b)=>a-b);
+            picks[p_date][toMid] = [...toArr, sid].sort((a,b)=>a-b);
+            const weekTotal = weekDaysArr(weekStartOf(parseYmd(p_date))).reduce((total, day) => {
+              const arr = (picks[ymd(day)] || {})[toMid];
+              return total + (Array.isArray(arr) ? arr.length : 0);
+            }, 0);
+            if (weekTotal > MAX_PER_WEEK) return { ok: false, reason: 'weekfull' };
+            tx.set(picksRef, { data: picks, updated_at: Date.now() }, { merge: true });
+            return { ok: true, data: picks };
+          });
+          return { data: result, error: null };
+        }
+        case 'pick_exchange': {
+          const { p_give_date, p_giver_mid, p_give_sid, p_take_date, p_receiver_mid, p_take_sid } = params || {};
+          const giveSid = Number(p_give_sid), takeSid = Number(p_take_sid);
+          const giverMid = String(p_giver_mid), receiverMid = String(p_receiver_mid);
+          if (!p_give_date || !p_take_date || !Number.isFinite(giveSid) || !Number.isFinite(takeSid) || giverMid === receiverMid) {
+            return { data: { ok: false, reason: 'invalid' }, error: null };
+          }
+          const result = await this._fs.runTransaction(async (tx) => {
+            const picksRef = this._fs.collection('config').doc('picks');
+            const capRef = this._fs.collection('config').doc('slotcap');
+            const [picksDoc, capDoc] = await Promise.all([tx.get(picksRef), tx.get(capRef)]);
+            const picks = picksDoc.exists ? (picksDoc.data().data || {}) : {};
+            const caps = capDoc.exists ? (capDoc.data().data || {}) : {};
+            const cache = new Map();
+            const arrFor = (date, mid) => {
+              const key = date + '\u0000' + mid;
+              if (!cache.has(key)) cache.set(key, [...new Set((((picks[date] || {})[mid]) || []).map(Number).filter(Number.isFinite))]);
+              return cache.get(key);
+            };
+            const giverGive = arrFor(p_give_date, giverMid);
+            const giverTake = arrFor(p_take_date, giverMid);
+            const receiverGive = arrFor(p_give_date, receiverMid);
+            const receiverTake = arrFor(p_take_date, receiverMid);
+            const alreadyApplied = !giverGive.includes(giveSid) && giverTake.includes(takeSid) && receiverGive.includes(giveSid) && !receiverTake.includes(takeSid);
+            if (alreadyApplied) return { ok: true, data: picks, alreadyApplied: true };
+            if (!giverGive.includes(giveSid) || !receiverTake.includes(takeSid)) return { ok: false, reason: 'not_owner' };
+            if (receiverGive.includes(giveSid) || giverTake.includes(takeSid)) return { ok: false, reason: 'duplicate' };
+            const countSlotExcluding = (date, sid, excludedMid) => Object.keys(picks[date] || {}).reduce((n, mid) => {
+              if (String(mid) === String(excludedMid)) return n;
+              const arr = (picks[date] || {})[mid];
+              return n + (Array.isArray(arr) && arr.some(itemSid => Number(itemSid) === sid) ? 1 : 0);
+            }, 0);
+            const giveCap = (caps[p_give_date] && Number(caps[p_give_date][giveSid])) || 0;
+            const takeCap = (caps[p_take_date] && Number(caps[p_take_date][takeSid])) || 0;
+            if (giveCap > 0 && countSlotExcluding(p_give_date, giveSid, giverMid) >= giveCap) return { ok: false, reason: 'full', cap: giveCap };
+            if (takeCap > 0 && countSlotExcluding(p_take_date, takeSid, receiverMid) >= takeCap) return { ok: false, reason: 'full', cap: takeCap };
+            giverGive.splice(giverGive.indexOf(giveSid), 1);
+            if (!giverTake.includes(takeSid)) giverTake.push(takeSid);
+            receiverTake.splice(receiverTake.indexOf(takeSid), 1);
+            if (!receiverGive.includes(giveSid)) receiverGive.push(giveSid);
+            if ([...cache.values()].some(arr => arr.length > MAX_PER_DAY)) return { ok: false, reason: 'dayfull' };
+            cache.forEach((arr, key) => {
+              const [date, mid] = key.split('\u0000');
+              if (!picks[date]) picks[date] = {};
+              picks[date][mid] = [...new Set(arr)].sort((a,b)=>a-b);
+            });
+            const weekChecks = [
+              [giverMid, weekStartOf(parseYmd(p_give_date))],
+              [giverMid, weekStartOf(parseYmd(p_take_date))],
+              [receiverMid, weekStartOf(parseYmd(p_give_date))],
+              [receiverMid, weekStartOf(parseYmd(p_take_date))]
+            ];
+            const checked = new Set();
+            for (const [mid, weekStart] of weekChecks) {
+              const key = mid + '\u0000' + ymd(weekStart);
+              if (checked.has(key)) continue;
+              checked.add(key);
+              const total = weekDaysArr(weekStart).reduce((sum, day) => {
+                const arr = (picks[ymd(day)] || {})[mid];
+                return sum + (Array.isArray(arr) ? arr.length : 0);
+              }, 0);
+              if (total > MAX_PER_WEEK) return { ok: false, reason: 'weekfull' };
+            }
+            tx.set(picksRef, { data: picks, updated_at: Date.now() }, { merge: true });
+            return { ok: true, data: picks };
+          });
+          return { data: result, error: null };
         }
         case 'admin_token_valid': {
           // args: [token, expText]
@@ -1087,7 +1275,8 @@ class _FSProvider {
     const channelObj = {
       on(eventType, config, callback) {
         _table = config.table;
-        _event = eventType;
+        // Supabase 的第一个参数是协议名 postgres_changes，实际 INSERT/UPDATE/DELETE 过滤值在 config.event。
+        _event = String(config.event||'*').toUpperCase();
         _callback = callback;
         return channelObj;
       },
@@ -1195,13 +1384,20 @@ async function initSupabaseTables(){
   if(!fbReady)return;
   try{
     if (DB_PROVIDER === 'firestore') {
-      await supa._fs.collection('config').limit(1).get();
+      // v2026.09.04: 添加超时保护，防止初始化挂死
+      await Promise.race([
+        supa._fs.collection('config').limit(1).get(),
+        new Promise((_, reject) => setTimeout(() => reject(new Error('初始化查询超时')), 5000))
+      ]);
       console.log('Firestore tables OK');
     } else {
-      await supa.from('config').select('id').limit(1);
+      await Promise.race([
+        supa.from('config').select('id').limit(1),
+        new Promise((_, reject) => setTimeout(() => reject(new Error('初始化查询超时')), 5000))
+      ]);
       console.log('Supabase tables OK');
     }
-  } catch(e){ console.warn('DB connection check failed:', e); }
+  } catch(e){ console.warn('DB connection check failed or timed out:', e); }
 }
 
 // ====== 数据库切换工具函数 ======
@@ -1672,9 +1868,11 @@ function getResetHour(){return +(localStorage.getItem('resetHour')||7)}
 function nextResetTime(){const n=new Date(),r=new Date(n);r.setHours(getResetHour(),0,0,0);if(n>=r)r.setDate(r.getDate()+1);return r.getTime()}
 function isClaimExpired(c){if(!c)return true;const ea=c.expires_at||c.expiresAt;if(!ea)return true;return Date.now()>=ea}
 function isLocalBindExpired(){const exp=localStorage.getItem('cb6exp');if(!exp)return true;return Date.now()>=+exp}
+function normalizeShiftsData(data){return(Array.isArray(data)?data:[]).filter(s=>s&&typeof s==='object').map(s=>{const id=Number(s.id);return{...s,id:Number.isFinite(id)?id:s.id}})}
+function normalizeSwapsData(data){return(Array.isArray(data)?data:[]).filter(s=>s&&typeof s==='object').map(s=>{const sid=Number(s.sid);const takeSid=Number(s.exchange&&s.exchange.takeSid);return{...s,fromId:s.fromId!=null?String(s.fromId):s.fromId,toId:s.toId!=null?String(s.toId):s.toId,sid:Number.isFinite(sid)?sid:s.sid,exchange:s.exchange?{...s.exchange,takeSid:Number.isFinite(takeSid)?takeSid:s.exchange.takeSid}:s.exchange}})}
 
 let state=ld('cv6',{shifts:DEF_SHIFTS,punches:{}});
-if(!state.shifts?.length)state.shifts=DEF_SHIFTS;
+state.shifts=normalizeShiftsData(state.shifts?.length?state.shifts:DEF_SHIFTS);
 let TEAM=ld('ct6',DEF_TEAM),selectedMember=null,pend=null,claims={},fbPunches=[];
 // ===== 数据迁移：TEAM 新增字段时统一兜底 =====
 const TEAM_SCHEMA_V=2; // 每次给 TEAM 成员加新字段时自增
@@ -1700,11 +1898,26 @@ function refreshEmpAfterSync(){syncSelectedMember();renderEmp()}
 
 // ===== 选班（按日期 / 按周）数据模型 =====
 // picks: { 'YYYY-MM-DD': { [memberId]: [shiftId,...] } }
+// 所有入口统一规范：memberId 固定为字符串键，shiftId 固定为有限数字，避免缓存/RPC/云端来源类型不一致
+function normalizePicksData(data){
+  const normalized={};
+  if(!data||typeof data!=='object'||Array.isArray(data))return normalized;
+  Object.keys(data).forEach(ds=>{
+    const day=data[ds];
+    if(!/^\d{4}-\d{2}-\d{2}$/.test(ds)||!day||typeof day!=='object'||Array.isArray(day))return;
+    normalized[ds]={};
+    Object.keys(day).forEach(mid=>{
+      const sids=Array.isArray(day[mid])?day[mid]:[];
+      normalized[ds][String(mid)]=[...new Set(sids.map(Number).filter(Number.isFinite))].sort((a,b)=>a-b);
+    });
+  });
+  return normalized;
+}
 // selCfg: 选班规则  openDay=开放星期(0周日..6周六) openHour=开放小时 weekStartDay=每周起始 lock=管理员锁定
 const DEF_SELCFG={openDay:5,openHour:14,weekStartDay:6,lock:false,minValid:30,retainDays:60,amShiftId:7,pmShiftId:25};
 const MAX_PER_DAY=7;    // 每人每天最多可选时段数（个人单日时段不超过8个，即≤7）
 const MAX_PER_WEEK=49;  // 每人整周最多可选/计入有效的时段数
-let picks=ld('cp6',{});
+let picks=normalizePicksData(ld('cp6',{}));
 let selCfg=Object.assign({},DEF_SELCFG,ld('csel6',{}));
 let slotCap=ld('csc6',{});  // 每天每时段需要人数上限 { 'YYYY-MM-DD':{ sid:n } }，无记录=不限
 // 首卡定位配置：on=总开关，members=成员灰度 { [memberId]:true }，两者同时开启才对该成员生效
@@ -1725,7 +1938,7 @@ let countWeekOffset=0;     // 员工端「选班情况」计数表周偏移
 let countTableMode='master';// 后台计数表视图：master=总表(按周期汇总) / detail=分表(单周明细)
 let countDetailWeekIdx=0;  // 分表：选中的当月周期索引
 let adminCountMonthOffset=0;// 后台实时计数表月份偏移：0=本月，-1=上月，可为任意整数
-let swaps=ld('cswap6',[]); // 换班请求列表 [{id,date,sid,fromId,fromName,toId,toName,status,ts,decidedTs,proxyBy,proxyTs,exchange?:{takeDate,takeSid}}]
+let swaps=normalizeSwapsData(ld('cswap6',[])); // 换班请求列表 [{id,date,sid,fromId,fromName,toId,toName,status,ts,decidedTs,proxyBy,proxyTs,exchange?:{takeDate,takeSid}}]
 let swapForm={date:'',sid:null,toId:null}; // 员工端发起单向换班的临时表单
 let exchangeForm={giveDate:'',giveSid:null,toId:null,takeDate:'',takeSid:null}; // 员工端发起双向换班的临时表单
 let proxySwapForm={fromId:null,date:'',sid:null,toId:null}; // 代提交换班的临时表单
@@ -1825,7 +2038,7 @@ function _checkMonthCache(){const sig=Object.keys(picks).length+'_'+picksLocalVe
 function memberMonthShiftCount(mid,monthStr){
   _checkMonthCache();
   const key=mid+'_'+monthStr;if(_mmcCache[key])return _mmcCache[key];
-  let am=0,pm=0;const amId=amShiftId(),pmId=pmShiftId();Object.keys(picks).forEach(ds=>{if(ds.slice(0,7)!==monthStr)return;const arr=picks[ds]&&picks[ds][mid];if(!Array.isArray(arr))return;if(arr.includes(amId))am++;if(arr.includes(pmId))pm++});
+  let am=0,pm=0;const amId=amShiftId(),pmId=pmShiftId();Object.keys(picks).forEach(ds=>{if(ds.slice(0,7)!==monthStr)return;const arr=picks[ds]&&picks[ds][String(mid)];if(!Array.isArray(arr))return;if(arr.includes(amId))am++;if(arr.includes(pmId))pm++});
   const result={am,pm};_mmcCache[key]=result;return result;
 }
 // 某成员整周统计：per=每日原始数, raw=选时合计(原始), valid=有效合计(每日≤7且整周≤49)
@@ -1834,7 +2047,7 @@ function memberWeekStats(m,weekDays){let raw=0,valid=0;const per=[];weekDays.for
 function memberMonthValid(mid,monthStr){
   _checkMonthCache();
   const key=mid+'_'+monthStr;if(_mmvCache[key]!==undefined)return _mmvCache[key];
-  let t=0;Object.keys(picks).forEach(ds=>{if(ds.slice(0,7)!==monthStr)return;const arr=picks[ds]&&picks[ds][mid];if(Array.isArray(arr))t+=dayValid(arr.length)});
+  let t=0;Object.keys(picks).forEach(ds=>{if(ds.slice(0,7)!==monthStr)return;const arr=picks[ds]&&picks[ds][String(mid)];if(Array.isArray(arr))t+=dayValid(arr.length)});
   _mmvCache[key]=t;return t;
 }
 // 当月内所有选班周期(周)的起始日，覆盖到本月的每一天
@@ -1910,36 +2123,35 @@ function dayEditable(dateStr){
   return true;
 }
 // 成员在某天的有效班次（严格以 picks 选班数据为准，无选班记录则无班次）
-function memberShifts(m,dateStr){const p=picks[dateStr];if(p&&p[m.id]!==undefined)return p[m.id]||[];return[]}
+function memberShifts(m,dateStr){const p=picks[dateStr],mid=String(m.id);if(p&&p[mid]!==undefined)return p[mid]||[];return[]}
 let picksOptSeq=0; // 乐观写入序号：每次本地改写 picks 自增；服务器返回快照时若序号已变大，说明有更新的本地写入，不用旧快照覆盖（杜绝快速连点时班次"闪掉"）
-function setMemberPick(dateStr,mid,sids){if(!picks[dateStr])picks[dateStr]={};picks[dateStr][mid]=sids.slice().sort((a,b)=>a-b);picksOptSeq++;_invalidateMonthCache()}
+function setMemberPick(dateStr,mid,sids){if(!picks[dateStr])picks[dateStr]={};picks[dateStr][String(mid)]=[...new Set((Array.isArray(sids)?sids:[]).map(Number).filter(Number.isFinite))].sort((a,b)=>a-b);picksOptSeq++;_invalidateMonthCache()}
 // 并发选班原子写入：调用服务器端 pick_set 函数（行锁排队，杜绝多人同时选班互相覆盖）。
 // 成功后用服务器返回的最新完整数据刷新本地（权威来源）；Supabase 未配置时回退本地写。
 async function atomicSetPick(dateStr,mid,sids){
-  const arr=(sids||[]).slice().sort((a,b)=>a-b);
+  const arr=[...new Set((Array.isArray(sids)?sids:[]).map(Number).filter(Number.isFinite))].sort((a,b)=>a-b);
   if(!fbReady){setMemberPick(dateStr,mid,arr);sv('cp6',picks);picksLocalVer=Date.now();return true}
   const mySeq=picksOptSeq;
-  // v2026.09.04: 添加重试逻辑，解决 15 人并发选班时的事务冲突
-  const maxRetries = 3;
+  // v2026.09.04: 增加重试次数到 5 次，并加入随机抖动，应对 15 人并发选班的高争用场景
+  const maxRetries = 5;
   for (let attempt = 0; attempt < maxRetries; attempt++) {
     try {
       const {data,error}=await supa.rpc('pick_set',{p_date:dateStr,p_mid:String(mid),p_sids:arr});
       if(error){
-        // 事务冲突时重试
-        if (error.message && /transaction|conflict/i.test(error.message) && attempt < maxRetries - 1) {
+        if (attempt < maxRetries - 1) {
           console.log(`pick_set 冲突，重试 ${attempt + 1}/${maxRetries}`);
-          await new Promise(r => setTimeout(r, 100 * (attempt + 1))); // 指数退避
+          await new Promise(r => setTimeout(r, 200 + Math.random() * 300 * (attempt + 1)));
           continue;
         }
         console.warn('pick_set error:',error);
         return false;
       }
-      if(data&&typeof data==='object'&&picksOptSeq===mySeq){picks=data;sv('cp6',picks);picksLocalVer=Date.now();_invalidateMonthCache()}
+      if(data&&typeof data==='object'&&picksOptSeq===mySeq){picks=normalizePicksData(data);sv('cp6',picks);picksLocalVer=Date.now();_invalidateMonthCache()}
       return true;
     } catch(e) {
       if (attempt < maxRetries - 1) {
         console.log(`pick_set 异常，重试 ${attempt + 1}/${maxRetries}:`, e.message);
-        await new Promise(r => setTimeout(r, 100 * (attempt + 1)));
+        await new Promise(r => setTimeout(r, 200 + Math.random() * 300 * (attempt + 1)));
         continue;
       }
       console.warn('atomicSetPick error:',e);
@@ -1953,34 +2165,38 @@ async function atomicSetPick(dateStr,mid,sids){
 // 若增量函数尚未部署（undefined function），自动回退到整体 pick_set，避免选班整体不可用。
 function _isMissingFn(error){return !!(error&&(error.code==='42883'||/does not exist/i.test(error.message||'')))}
 async function atomicAddPick(dateStr,mid,sid){
+  sid=Number(sid);
+  if(!Number.isFinite(sid))return false;
   if(!fbReady){
-    const cur=((picks[dateStr]||{})[mid]||[]).slice();
+    const cur=((picks[dateStr]||{})[String(mid)]||[]).slice();
     if(!cur.includes(sid))cur.push(sid);
     setMemberPick(dateStr,mid,cur);sv('cp6',picks);picksLocalVer=Date.now();return true;
   }
   const mySeq=picksOptSeq;
-  // v2026.09.04: 添加重试逻辑
-  const maxRetries = 3;
+  // v2026.09.04: 增加重试次数至 5 次并引入随机抖动处理高并发
+  const maxRetries = 5;
   for (let attempt = 0; attempt < maxRetries; attempt++) {
     try {
       const {data,error}=await supa.rpc('pick_add',{p_date:dateStr,p_mid:String(mid),p_sid:sid});
       if(error){
-        if(_isMissingFn(error)){const cur=((picks[dateStr]||{})[mid]||[]).slice();if(!cur.includes(sid))cur.push(sid);return await atomicSetPick(dateStr,mid,cur)}
-        // 事务冲突时重试
-        if (error.message && /transaction|conflict/i.test(error.message) && attempt < maxRetries - 1) {
-          console.log(`pick_add 冲突，重试 ${attempt + 1}/${maxRetries}`);
-          await new Promise(r => setTimeout(r, 100 * (attempt + 1)));
+        if(_isMissingFn(error)){const cur=((picks[dateStr]||{})[String(mid)]||[]).slice();if(!cur.includes(sid))cur.push(sid);return await atomicSetPick(dateStr,mid,cur)}
+        // 事务冲突或网络波动时重试
+        if ((error.message && /transaction|conflict|timeout|fetch/i.test(error.message)) && attempt < maxRetries - 1) {
+          const delay = Math.floor(Math.random() * 200) + 100 * (attempt + 1);
+          console.log(`pick_add 冲突/异常，重试 ${attempt + 1}/${maxRetries}，延迟 ${delay}ms`);
+          await new Promise(r => setTimeout(r, delay));
           continue;
         }
         console.warn('pick_add error:',error);
         return false;
       }
-      if(data&&typeof data==='object'&&picksOptSeq===mySeq){picks=data;sv('cp6',picks);picksLocalVer=Date.now();_invalidateMonthCache()}
+      if(data&&typeof data==='object'&&picksOptSeq===mySeq){picks=normalizePicksData(data);sv('cp6',picks);picksLocalVer=Date.now();_invalidateMonthCache()}
       return true;
     } catch(e) {
       if (attempt < maxRetries - 1) {
-        console.log(`pick_add 异常，重试 ${attempt + 1}/${maxRetries}:`, e.message);
-        await new Promise(r => setTimeout(r, 100 * (attempt + 1)));
+        const delay = Math.floor(Math.random() * 200) + 100 * (attempt + 1);
+        console.log(`pick_add 崩溃重试 ${attempt + 1}/${maxRetries}:`, e.message);
+        await new Promise(r => setTimeout(r, delay));
         continue;
       }
       console.warn('atomicAddPick error:',e);
@@ -1990,43 +2206,80 @@ async function atomicAddPick(dateStr,mid,sid){
   return false;
 }
 async function atomicRemovePick(dateStr,mid,sid){
+  sid=Number(sid);
+  if(!Number.isFinite(sid))return false;
   if(!fbReady){
-    const cur=((picks[dateStr]||{})[mid]||[]).filter(x=>x!==sid);
+    const cur=((picks[dateStr]||{})[String(mid)]||[]).filter(x=>Number(x)!==sid);
     setMemberPick(dateStr,mid,cur);sv('cp6',picks);picksLocalVer=Date.now();return true;
   }
   const mySeq=picksOptSeq;
-  try{
-    const {data,error}=await supa.rpc('pick_remove',{p_date:dateStr,p_mid:String(mid),p_sid:sid});
-    if(error){
-      if(_isMissingFn(error)){const cur=((picks[dateStr]||{})[mid]||[]).filter(x=>x!==sid);return await atomicSetPick(dateStr,mid,cur)}
-      console.warn('pick_remove error:',error);return false;
+  const maxRetries = 5;
+  for (let attempt = 0; attempt < maxRetries; attempt++) {
+    try {
+      const {data,error}=await supa.rpc('pick_remove',{p_date:dateStr,p_mid:String(mid),p_sid:sid});
+      if(error){
+        if(_isMissingFn(error)){const cur=((picks[dateStr]||{})[String(mid)]||[]).filter(x=>x!==sid);return await atomicSetPick(dateStr,mid,cur)}
+        // 事务冲突或网络波动时重试
+        if ((error.message && /transaction|conflict|timeout|fetch/i.test(error.message)) && attempt < maxRetries - 1) {
+          const delay = Math.floor(Math.random() * 200) + 100 * (attempt + 1);
+          console.log(`pick_remove 冲突/异常，重试 ${attempt + 1}/${maxRetries}，延迟 ${delay}ms`);
+          await new Promise(r => setTimeout(r, delay));
+          continue;
+        }
+        console.warn('pick_remove error:',error);
+        return false;
+      }
+      if(data&&typeof data==='object'&&picksOptSeq===mySeq){picks=normalizePicksData(data);sv('cp6',picks);picksLocalVer=Date.now();_invalidateMonthCache()}
+      return true;
+    } catch(e) {
+      if (attempt < maxRetries - 1) {
+        const delay = Math.floor(Math.random() * 200) + 100 * (attempt + 1);
+        console.log(`pick_remove 崩溃重试 ${attempt + 1}/${maxRetries}:`, e.message);
+        await new Promise(r => setTimeout(r, delay));
+        continue;
+      }
+      console.warn('atomicRemovePick error:',e);
+      return false;
     }
-    if(data&&typeof data==='object'&&picksOptSeq===mySeq){picks=data;sv('cp6',picks);picksLocalVer=Date.now();_invalidateMonthCache()}
-    return true;
-  }catch(e){console.warn('atomicRemovePick error:',e);return false}
+  }
+  return false;
 }
 // 满员原子校验：服务器端在同一把锁内"先数人数→满员拒绝→不满才加"，杜绝并发超员。
 // 返回 {ok:true} / {ok:false,reason:'full',count,cap} / {ok:false,reason:'error'}
 async function atomicAddPickCap(dateStr,mid,sid,isAdmin){
+  sid=Number(sid);mid=String(mid);
+  if(!isValidDate(dateStr)||!Number.isFinite(sid))return{ok:false,reason:'invalid'};
   if(!fbReady){
-    const cap=slotCapOf(dateStr,sid);
-    if(cap>0&&!isAdmin&&slotCount(dateStr,sid)>=cap)return{ok:false,reason:'full',count:slotCount(dateStr,sid),cap};
-    const cur=((picks[dateStr]||{})[mid]||[]).slice();
-    if(!cur.includes(sid))cur.push(sid);
-    setMemberPick(dateStr,mid,cur);sv('cp6',picks);picksLocalVer=Date.now();return{ok:true};
+    const cur=[...new Set((((picks[dateStr]||{})[mid])||[]).map(Number).filter(Number.isFinite))];
+    const alreadyExists=cur.includes(sid),projectedDay=cur.length+(alreadyExists?0:1);
+    if(projectedDay>MAX_PER_DAY)return{ok:false,reason:'dayfull',count:cur.length,max:MAX_PER_DAY};
+    const weekTotal=pickWeekDaysStrOf(dateStr).reduce((total,ds)=>{
+      const arr=(picks[ds]||{})[mid];
+      return total+(Array.isArray(arr)?new Set(arr.map(Number).filter(Number.isFinite)).size:0);
+    },0)+(alreadyExists?0:1);
+    if(weekTotal>MAX_PER_WEEK)return{ok:false,reason:'weekfull',count:weekTotal-1,max:MAX_PER_WEEK};
+    const cap=slotCapOf(dateStr,sid),projectedCount=slotCount(dateStr,sid)+(alreadyExists?0:1);
+    if(cap>0&&!isAdmin&&projectedCount>cap)return{ok:false,reason:'full',count:projectedCount-1,cap};
+    if(!alreadyExists)cur.push(sid);
+    setMemberPick(dateStr,mid,cur);sv('cp6',picks);picksLocalVer=Date.now();return{ok:true,alreadyExists};
   }
   const mySeq=picksOptSeq;
-  // [可靠性] 网络失败自动重试：快速连点时并发请求个别会在网络层掉线（fetch failed），
-  // 导致"点了没选上、要重复点"。pick_add_cap 幂等（ON CONFLICT DO NOTHING），重试安全。
-  // 最多 3 次；服务器明确拒绝（满员/超上限）不重试。
-  for(let attempt=0;attempt<3;attempt++){
-    if(attempt>0){await new Promise(r=>setTimeout(r,250*attempt))}
+  // v2026.09.04: 增加重试次数至 5 次并引入随机抖动
+  const maxRetries = 5;
+  for(let attempt=0;attempt<maxRetries;attempt++){
     try{
       const {data,error}=await supa.rpc('pick_add_cap',{p_date:dateStr,p_mid:String(mid),p_sid:sid,p_admin:!!isAdmin});
       if(error){
         if(_isMissingFn(error)){const ok=await atomicAddPick(dateStr,mid,sid);return ok?{ok:true}:{ok:false,reason:'error'}}
-        console.warn('pick_add_cap error(第'+(attempt+1)+'次):',error);
-        continue; // 瞬时错误 → 重试
+        // 事务冲突或网络波动时重试
+        if ((error.message && /transaction|conflict|timeout|fetch/i.test(error.message)) && attempt < maxRetries - 1) {
+          const delay = Math.floor(Math.random() * 200) + 100 * (attempt + 1);
+          console.log(`pick_add_cap 冲突/异常，重试 ${attempt + 1}/${maxRetries}，延迟 ${delay}ms`);
+          await new Promise(r => setTimeout(r, delay));
+          continue;
+        }
+        console.warn('pick_add_cap error:',error);
+        return {ok:false,reason:'error'};
       }
       if(data&&data.ok===false){
         // [边界] 重试后服务器报 dayfull，但有可能上一次尝试其实已存上（回执丢失）。
@@ -2039,11 +2292,87 @@ async function atomicAddPickCap(dateStr,mid,sid,isAdmin){
         }
         return data; // 服务器明确拒绝（满员/超每日上限）→ 不重试
       }
-      if(data&&data.picks&&typeof data.picks==='object'&&picksOptSeq===mySeq){picks=data.picks;sv('cp6',picks);picksLocalVer=Date.now();_invalidateMonthCache()}
+      // 修复：pick_add_cap RPC 返回的是对象，可能包含 ok 标识也可能直接是 picks 映射
+      // 与 atomicAddPick 保持一致，兼容两种返回格式
+      const newPicks = data.picks || (data.ok ? data.data : data);
+      if(newPicks && typeof newPicks==='object' && picksOptSeq===mySeq){
+        picks=normalizePicksData(newPicks);sv('cp6',picks);picksLocalVer=Date.now();_invalidateMonthCache();
+      }
       return{ok:true};
     }catch(e){
-      console.warn('atomicAddPickCap error(第'+(attempt+1)+'次):',e);
-      // 网络异常（fetch failed 等）→ 进入下一次重试
+      if (attempt < maxRetries - 1) {
+        const delay = Math.floor(Math.random() * 200) + 100 * (attempt + 1);
+        console.log(`pick_add_cap 崩溃重试 ${attempt + 1}/${maxRetries}:`, e.message);
+        await new Promise(r => setTimeout(r, delay));
+        continue;
+      }
+      console.warn('atomicAddPickCap error:',e);
+    }
+  }
+  return{ok:false,reason:'error'};
+}
+async function atomicTransferPick(dateStr,fromMid,toMid,sid){
+  sid=Number(sid);fromMid=String(fromMid);toMid=String(toMid);
+  if(!Number.isFinite(sid)||fromMid===toMid)return{ok:false,reason:'invalid'};
+  if(!fbReady){
+    const fromArr=[...new Set((((picks[dateStr]||{})[fromMid])||[]).map(Number).filter(Number.isFinite))];
+    const toArr=[...new Set((((picks[dateStr]||{})[toMid])||[]).map(Number).filter(Number.isFinite))];
+    if(!fromArr.includes(sid)&&toArr.includes(sid))return{ok:true,alreadyApplied:true};
+    if(!fromArr.includes(sid))return{ok:false,reason:'not_owner'};
+    if(toArr.includes(sid))return{ok:false,reason:'duplicate'};
+    if(toArr.length>=MAX_PER_DAY)return{ok:false,reason:'dayfull'};
+    setMemberPick(dateStr,fromMid,fromArr.filter(x=>x!==sid));
+    setMemberPick(dateStr,toMid,[...toArr,sid]);
+    sv('cp6',picks);picksLocalVer=Date.now();return{ok:true};
+  }
+  const mySeq=picksOptSeq;
+  for(let attempt=0;attempt<5;attempt++){
+    try{
+      const {data,error}=await supa.rpc('pick_transfer',{p_date:dateStr,p_from_mid:fromMid,p_to_mid:toMid,p_sid:sid});
+      if(error){
+        if(attempt<4&&/transaction|conflict|timeout|fetch/i.test(error.message||'')){await new Promise(r=>setTimeout(r,100*(attempt+1)+Math.floor(Math.random()*200)));continue}
+        return{ok:false,reason:'error'};
+      }
+      if(!data||data.ok===false)return data||{ok:false,reason:'error'};
+      if(data.data&&picksOptSeq===mySeq){picks=normalizePicksData(data.data);sv('cp6',picks);picksLocalVer=Date.now();_invalidateMonthCache()}
+      return{ok:true,alreadyApplied:!!data.alreadyApplied};
+    }catch(e){
+      if(attempt<4){await new Promise(r=>setTimeout(r,100*(attempt+1)+Math.floor(Math.random()*200)));continue}
+    }
+  }
+  return{ok:false,reason:'error'};
+}
+async function atomicExchangePicks(giveDate,giverMid,giveSid,takeDate,receiverMid,takeSid){
+  giveSid=Number(giveSid);takeSid=Number(takeSid);giverMid=String(giverMid);receiverMid=String(receiverMid);
+  if(!Number.isFinite(giveSid)||!Number.isFinite(takeSid)||giverMid===receiverMid)return{ok:false,reason:'invalid'};
+  if(!fbReady){
+    const draft=normalizePicksData(picks),cache=new Map();
+    const arr=(date,mid)=>{const key=date+'\u0000'+mid;if(!cache.has(key))cache.set(key,((draft[date]||{})[mid]||[]).slice());return cache.get(key)};
+    const giverGive=arr(giveDate,giverMid),giverTake=arr(takeDate,giverMid);
+    const receiverGive=arr(giveDate,receiverMid),receiverTake=arr(takeDate,receiverMid);
+    const alreadyApplied=!giverGive.includes(giveSid)&&giverTake.includes(takeSid)&&receiverGive.includes(giveSid)&&!receiverTake.includes(takeSid);
+    if(alreadyApplied)return{ok:true,alreadyApplied:true};
+    if(!giverGive.includes(giveSid)||!receiverTake.includes(takeSid))return{ok:false,reason:'not_owner'};
+    if(receiverGive.includes(giveSid)||giverTake.includes(takeSid))return{ok:false,reason:'duplicate'};
+    giverGive.splice(giverGive.indexOf(giveSid),1);if(!giverTake.includes(takeSid))giverTake.push(takeSid);
+    receiverTake.splice(receiverTake.indexOf(takeSid),1);if(!receiverGive.includes(giveSid))receiverGive.push(giveSid);
+    if([...cache.values()].some(items=>items.length>MAX_PER_DAY))return{ok:false,reason:'dayfull'};
+    cache.forEach((items,key)=>{const[date,mid]=key.split('\u0000');if(!draft[date])draft[date]={};draft[date][mid]=[...new Set(items)].sort((a,b)=>a-b)});
+    picks=draft;picksOptSeq++;_invalidateMonthCache();sv('cp6',picks);picksLocalVer=Date.now();return{ok:true};
+  }
+  const mySeq=picksOptSeq;
+  for(let attempt=0;attempt<5;attempt++){
+    try{
+      const {data,error}=await supa.rpc('pick_exchange',{p_give_date:giveDate,p_giver_mid:giverMid,p_give_sid:giveSid,p_take_date:takeDate,p_receiver_mid:receiverMid,p_take_sid:takeSid});
+      if(error){
+        if(attempt<4&&/transaction|conflict|timeout|fetch/i.test(error.message||'')){await new Promise(r=>setTimeout(r,100*(attempt+1)+Math.floor(Math.random()*200)));continue}
+        return{ok:false,reason:'error'};
+      }
+      if(!data||data.ok===false)return data||{ok:false,reason:'error'};
+      if(data.data&&picksOptSeq===mySeq){picks=normalizePicksData(data.data);sv('cp6',picks);picksLocalVer=Date.now();_invalidateMonthCache()}
+      return{ok:true,alreadyApplied:!!data.alreadyApplied};
+    }catch(e){
+      if(attempt<4){await new Promise(r=>setTimeout(r,100*(attempt+1)+Math.floor(Math.random()*200)));continue}
     }
   }
   return{ok:false,reason:'error'};
@@ -2054,7 +2383,17 @@ function prunePicks(){const days=Math.max(7,+selCfg.retainDays||60);const cutoff
 function pruneLocalPunches(){const cutoff=ymd(addDays(new Date(),-60));Object.keys(state.punches||{}).forEach(d=>{if(d<cutoff)delete state.punches[d]});sv('cv6',state)}
 
 // Supabase sync
-async function syncToFB(){if(!fbReady)return;try{await supa.from('config').upsert({id:'shifts',data:state.shifts,updated_at:Date.now()},{onConflict:'id'});const teamUpload=isSrvAdminMode()?TEAM.map(m=>{const{pwd,...r}=m;return r}):TEAM;await supa.from('config').upsert({id:'team',data:teamUpload,updated_at:Date.now()},{onConflict:'id'})}catch(e){console.warn('Sync error:',e)}}
+async function syncToFB(){
+  if(!fbReady)return true;
+  try{
+    const shiftResult=await supa.from('config').upsert({id:'shifts',data:state.shifts,updated_at:Date.now()},{onConflict:'id'});
+    if(shiftResult?.error)throw shiftResult.error;
+    const teamUpload=isSrvAdminMode()?TEAM.map(m=>{const{pwd,...r}=m;return r}):TEAM;
+    const teamResult=await supa.from('config').upsert({id:'team',data:teamUpload,updated_at:Date.now()},{onConflict:'id'});
+    if(teamResult?.error)throw teamResult.error;
+    return true;
+  }catch(e){console.warn('Sync error:',e);return false}
+}
 // 单独同步选班数据 / 选班规则（避免每次都推送全部 config）
 let picksLocalVer=0; // 本地 picks 最后写入时间（0=尚未写过，首次拉取直接应用）
 async function syncPicks(){
@@ -2065,7 +2404,13 @@ async function syncPicks(){
     if(existing?.updated_at&&existing.updated_at>picksLocalVer+2000){
       console.info('Server picks newer, pulling first...');
       const {data:pc}=await supa.from('config').select('*').eq('id','picks').maybeSingle();
-      if(pc?.data&&typeof pc.data==='object'){picks=pc.data;sv('cp6',picks);_invalidateMonthCache()}
+      if(pc?.data&&typeof pc.data==='object'){
+        if(validatePicksStructure(pc.data)){
+          picks=normalizePicksData(pc.data);sv('cp6',picks);_invalidateMonthCache();
+        }else{
+          logSecurityEvent('malformed_picks','syncPicks rejected malformed server snapshot');
+        }
+      }
     }
     picksLocalVer=Date.now();
     await supa.from('config').upsert({id:'picks',data:picks,updated_at:picksLocalVer},{onConflict:'id'});
@@ -2245,7 +2590,7 @@ function isFirstPunchOfDay(mid,dateStr){
   return true;
 }
 // 两层灰度开关：总开关 && 成员开关 都开启才对该成员生效
-function locEnabledFor(mid){return !!(locCfg&&locCfg.on&&locCfg.members&&locCfg.members[mid])}
+function locEnabledFor(mid){return !!(locCfg&&locCfg.on&&locCfg.members&&locCfg.members[String(mid)])}
 // 解析打卡记录上的定位串 "lat,lng,acc,ts"；非法/缺失返回 null（管理端展示用）
 function parseLoc(rec){
   if(!rec||typeof rec.loc!=='string')return null;
@@ -2374,17 +2719,24 @@ async function logEvent(action,detail){
   }catch(e){console.warn('logEvent error:',e)}
 }
 // ===== Data Structure Validation: verify pulled data is well-formed =====
+function safeExtract(v, fallback) {
+  if (!v) return fallback;
+  // Handle double-wrapping from Supabase RPC + Firestore document structure
+  const d = v.data !== undefined ? v.data : v;
+  if (d && typeof d === 'object' && d.id && d.data !== undefined) return d.data;
+  return d;
+}
 function validatePicksStructure(data){
-  if(!data||typeof data!=='object')return false;
-  // Each key should be a date string, each value should be an object of {memberId: [shiftIds]}
+  if(!data||typeof data!=='object'||Array.isArray(data))return false;
+  // 任一层级畸形都拒绝整份快照，避免 normalize 后的空对象覆盖本地有效排班。
   for(const dateKey of Object.keys(data)){
-    if(!/^\d{4}-\d{2}-\d{2}$/.test(dateKey))return false;
+    if(!/^\d{4}-\d{2}-\d{2}$/.test(dateKey)||!isValidDate(dateKey))return false;
     const dayData=data[dateKey];
-    if(!dayData||typeof dayData!=='object')return false;
+    if(!dayData||typeof dayData!=='object'||Array.isArray(dayData))return false;
     for(const mid of Object.keys(dayData)){
-      if(!Array.isArray(dayData[mid]))return false;
-      if(dayData[mid].length>MAX_PER_DAY*2)return false; // sanity: max 14 shifts per person per day
-      if(!dayData[mid].every(s=>typeof s==='number'))return false;
+      const arr=dayData[mid];
+      if(!Array.isArray(arr)||arr.length>MAX_PER_DAY*2)return false;
+      if(arr.some(sid=>!Number.isFinite(Number(sid))))return false;
     }
   }
   return true;
@@ -2408,42 +2760,42 @@ function mergeTeamFromCloud(cloudTeam){
 async function pullPicksSelCfg(force){if(!fbReady)return;try{
   const oldPicksSig=JSON.stringify(picks);
   const oldLocSig=JSON.stringify(locCfg);
-  // [性能] 4 个相互独立的请求改为并行发起：加载耗时从"4 个请求之和"降为"最慢的那 1 个"
-  // selcfg 与 loccfg 合并为同一个 .in 查询，不增加请求数
+  // [性能] 4 个相互独立的请求改为并行发起
   const [pcR,scfgR,scR,swcR]=await Promise.all([
     supa.rpc('picks_snapshot'),
     supa.from('config').select('*').in('id',['selcfg','loccfg']),
     supa.from('config').select('*').eq('id','slotcap').maybeSingle(),
     supa.from('config').select('*').eq('id','swaps').maybeSingle()
   ]);
-  const pc=pcR.data,cfgRows=Array.isArray(scfgR.data)?scfgR.data:[],sc=scR.data,swc=swcR.data;
-  const scfg=cfgRows.find(r=>r&&r.id==='selcfg')||null;
-  const lcfg=cfgRows.find(r=>r&&r.id==='loccfg')||null;
-  if(pc?.data&&typeof pc.data==='object'){
-    // 竞态防护（纯客户端时钟，规避前后端时钟偏差）：最近 1.5 秒内本地写过选班，
-    // 暂不用服务端快照覆盖，避免"在途的旧快照"冲掉刚选/刚取消的班次
-    const freshLocal=!force&&picksLocalVer!==0&&(Date.now()-picksLocalVer<1500);
+  const failed=[pcR,scfgR,scR,swcR].find(r=>r?.error);if(failed)throw failed.error;
+  const pcData=safeExtract(pcR.data),cfgRows=Array.isArray(scfgR.data)?scfgR.data:[],scData=safeExtract(scR.data),swcData=safeExtract(swcR.data);
+  const scfgRow=cfgRows.find(r=>r&&r.id==='selcfg')||null;
+  const lcfgRow=cfgRows.find(r=>r&&r.id==='loccfg')||null;
+
+  if(pcData && typeof pcData==='object'){
+    const freshLocal=!force&&picksLocalVer!==0&&(Date.now()-picksLocalVer<5000);
     if(!freshLocal){
-      // Data structure validation: reject malformed data from Supabase
-      if(!validatePicksStructure(pc.data)){
+      if(!validatePicksStructure(pcData)){
         logSecurityEvent('malformed_picks','Pulled picks failed structure validation');
-      }else{
-        picks=pc.data;sv('cp6',picks);_invalidateMonthCache();
+        throw new Error('云端选班快照结构异常');
       }
+      picks=normalizePicksData(pcData);sv('cp6',picks);_invalidateMonthCache();
     }
   }
-  if(scfg?.data&&typeof scfg.data==='object'){selCfg=Object.assign({},DEF_SELCFG,scfg.data);sv('csel6',selCfg)}
-  if(lcfg?.data&&typeof lcfg.data==='object'){locCfg=Object.assign({on:false,members:{}},lcfg.data);sv('cloccfg6',locCfg)}
-  if(sc?.data&&typeof sc.data==='object'){slotCap=sc.data;sv('csc6',slotCap)}
-  if(swc?.data&&Array.isArray(swc.data)){swaps=swc.data;sv('cswap6',swaps)}
-  // [性能] 三个子拉取互不依赖，同样并行
+  const scfgData = safeExtract(scfgRow);
+  if(scfgData&&typeof scfgData==='object'){selCfg=Object.assign({},DEF_SELCFG,scfgData);sv('csel6',selCfg)}
+  const lcfgData = safeExtract(lcfgRow);
+  if(lcfgData&&typeof lcfgData==='object'){locCfg=Object.assign({on:false,members:{}},lcfgData);sv('cloccfg6',locCfg)}
+  if(scData&&typeof scData==='object'){slotCap=scData;sv('csc6',slotCap)}
+  if(Array.isArray(swcData)){swaps=normalizeSwapsData(swcData);sv('cswap6',swaps)}
+
   await Promise.all([fetchLeavesConfig(),syncPullMakeups(),syncForceOut(),fetchPerformancesConfig()]);
-  // picks/loccfg 发生变化 → 员工端打卡/选班页必须立刻反映(管理员后台加班次/开定位等场景)
   if((JSON.stringify(picks)!==oldPicksSig||JSON.stringify(locCfg)!==oldLocSig)&&selectedMember){
     syncSelectedMember();
     renderEmp();
   }
-}catch(e){}}
+  return true;
+}catch(e){console.error('pullPicksSelCfg error:',e);return false}}
 async function initFBListeners(){
   if(!fbReady)return;
   document.getElementById('syncBadge').className='sync-badge on';document.getElementById('syncBadge').innerHTML='<span class="dot"></span>已同步';
@@ -2458,7 +2810,11 @@ async function initFBListeners(){
     const claimRows=claimR.data,shiftConfig=shiftR.data,teamConfig=teamR.data;
     claims={};(claimRows||[]).forEach(r=>{if(!isClaimExpired(r))claims[r.id]=r});
     mergeFbPunches(punchRows||[]);
-    if(shiftConfig?.data){state.shifts=shiftConfig.data;sv('cv6',state)}
+    if(shiftConfig?.data){
+      // v2026.09.04 修复：强制将所有 sid 转为数字，保证 includes 匹配可靠
+      state.shifts=normalizeShiftsData(shiftConfig.data);
+      sv('cv6',state);
+    }
     if(teamConfig?.data&&!mergeTeamFromCloud(teamConfig.data)){logSecurityEvent('malformed_team','Pulled team data failed structure validation')}
     await pullPicksSelCfg();
     prunePicks();
@@ -2474,7 +2830,12 @@ async function initFBListeners(){
     checkForceOut();
   }catch(e){console.error('Initial fetch error:',e)}
   supa.channel('claims-sync').on('postgres_changes',{event:'*',schema:'public',table:'claims'},async(payload)=>{
-    try{const {data:rows}=await supa.from('claims').select('*');claims={};(rows||[]).forEach(r=>{if(!isClaimExpired(r))claims[r.id]=r});renderEmp();checkForceOut()}catch(e){}
+    try{
+      const {data:rows}=await supa.from('claims').select('*');claims={};
+      (rows||[]).forEach(r=>{if(!isClaimExpired(r))claims[String(r.id)]=r});
+      renderEmp();checkForceOut();
+      if(document.getElementById('pg-admin')?.classList.contains('active')){renderMembers();renderBindingStatus()}
+    }catch(e){}
   }).subscribe();
   supa.channel('punches-sync').on('postgres_changes',{event:'*',schema:'public',table:'punches'},async(payload)=>{
     try{
@@ -2499,19 +2860,26 @@ async function initFBListeners(){
       // 选择性拉取：根据变更的 config id 只拉需要的行
       if(changedId==='shifts'){
         const {data:sc}=await supa.from('config').select('*').eq('id','shifts').maybeSingle();
-        if(sc?.data){state.shifts=sc.data;sv('cv6',state)}
+        if(sc?.data){
+          state.shifts=normalizeShiftsData(sc.data);
+          sv('cv6',state);
+        }
       }else if(changedId==='team'){
         const {data:tc}=await supa.from('config').select('*').eq('id','team').maybeSingle();
         if(tc?.data)mergeTeamFromCloud(tc.data);
-      }else if(['picks','selcfg','slotcap','swaps','forceout','makeups','leaves','loccfg'].includes(changedId)){
+      }else if(changedId==='forceout'){
+        // 强制下线必须独立拉取，不能被 picks/slotcap 等无关请求失败阻塞。
+        await syncForceOut();
+      }else if(['picks','selcfg','slotcap','swaps','makeups','leaves','loccfg'].includes(changedId)){
         await pullPicksSelCfg();
       }else{
         // 未知 id 或全量事件 → 拉全部
         const {data:sc}=await supa.from('config').select('*').eq('id','shifts').maybeSingle();
-        if(sc?.data){state.shifts=sc.data;sv('cv6',state)}
+        if(sc?.data){state.shifts=normalizeShiftsData(sc.data);sv('cv6',state)}
         const {data:tc}=await supa.from('config').select('*').eq('id','team').maybeSingle();
         if(tc?.data)mergeTeamFromCloud(tc.data);
         await pullPicksSelCfg();
+        await syncForceOut();
       }
       syncSelectedMember();
       renderAll();
@@ -2543,7 +2911,7 @@ async function initFBListeners(){
         const pr = await queryPunchesByDate(tdStr());
         mergeFbPunches(pr||[]);
         const {data:sc}=await supa.from('config').select('*').eq('id','shifts').maybeSingle();
-        if(sc?.data){state.shifts=sc.data;sv('cv6',state)}
+        if(sc?.data){state.shifts=normalizeShiftsData(sc.data);sv('cv6',state)}
         const {data:tc}=await supa.from('config').select('*').eq('id','team').maybeSingle();
         if(tc?.data)mergeTeamFromCloud(tc.data);
         await pullPicksSelCfg();
@@ -2618,57 +2986,99 @@ async function checkOfflineQueue(){
 // Account claiming via Supabase (daily reset)
 async function claimAccount(memberId){
   const expAt=nextResetTime();
-  // v2026.09.04: 本地模式下直接返回成功，不访问 Firestore
+  // Firestore 已配置但连接测试失败时，禁止降级登录，否则会绕过跨设备账号互斥。
   if(_fsConnectionTested && !_fsConnectionOk){
-    console.log('[claimAccount] 本地模式，跳过 Firestore');
-    localStorage.setItem('cb6',String(memberId));localStorage.setItem('cb6exp',String(expAt));
-    return{ok:true,expiresAt:expAt,fallback:true};
+    console.warn('[claimAccount] Firestore 连接不可用，拒绝绕过设备绑定校验');
+    return{ok:false,reason:'network',message:'云端连接不可用'};
   }
-  if(!fbReady){localStorage.setItem('cb6',String(memberId));localStorage.setItem('cb6exp',String(expAt));return{ok:true,expiresAt:expAt}}
+  // 仅在数据库根本未启用的显式本地部署中允许本地绑定。
+  if(!fbReady){localStorage.setItem('cb6',String(memberId));localStorage.setItem('cb6exp',String(expAt));return{ok:true,expiresAt:expAt,fallback:true}}
   try{
-    const {data:existing}=await supa.from('claims').select('*').eq('id',String(memberId)).maybeSingle();
-    if(existing){
-      if(!isClaimExpired(existing)&&existing.fp!==devFp()){
-        return{ok:false,by:existing.by_name,expiresAt:existing.expires_at};
-      }
+    // v2026.09.04: 添加超时保护，防止登录挂起
+    const timeout = (ms) => new Promise((_, reject) => setTimeout(() => reject(new Error('请求超时')), ms));
+    const m=TEAM.find(x=>String(x.id)===String(memberId));
+    const {data:rows,error:claimReadError}=await Promise.race([
+      supa.from('claims').select('*'),
+      timeout(8000)
+    ]);
+    if(claimReadError)throw claimReadError;
+    const existing=findClaimForMember(rows||[],m);
+    if(existing&&existing.fp!==devFp()){
+      return{ok:false,by:existing.by_name||existing.by,expiresAt:existing.expires_at||existing.expiresAt};
     }
-    const m=TEAM.find(x=>x.id===memberId);
-    await supa.from('claims').upsert({
-      id:String(memberId),fp:devFp(),by_name:m?.name||'未知',expires_at:expAt,updated_at:Date.now()
-    },{onConflict:'id'});
+    // 同一设备命中历史 ID 时先迁移旧 claim，避免一人留下两条绑定记录。
+    if(existing&&String(existing.id)!==String(memberId)){
+      const {error:deleteError}=await supa.from('claims').eq('id',String(existing.id)).delete();
+      if(deleteError)throw deleteError;
+      delete claims[String(existing.id)];
+    }
+    const newClaim={id:String(memberId),fp:devFp(),by_name:m?.name||'未知',expires_at:expAt,updated_at:Date.now()};
+    const {error:claimWriteError}=await Promise.race([
+      supa.from('claims').upsert(newClaim,{onConflict:'id'}),
+      timeout(8000)
+    ]);
+    if(claimWriteError)throw claimWriteError;
+    claims[String(memberId)]=newClaim;
     localStorage.setItem('cb6',String(memberId));
     localStorage.setItem('cb6exp',String(expAt));
     return{ok:true,expiresAt:expAt};
   }catch(e){
     console.warn('Claim error:',e.message);
-    localStorage.setItem('cb6',String(memberId));localStorage.setItem('cb6exp',String(expAt));
-    return{ok:true,expiresAt:expAt,fallback:true};
+    // Firestore 已启用时必须完成互斥校验；查询失败不能绕过设备绑定限制。
+    return{ok:false,reason:'network',message:e.message||'设备绑定检查失败'};
   }
 }
 async function unclaimAccount(memberId,reason){
-  // 清本机的绑定 + 标记该工号已被强制下线(让其他设备的轮询/订阅收到信号)
-  localStorage.removeItem('cb6');localStorage.removeItem('cb6exp');localStorage.removeItem('cb6auth');
-  if(!fbReady){
-    if(!forceout[memberId]||forceout[memberId].ts<Date.now()-86400000){forceout[memberId]={ts:Date.now(),reason:reason||''};sv('cfo6',forceout)}
-    return;
-  }
-  try{await supa.from('claims').delete().eq('id',String(memberId))}catch(e){}
-  try{
-    // 向 config 写入 forceout 行（含原因），所有订阅设备都能收到
-    const cur=forceout[memberId];
-    if(!cur||Date.now()-cur.ts>5000){
-      forceout[memberId]={ts:Date.now(),reason:reason||''};
-      sv('cfo6',forceout);
-      await supa.from('config').upsert({id:'forceout',data:forceout,updated_at:Date.now()},{onConflict:'id'});
+  const mid=String(memberId),member=TEAM.find(m=>String(m.id)===mid),memberName=member?.name||'';
+  const forceIds=new Set([mid]);
+  const clearLocalBinding=()=>{
+    // 只有本机当前绑定的正是目标账号时才清本机状态；管理员解绑别人不能误退出自己。
+    if(localStorage.getItem('cb6')===mid){
+      localStorage.removeItem('cb6');localStorage.removeItem('cb6exp');localStorage.removeItem('cb6auth');localStorage.removeItem('cb6authTs');
+      selectedMember=null;pendingPwdMid=null;stopReminderTimer();renderEmp();
     }
-  }catch(e){console.warn('forceout sync error:',e)}
+  };
+  // 历史 ID 设备也必须收到强退信号。
+  Object.values(claims).forEach(r=>{if(r&&memberName&&String(r.by_name||r.by||'')===memberName)forceIds.add(String(r.id))});
+  if(!fbReady){
+    const ts=Date.now();forceIds.forEach(id=>{forceout[id]={ts,reason:reason||''}});sv('cfo6',forceout);
+    clearLocalBinding();
+    return true;
+  }
+  try{
+    // 先定位当前 ID 与历史姓名绑定，再由 Firestore 单事务完成全部删除和 forceout 发布。
+    const {data:rows,error:readError}=await supa.from('claims').select('*');
+    if(readError)throw readError;
+    const targets=(rows||[]).filter(r=>{
+      const sameName=memberName&&String(r.by_name||r.by||'')===memberName;
+      const sameCurrentId=String(r.id)===mid&&(!r.by_name||String(r.by_name)===memberName);
+      return sameName||sameCurrentId;
+    });
+    const targetIds=targets.map(row=>String(row.id));
+    targetIds.forEach(id=>forceIds.add(id));
+    const {data,error}=await supa.rpc('claims_unbind_atomic',{
+      p_target_ids:targetIds,
+      p_force_ids:[...forceIds],
+      p_reason:reason||''
+    });
+    if(error||!data||typeof data!=='object')throw error||new Error('设备解绑事务未返回有效结果');
+    targetIds.forEach(id=>{delete claims[id]});
+    forceout=data;sv('cfo6',forceout);
+    clearLocalBinding();
+    return true;
+  }catch(e){
+    console.warn('atomic unclaim error:',e);
+    return false;
+  }
 }
 async function syncForceOut(){
-  if(!fbReady)return;
+  if(!fbReady)return false;
   try{
-    const {data:fo}=await supa.from('config').select('*').eq('id','forceout').maybeSingle();
-    if(fo?.data&&typeof fo.data==='object'){forceout=fo.data;sv('cfo6',forceout)}
-  }catch(e){}
+    const {data:fo,error}=await supa.from('config').select('*').eq('id','forceout').maybeSingle();
+    if(error)throw error;
+    if(!fo?.data||typeof fo.data!=='object'||Array.isArray(fo.data))return false;
+    forceout=fo.data;sv('cfo6',forceout);return true;
+  }catch(e){console.warn('forceout pull error:',e);return false}
 }
 // 检查本机当前绑定的工号是否被管理员强制下线
 function checkForceOut(){
@@ -2940,7 +3350,7 @@ function punchAbsTs(p){
   return (p&&Number.isFinite(p.ts))?p.ts:null;
 }
 function isPunchOfInstance(p,sh,sd){
-  if(!p||p.sid!==sh.id)return false;
+  if(!p||String(p.sid)!==String(sh.id))return false;
   // v2026.09.04 修复：sd 匹配太严格导致跨天班次打卡匹配失败
   // 如果 sd 存在但不匹配，尝试用时间范围匹配作为 fallback
   if(p.sd){
@@ -3090,7 +3500,7 @@ async function checkReminders(){
   const yesterday=ymd(addDays(parseYmd(today),-1));
   const yesterdayShifts=state.shifts.filter(s=>{
     if(!s.enabled)return false;
-    const arr=picks[yesterday]&&picks[yesterday][selectedMember.id];
+    const arr=picks[yesterday]&&picks[yesterday][String(selectedMember.id)];
     return Array.isArray(arr)&&arr.includes(s.id)&&(s.cross||toM(s.end)<=toM(s.start));
   });
   for(const sh of yesterdayShifts){
@@ -3150,8 +3560,9 @@ function getAllPunchesForMember(mid,date){
   // 因此查询 D 时一并纳入 D-1 和 D+1 的打卡记录，避免误判为缺卡。
   const dPrev=ymd(addDays(parseYmd(d),-1));
   const dNext=ymd(addDays(parseYmd(d),1));
-  const local=((state.punches[dPrev]||[]).concat(state.punches[d]||[]).concat(state.punches[dNext]||[])).filter(x=>x.mid===mid);
-  const fb=fbPunches.filter(x=>x.mid===mid&&(x.date===dPrev||x.date===d||x.date===dNext));
+  const smid=String(mid);
+  const local=((state.punches[dPrev]||[]).concat(state.punches[d]||[]).concat(state.punches[dNext]||[])).filter(x=>String(x.mid)===smid);
+  const fb=fbPunches.filter(x=>String(x.mid)===smid&&(x.date===dPrev||x.date===d||x.date===dNext));
   // Deduplicate: if a punch exists in both local and fb (same sid+t+mid+date), keep fb version；
   // 但云端表无 offline 列，同步回读后标记会丢失，需从本地孪生记录继承（v2026.08.07）
   // 同理，班次实例标记 sd 也不是云端表字段，同样从本地孪生记录继承（v2026.08.07.18）
@@ -3229,9 +3640,9 @@ async function ensurePunchesForDate(date){
 
 async function selectMember(id){
   if(!id)return;
-  const mid=+id;
-  // Check if claimed by someone else (skip if expired — daily 7AM reset)
-  const existingClaim=claims[mid];
+  const mid=+id,m=TEAM.find(x=>String(x.id)===String(id));if(!m)return;
+  // Check current-ID and historical-name claims so ID migrations cannot allow duplicate login.
+  const existingClaim=claimForMember(m);
   if(fbReady&&existingClaim&&existingClaim.fp!==devFp()){
     const expTime=(existingClaim.expires_at||existingClaim.expiresAt)?new Date(existingClaim.expires_at||existingClaim.expiresAt).toLocaleString('zh-CN',{month:'numeric',day:'numeric',hour:'2-digit',minute:'2-digit'}):'明早重置';
     showToast(`「${existingClaim.by_name||existingClaim.by}」正在使用此账号（${expTime}后可选）`);
@@ -3239,7 +3650,6 @@ async function selectMember(id){
     document.getElementById('empContent').innerHTML=`<div style="text-align:center;padding:40px"><div style="font-size:32px;margin-bottom:12px">🔒</div><div style="font-size:15px;font-weight:600;color:var(--danger);margin-bottom:8px">该账号已被「${esc(existingClaim.by_name||existingClaim.by)}」占用</div><div style="font-size:13px;color:var(--muted)">预计 ${expTime} 后自动释放，届时可重新选择<br>或联系管理员在后台手动解绑</div></div>`;
     return;
   }
-  const m=TEAM.find(x=>x.id===mid);if(!m)return;
   // 本地绑定未过期 + 已验证密码：直接进入(含页面刷新自动恢复)
   const boundId=localStorage.getItem('cb6');
   if(boundId&&+boundId===mid&&!isLocalBindExpired()&&localStorage.getItem('cb6auth')==='1'){
@@ -3311,9 +3721,14 @@ async function confirmPwd(){
       new Promise((_, reject) => setTimeout(() => reject(new Error('超时')), 10000))
     ]);
     if(!result.ok){
+      document.getElementById('memberSelect').value='';
+      if(result.reason==='network'){
+        showToast('设备绑定检查失败，请检查网络后重试');
+        document.getElementById('empContent').innerHTML='<div style="text-align:center;padding:40px;color:var(--danger)">暂时无法验证设备绑定，请检查网络后重试</div>';
+        return;
+      }
       const expTime=result.expiresAt?new Date(result.expiresAt).toLocaleString('zh-CN',{month:'numeric',day:'numeric',hour:'2-digit',minute:'2-digit'}):'明早重置';
       showToast(`「${result.by||'他人'}」正在使用此账号（${expTime}后可选）`);
-      document.getElementById('memberSelect').value='';
       document.getElementById('empContent').innerHTML=`<div style="text-align:center;padding:40px"><div style="font-size:32px;margin-bottom:12px"></div><div style="font-size:15px;font-weight:600;color:var(--danger);margin-bottom:8px">该账号已被「${esc(result.by||'他人')}」占用</div><div style="font-size:13px;color:var(--muted)">预计 ${expTime} 后自动释放，届时可重新选择<br>或联系管理员在后台手动解绑</div></div>`;
       return;
     }
@@ -3323,11 +3738,10 @@ async function confirmPwd(){
     showToast(`已选择 ${m.name}${result.fallback?'（离线模式）':''}`);
   } catch(e) {
     console.warn('Claim account error:', e.message);
-    // 超时或错误时，使用本地 fallback 登录
-    localStorage.setItem('cb6auth','1');localStorage.setItem('cb6authTs',String(Date.now()));
-    selectedMember=TEAM.find(x=>x.id===m.id)||m;sv('cu6',{memberId:mid});renderEmp();startReminderTimer();
-    showToast('登录成功（离线模式）');
-    logEvent('选择账号',`${m.name}（${m.dept||''}）密码验证通过并登录（离线 fallback）`);
+    // Firestore 已启用时，超时或异常不能绕过设备互斥；只有 claimAccount 明确返回 fallback 才允许离线登录。
+    document.getElementById('memberSelect').value='';
+    showToast('设备绑定检查超时，请检查网络后重试');
+    document.getElementById('empContent').innerHTML='<div style="text-align:center;padding:40px;color:var(--danger)">设备绑定检查超时，未登录，请检查网络后重试</div>';
   }
 }
 // 员工自助修改登录密码（新密码以 SHA-256 哈希存储）
@@ -3672,12 +4086,18 @@ async function doPunch(){
 }
 
 async function adminUnbind(){
-  if(!selectedMember)return;
-  const reason=prompt(`解绑「${selectedMember.name}」的设备绑定？请填写原因（可选，将告知员工）：`);
-  if(reason===null)return;
-  await unclaimAccount(selectedMember.id,reason.trim());
-  logEvent('解绑',`管理员解绑了「${selectedMember.name}」的设备绑定${reason?' · 原因：'+reason:''}`);
+  if(!selectedMember)return false;
+  const member=selectedMember;
+  const reason=prompt(`解绑「${member.name}」的设备绑定？请填写原因（可选，将告知员工）：`);
+  if(reason===null)return false;
+  const ok=await unclaimAccount(member.id,reason.trim());
+  if(!ok){
+    showToast('设备解绑失败，请检查网络后重试');
+    return false;
+  }
+  logEvent('解绑',`管理员解绑了「${member.name}」的设备绑定${reason?' · 原因：'+reason:''}`);
   localStorage.removeItem('cb6');localStorage.removeItem('cb6exp');localStorage.removeItem('cb6auth');localStorage.removeItem('cb6authTs');selectedMember=null;stopReminderTimer();renderEmp();showToast('已解绑');
+  return true;
 }
 
 // ===== 班次实例：构建 / 成链 / 打卡动作解析（v2026.08.07.18）=====
@@ -3690,7 +4110,7 @@ function buildDayInstances(member,viewDate,isToday,prevPunches){
   state.shifts.forEach(s=>{if(s.enabled&&todaySids.includes(s.id))list.push({sh:s,sd:viewDate,prev:false})});
   if(!isToday)return list;
   const prevDate=ymd(addDays(parseYmd(viewDate),-1));
-  const prevSids=(picks[prevDate]&&picks[prevDate][member.id])||[];
+  const prevSids=(picks[prevDate]&&picks[prevDate][String(member.id)])||[];
   state.shifts.forEach(s=>{
     if(!s.enabled||!prevSids.includes(s.id))return;
     if(!(s.cross||toM(s.end)<=toM(s.start)))return;   // 只有跨过午夜的班次才延续到今天
@@ -3713,8 +4133,9 @@ function buildInstanceChains(items){
   return chains;
 }
 function instChainPos(it,chains){
+  const sitid=String(it.sh.id);
   for(const ch of chains){
-    const idx=ch.findIndex(x=>x.sh.id===it.sh.id&&x.sd===it.sd);
+    const idx=ch.findIndex(x=>String(x.sh.id)===sitid&&x.sd===it.sd);
     if(idx<0)continue;
     if(ch.length<2)return'solo';
     if(idx===0)return'first';
@@ -3738,7 +4159,8 @@ function resolvePunchAction(items,ctxDate,punchesOf,nowDt){
   // 紧接着该实例结束时刻开始、且还没打上班卡的实例 → 可一次交接打卡
   const nextOf=it=>{
     const e=dtOf(it).eD.getTime();
-    return sorted.find(o=>(o.sh.id!==it.sh.id||o.sd!==it.sd)&&dtOf(o).sD.getTime()===e&&!stOf(o).sp);
+    const itSid=String(it.sh.id);
+    return sorted.find(o=>(String(o.sh.id)!==itSid||o.sd!==it.sd)&&dtOf(o).sD.getTime()===e&&!stOf(o).sp);
   };
   // ① 昨日跨天班次的下班卡优先（错过只能补卡），并与今日首班在同一时刻交接
   for(const it of sorted){
@@ -3783,14 +4205,14 @@ function resolvePunchAction(items,ctxDate,punchesOf,nowDt){
   //    下班超时 30 分钟内仍可打卡。多个候选时取"逾期最短"的那个，避免早班盖住当前班。
   //    连班优化：补打迟到/补打下班时，若该班次处于连班链中，优先处理交接缺卡。
   const prevInChain=new Map();
-  for(const c of chains){for(let i=1;i<c.length;i++)prevInChain.set(c[i].sh.id+'_'+c[i].sd,c[i-1])}
+  for(const c of chains){for(let i=1;i<c.length;i++)prevInChain.set(String(c[i].sh.id)+'_'+c[i].sd,c[i-1])}
   let best=null;
   for(const it of sorted){
     const s=stOf(it),{sD,eD}=dtOf(it),tol=tolOf(it);
     if(s.ss==='w'&&T>sD.getTime()+tol&&T<eD.getTime()){
       const gap=T-sD.getTime();
       // 连班链中缺上班卡：检查前一班次是否也缺下班卡，若是则走交接打卡
-      const prev=prevInChain.get(it.sh.id+'_'+it.sd);
+      const prev=prevInChain.get(String(it.sh.id)+'_'+it.sd);
       if(prev){const ps=stOf(prev);if(!ps.ep){
         if(!best||gap<best.gap)best={gap,it,act:{sh:prev.sh,sd:prev.sd,t:'e',label:'连班交接打卡（补打）',hint:`${prev.sh.name} 下班 · ${it.sh.name} 上班 · 已过交接时间`,shared:it.sh,sharedSd:it.sd}};
         continue;
@@ -3836,12 +4258,12 @@ function renderMonthStatsView(){
     if(ok)okWeeks++;
     // 本周每天的明细数
     const per=[];
-    weekDaysArr(ws).forEach(d=>{const ds=ymd(d);if(ds.slice(0,7)!==ms){per.push('-');return}const arr=picks[ds]&&picks[ds][mid];per.push(Array.isArray(arr)?arr.length:0)});
+    weekDaysArr(ws).forEach(d=>{const ds=ymd(d);if(ds.slice(0,7)!==ms){per.push('-');return}const arr=picks[ds]&&picks[ds][String(mid)];per.push(Array.isArray(arr)?arr.length:0)});
     weekRows.push({idx:i,ws,we,wv,ok,per});
   });
   // 本月所有有选班的天数（用于"工作天数"）
   let workedDays=0;
-  Object.keys(picks).forEach(ds=>{if(ds.slice(0,7)!==ms)return;const arr=picks[ds]&&picks[ds][mid];if(Array.isArray(arr)&&arr.length)workedDays++});
+  Object.keys(picks).forEach(ds=>{if(ds.slice(0,7)!==ms)return;const arr=picks[ds]&&picks[ds][String(mid)];if(Array.isArray(arr)&&arr.length)workedDays++});
 
   // 月份导航
   const mLabel=`${y}年${mo}月${myMonthOffset===0?' · 本月':''}`;
@@ -3883,7 +4305,7 @@ function pickSel(dateStr){return memberShifts(selectedMember,dateStr).slice()}
 async function reconcilePicks(){
   for(let i=0;i<4;i++){
     if(i>0){await new Promise(r=>setTimeout(r,400*i))}
-    try{await pullPicksSelCfg(true);return true}catch(e){}
+    try{if(await pullPicksSelCfg(true))return true}catch(e){}
   }
   return false;
 }
@@ -3936,11 +4358,12 @@ async function togglePickSlot(dateStr,sid){
     // 满员校验 + 加班 在服务器端原子完成：先数人数→满员拒绝→不满才加，杜绝并发超员
     const res=await atomicAddPickCap(dateStr,selectedMember.id,sid,admin);
     if(res.ok===false){
-      if(res.reason==='full'||res.reason==='dayfull'){
-        // 服务器明确拒绝（满员/超每日上限，服务器没存）：回滚乐观更新
-        setMemberPick(dateStr,selectedMember.id,((picks[dateStr]||{})[selectedMember.id]||[]).filter(x=>x!==sid));
+      if(res.reason==='full'||res.reason==='dayfull'||res.reason==='weekfull'){
+        // 服务器明确拒绝（满员/超日周上限，服务器没存）：回滚乐观更新
+        setMemberPick(dateStr,selectedMember.id,((picks[dateStr]||{})[String(selectedMember.id)]||[]).filter(x=>x!==sid));
         sv('cp6',picks);picksLocalVer=Date.now();renderPickView();
         if(res.reason==='full'){showToast(`该时段已满员（${res.count}/${res.cap}），无法选择`)}
+        else if(res.reason==='weekfull'){showToast(`本周最多选 ${res.max||MAX_PER_WEEK} 个时段，无法再选`)}
         else{showToast(`每天最多选 ${res.max||MAX_PER_DAY} 个时段，当天已有 ${res.count} 个，无法再选`)}
       }else{
         // 网络错误：保留本地乐观更新，提示用户刷新确认
@@ -3964,7 +4387,7 @@ async function savePicks(){
   // 1) 员工端：草稿里有任何已保存锁定的日期就整批拒绝
   if(!admin){
     for(const d of dates){
-      if(picks[d]&&selectedMember&&Array.isArray(picks[d][selectedMember.id])){locked.push(d)}
+      if(picks[d]&&selectedMember&&Array.isArray(picks[d][String(selectedMember.id)])){locked.push(d)}
     }
     if(locked.length){
       const hint=locked.map(d=>{const o=parseYmd(d);return`${o.getMonth()+1}/${o.getDate()}`}).join('、');
@@ -3993,8 +4416,8 @@ async function savePicks(){
       const ds=ymd(dObj);
       let cnt=0;
       // 已保存的(草稿里没有覆盖到的日期)
-      if(picks[ds]&&selectedMember&&Array.isArray(picks[ds][selectedMember.id])&&pickDraft[ds]===undefined){
-        cnt=picks[ds][selectedMember.id].length;
+      if(picks[ds]&&selectedMember&&Array.isArray(picks[ds][String(selectedMember.id)])&&pickDraft[ds]===undefined){
+        cnt=picks[ds][String(selectedMember.id)].length;
       }
       // 草稿里的(覆盖或新增)
       if(pickDraft[ds]!==undefined)cnt=pickDraft[ds].length;
@@ -4078,7 +4501,7 @@ function renderPickView(){
   });
   // 底部信息栏：显示本周合计 + 即时保存提示
   let wkTotal=0;
-  if(selectedMember){const ws=weekStartOf(new Date());const wds=addDays(ws,pickWeekOffset*7);weekDaysArr(wds).forEach(d=>{const ds=ymd(d);const arr=picks[ds]&&picks[ds][selectedMember.id];if(Array.isArray(arr))wkTotal+=arr.length})}
+  if(selectedMember){const ws=weekStartOf(new Date());const wds=addDays(ws,pickWeekOffset*7);weekDaysArr(wds).forEach(d=>{const ds=ymd(d);const arr=picks[ds]&&picks[ds][String(selectedMember.id)];if(Array.isArray(arr))wkTotal+=arr.length})}
   html+=`<div class="pick-save-bar"><div class="info">点击即时保存，无需手动提交 · 本周合计 <b style="color:${wkTotal>MAX_PER_WEEK?'var(--danger)':'var(--primary)'}">${wkTotal}</b>/${MAX_PER_WEEK}${wkTotal>MAX_PER_WEEK?' <span style="color:var(--danger);font-weight:600">超上限</span>':''}</div></div>`;
   document.getElementById('empContent').innerHTML=html;
 }
@@ -4096,10 +4519,10 @@ function renderCountView(){
 }
 
 // ===== 员工端：换班（转让班次给任意成员，需接收人确认后生效）=====
-function svSwaps(){sv('cswap6',swaps)}
-async function syncSwaps(){if(!fbReady)return;try{await supa.from('config').upsert({id:'swaps',data:swaps,updated_at:Date.now()},{onConflict:'id'})}catch(e){console.warn('Swaps sync error:',e)}}
-function shiftNameOf(sid){const s=state.shifts.find(x=>x.id===sid);return s?s.name:('时段'+sid)}
-function memberNameOf(mid){const m=TEAM.find(x=>x.id===mid);return m?m.name:('工号'+mid)}
+function svSwaps(){swaps=normalizeSwapsData(swaps);sv('cswap6',swaps)}
+async function syncSwaps(){if(!fbReady)return;try{swaps=normalizeSwapsData(swaps);await supa.from('config').upsert({id:'swaps',data:swaps,updated_at:Date.now()},{onConflict:'id'})}catch(e){console.warn('Swaps sync error:',e)}}
+function shiftNameOf(sid){const s=state.shifts.find(x=>Number(x.id)===Number(sid));return s?s.name:('时段'+sid)}
+function memberNameOf(mid){const m=TEAM.find(x=>String(x.id)===String(mid));return m?m.name:('工号'+mid)}
 // 清理已结束且超过 60 天的换班记录（双向换班以 give/take 两个日期中较晚者判断）
 function pruneSwaps(){const days=Math.max(7,+selCfg.retainDays||60);const cutoff=ymd(addDays(new Date(),-days));const before=swaps.length;swaps=swaps.filter(s=>{if(s.status==='pending'||s.status==='proxy_pending')return true;const dates=[s.date||''];if(s.exchange&&s.exchange.takeDate)dates.push(s.exchange.takeDate);return dates.some(d=>d>=cutoff)});if(swaps.length!==before)svSwaps()}
 // 我收到的待确认换班数
@@ -4117,8 +4540,9 @@ function setExchTakeSid(v){exchangeForm.takeSid=v===''?null:+v;renderSwapView()}
 // 我在未来日期(不含今天)已选、且尚未挂起转让的班次，作为可转让来源
 function mySwapableDates(){
   if(!selectedMember)return[];
+  const mid=String(selectedMember.id);
   const td=tdStr(),out=[];
-  Object.keys(picks).forEach(ds=>{if(ds<td)return;const arr=picks[ds]&&picks[ds][selectedMember.id];if(Array.isArray(arr)&&arr.length)out.push(ds)});
+  Object.keys(picks).forEach(ds=>{if(ds<td)return;const arr=picks[ds]&&picks[ds][String(mid)];if(Array.isArray(arr)&&arr.length)out.push(ds)});
   return out.sort();
 }
 // 某日期我已挂起(pending)转让的时段集合，避免重复转让；包含双向换班中我要让出的班次
@@ -4126,8 +4550,9 @@ function pendingSidsOn(dateStr){return swaps.filter(s=>s.status==='pending'&&((+
 function pendingSidsOnFor(mid,dateStr){return swaps.filter(s=>s.status==='pending'&&((+s.fromId===+mid&&s.date===dateStr)||(s.exchange&&+s.toId===+mid&&s.exchange.takeDate===dateStr))).map(s=>s.exchange&&+s.toId===+mid&&s.exchange.takeDate===dateStr?s.exchange.takeSid:s.sid)}
 function otherSwapableDates(mid){
   if(!mid)return[];
+  const smid=String(mid);
   const td=tdStr(),out=[];
-  Object.keys(picks).forEach(ds=>{if(ds<td)return;const arr=picks[ds]&&picks[ds][mid];if(Array.isArray(arr)&&arr.length)out.push(ds)});
+  Object.keys(picks).forEach(ds=>{if(ds<td)return;const arr=picks[ds]&&picks[ds][smid];if(Array.isArray(arr)&&arr.length)out.push(ds)});
   return out.sort();
 }
 function renderSwapView(){
@@ -4153,7 +4578,7 @@ function renderSwapView(){
     dates.forEach(ds=>{const d=parseYmd(ds);dopt+=`<option value="${ds}"${swapForm.date===ds?' selected':''}>${d.getMonth()+1}/${d.getDate()} 周${WD_NAMES[d.getDay()]}</option>`});
     html+=`<select class="swap-sel" onchange="setSwapDate(this.value)">${dopt}</select>`;
     if(swapForm.date){
-      const myArr=(picks[swapForm.date]&&picks[swapForm.date][selectedMember.id])||[];
+      const myArr=(picks[swapForm.date]&&picks[swapForm.date][String(selectedMember.id)])||[];
       const pend=pendingSidsOn(swapForm.date);
       const avail=myArr.filter(sid=>!pend.includes(sid)).slice().sort((a,b)=>slotSortKey(state.shifts.find(s=>s.id===a)||{start:'00:00'})-slotSortKey(state.shifts.find(s=>s.id===b)||{start:'00:00'}));
       if(!avail.length){
@@ -4183,7 +4608,7 @@ function renderSwapView(){
     exchDates.forEach(ds=>{const d=parseYmd(ds);gdopt+=`<option value="${ds}"${exchangeForm.giveDate===ds?' selected':''}>${d.getMonth()+1}/${d.getDate()} 周${WD_NAMES[d.getDay()]}</option>`});
     html+=`<select class="swap-sel" onchange="setExchGiveDate(this.value)">${gdopt}</select>`;
     if(exchangeForm.giveDate){
-      const myGiveArr=(picks[exchangeForm.giveDate]&&picks[exchangeForm.giveDate][selectedMember.id])||[];
+      const myGiveArr=(picks[exchangeForm.giveDate]&&picks[exchangeForm.giveDate][String(selectedMember.id)])||[];
       const gPend=pendingSidsOn(exchangeForm.giveDate);
       const gAvail=myGiveArr.filter(sid=>!gPend.includes(sid)).slice().sort((a,b)=>slotSortKey(state.shifts.find(s=>s.id===a)||{start:'00:00'})-slotSortKey(state.shifts.find(s=>s.id===b)||{start:'00:00'}));
       if(!gAvail.length){
@@ -4204,9 +4629,9 @@ function renderSwapView(){
             takeDates.forEach(ds=>{const d=parseYmd(ds);tdopt+=`<option value="${ds}"${exchangeForm.takeDate===ds?' selected':''}>${d.getMonth()+1}/${d.getDate()} 周${WD_NAMES[d.getDay()]}</option>`});
             html+=`<select class="swap-sel" onchange="setExchTakeDate(this.value)">${tdopt}</select>`;
             if(exchangeForm.takeDate){
-              const otherArr=(picks[exchangeForm.takeDate]&&picks[exchangeForm.takeDate][exchangeForm.toId])||[];
+              const otherArr=(picks[exchangeForm.takeDate]&&picks[exchangeForm.takeDate][String(exchangeForm.toId)])||[];
               const tPend=pendingSidsOnFor(exchangeForm.toId,exchangeForm.takeDate);
-              const myTakeArr=(picks[exchangeForm.takeDate]&&picks[exchangeForm.takeDate][selectedMember.id])||[];
+              const myTakeArr=(picks[exchangeForm.takeDate]&&picks[exchangeForm.takeDate][String(selectedMember.id)])||[];
               const tAvail=otherArr.filter(sid=>!tPend.includes(sid)&&!myTakeArr.includes(sid)).slice().sort((a,b)=>slotSortKey(state.shifts.find(s=>s.id===a)||{start:'00:00'})-slotSortKey(state.shifts.find(s=>s.id===b)||{start:'00:00'}));
               if(!tAvail.length){
                 html+=`<div style="font-size:12px;color:var(--muted)">对方在该日期的可用班次都已在转让流程中，或你已有相同时段。</div>`;
@@ -4240,18 +4665,31 @@ function renderSwapView(){
   })}
   html+=`</div>`;
 
-  // 3) 我发起的
-  const outbox=swaps.filter(s=>+s.fromId===+selectedMember.id).sort((a,b)=>b.ts-a.ts).slice(0,20);
+  // 3) 我发起的；代提交待本人确认只显示在上方确认区，避免重复卡片和无效撤回按钮。
+  const outbox=swaps.filter(s=>s.status==='pending'&&+s.fromId===+selectedMember.id).sort((a,b)=>b.ts-a.ts);
   html+=`<div class="swap-card"><h4>我发起的换班</h4>`;
-  if(!outbox.length){html+=`<div style="font-size:12px;color:var(--muted)">你还没有发起过换班。</div>`}
+  if(!outbox.length){html+=`<div style="font-size:12px;color:var(--muted)">你目前没有进行中的换班发起。</div>`}
   else{outbox.forEach(s=>{
     const d=parseYmd(s.date);const stTxt={proxy_pending:'待本人确认',pending:'待确认',accepted:'已接受',rejected:'已拒绝',cancelled:'已取消',expired:'已过期'}[s.status]||s.status;
     if(s.exchange){
       const td2=parseYmd(s.exchange.takeDate);
-      html+=`<div class="swap-req"><div>${d.getMonth()+1}/${d.getDate()} 周${WD_NAMES[d.getDay()]} <b>${shiftNameOf(s.sid)}</b> ↔ ${td2.getMonth()+1}/${td2.getDate()} 周${WD_NAMES[td2.getDay()]} <b>${shiftNameOf(s.exchange.takeSid)}</b> · 与 <b>${esc(s.toName)}</b> 双向换班 <span class="swap-st ${s.status}">${stTxt}</span>${s.proxyBy?`<span class="proxy-tag">${esc(s.proxyBy.name)} 代提交</span>`:''}</div><div class="sr-meta">${fmtTs(s.ts)}${s.decidedTs?' · 处理于 '+fmtTs(s.decidedTs):''}</div>${s.status==='pending'?`<div class="sr-act"><button class="btn g" onclick="cancelSwap('${s.id}')">撤回</button></div>`:''}</div>`;
+      html+=`<div class="swap-req"><div>${d.getMonth()+1}/${d.getDate()} 周${WD_NAMES[d.getDay()]} <b>${shiftNameOf(s.sid)}</b> ↔ ${td2.getMonth()+1}/${td2.getDate()} 周${WD_NAMES[td2.getDay()]} <b>${shiftNameOf(s.exchange.takeSid)}</b> · 与 <b>${esc(s.toName)}</b> 双向换班 <span class="swap-st ${s.status}">${stTxt}</span>${s.proxyBy?`<span class="proxy-tag">${esc(s.proxyBy.name)} 代提交</span>`:''}</div><div class="sr-meta">${fmtTs(s.ts)}${s.decidedTs?' · 处理于 '+fmtTs(s.decidedTs):''}</div>${s.status==='pending'||s.status==='proxy_pending'?`<div class="sr-act"><button class="btn g" onclick="cancelSwap('${s.id}')">撤回</button></div>`:''}</div>`;
     }else{
-      html+=`<div class="swap-req"><div>${d.getMonth()+1}/${d.getDate()} 周${WD_NAMES[d.getDay()]} · <b>${shiftNameOf(s.sid)}</b> → <b>${esc(s.toName)}</b> <span class="swap-st ${s.status}">${stTxt}</span>${s.proxyBy?`<span class="proxy-tag">${esc(s.proxyBy.name)} 代提交</span>`:''}</div><div class="sr-meta">${fmtTs(s.ts)}${s.decidedTs?' · 处理于 '+fmtTs(s.decidedTs):''}</div>${s.status==='pending'?`<div class="sr-act"><button class="btn g" onclick="cancelSwap('${s.id}')">撤回</button></div>`:''}</div>`;
+      html+=`<div class="swap-req"><div>${d.getMonth()+1}/${d.getDate()} 周${WD_NAMES[d.getDay()]} · <b>${shiftNameOf(s.sid)}</b> → <b>${esc(s.toName)}</b> <span class="swap-st ${s.status}">${stTxt}</span>${s.proxyBy?`<span class="proxy-tag">${esc(s.proxyBy.name)} 代提交</span>`:''}</div><div class="sr-meta">${fmtTs(s.ts)}${s.decidedTs?' · 处理于 '+fmtTs(s.decidedTs):''}</div>${s.status==='pending'||s.status==='proxy_pending'?`<div class="sr-act"><button class="btn g" onclick="cancelSwap('${s.id}')">撤回</button></div>`:''}</div>`;
     }
+  })}
+  html+=`</div>`;
+
+  // 3.5) 历史记录 (v2026.09.04)
+  const history=swaps.filter(s=>!['pending','proxy_pending'].includes(s.status)&&(+s.fromId===+selectedMember.id||+s.toId===+selectedMember.id)).sort((a,b)=>(b.decidedTs||b.ts)-(a.decidedTs||a.ts)).slice(0,15);
+  html+=`<div class="swap-card"><h4>换班历史记录</h4>`;
+  if(!history.length){html+=`<div style="font-size:12px;color:var(--muted)">暂无历史记录。</div>`}
+  else{history.forEach(s=>{
+    const d=parseYmd(s.date);const stTxt={accepted:'已接受',rejected:'已拒绝',cancelled:'已取消',expired:'已过期'}[s.status]||s.status;
+    const isFrom=+s.fromId===+selectedMember.id;
+    const peerName=isFrom?s.toName:s.fromName;
+    const typeLabel=s.exchange?'双向换班':(isFrom?'转让给':'收到');
+    html+=`<div class="swap-req" style="opacity:0.8"><div>${d.getMonth()+1}/${d.getDate()} · ${typeLabel} <b>${esc(peerName)}</b> <span class="swap-st ${s.status}">${stTxt}</span></div><div class="sr-meta">${s.decidedTs?'完成于 '+fmtTs(s.decidedTs):fmtTs(s.ts)}</div></div>`;
   })}
   html+=`</div>`;
 
@@ -4262,7 +4700,7 @@ function renderSwapView(){
   TEAM.filter(m=>+m.id!==+selectedMember.id).forEach(m=>{fopt+=`<option value="${m.id}"${proxySwapForm.fromId===+m.id?' selected':''}>${esc(m.name)} · ${esc(m.dept||'')}</option>`});
   html+=`<select class="swap-sel" onchange="setProxySwapFrom(this.value)">${fopt}</select>`;
   if(proxySwapForm.fromId!=null){
-    const targetDates=Object.keys(picks).filter(ds=>ds>=td&&(picks[ds]&&picks[ds][proxySwapForm.fromId]||[]).length>0).sort();
+    const targetDates=Object.keys(picks).filter(ds=>ds>=td&&(picks[ds]&&picks[ds][String(proxySwapForm.fromId)]||[]).length>0).sort();
     if(!targetDates.length){
       html+=`<div style="font-size:12px;color:var(--muted)">该同事未来日期暂无可转让的班次。</div>`;
     }else{
@@ -4270,7 +4708,7 @@ function renderSwapView(){
       targetDates.forEach(ds=>{const d=parseYmd(ds);dopt2+=`<option value="${ds}"${proxySwapForm.date===ds?' selected':''}>${d.getMonth()+1}/${d.getDate()} 周${WD_NAMES[d.getDay()]}</option>`});
       html+=`<select class="swap-sel" onchange="setProxySwapDate(this.value)">${dopt2}</select>`;
       if(proxySwapForm.date){
-        const tArr=(picks[proxySwapForm.date]&&picks[proxySwapForm.date][proxySwapForm.fromId])||[];
+        const tArr=(picks[proxySwapForm.date]&&picks[proxySwapForm.date][String(proxySwapForm.fromId)])||[];
         const tPend=swaps.filter(s=>(s.status==='pending'||s.status==='proxy_pending')&&+s.fromId===+proxySwapForm.fromId&&s.date===proxySwapForm.date).map(s=>s.sid);
         const tAvail=tArr.filter(sid=>!tPend.includes(sid));
         if(!tAvail.length){
@@ -4300,7 +4738,7 @@ async function initiateSwap(){
   if(!date||sid==null||toId==null){showToast('请完整选择日期、时段和接收成员');return}
   if(!isValidDate(date)){showToast('日期格式无效');return}
   if(date<tdStr()){showToast('过去的班次不可转让');return}
-  const myArr=(picks[date]&&picks[date][selectedMember.id])||[];
+  const myArr=(picks[date]&&picks[date][String(selectedMember.id)])||[];
   if(!myArr.includes(sid)){showToast('你在该日期没有此班次');return}
   if(+toId===+selectedMember.id){showToast('不能转让给自己');return}
   if(pendingSidsOn(date).includes(sid)){showToast('该时段已有待确认的转让请求');return}
@@ -4320,25 +4758,24 @@ async function acceptSwap(id){
   try{
   if(s.date<tdStr()){s.status='cancelled';s.decidedTs=Date.now();svSwaps();await syncSwaps();showToast('该班次已过期，换班已作废');renderEmp();return}
   // 转出方仍需持有该班次
-  const fromArr=(picks[s.date]&&picks[s.date][s.fromId])||[];
-  if(!fromArr.includes(s.sid)){s.status='cancelled';s.decidedTs=Date.now();svSwaps();await syncSwaps();showToast('对方已不再持有该班次，换班作废');renderEmp();return}
+  const swapSid=Number(s.sid);
+  if(!Number.isFinite(swapSid)){showToast('换班班次数据异常，请重新发起');return}
+  const fromArr=(picks[s.date]&&picks[s.date][String(s.fromId)])||[];
+  if(!fromArr.includes(swapSid)){s.status='cancelled';s.decidedTs=Date.now();svSwaps();await syncSwaps();showToast('对方已不再持有该班次，换班作废');renderEmp();return}
   // 接收方约束校验
-  const toArr=(picks[s.date]&&picks[s.date][s.toId])||[];
-  if(toArr.includes(s.sid)){showToast('你当天已选该时段，无法接收');return}
-  if(toArr.length>MAX_PER_DAY){showToast(`你当天班次已超过 ${MAX_PER_DAY} 个，无法再接收`);return}
+  const toArr=(picks[s.date]&&picks[s.date][String(s.toId)])||[];
+  if(toArr.includes(swapSid)){showToast('你当天已选该时段，无法接收');return}
+  if(toArr.length>=MAX_PER_DAY){showToast(`你当天班次已达到 ${MAX_PER_DAY} 个，无法再接收`);return}
   // 整周 49 上限
   const wkDays=weekDaysArr(weekStartOf(parseYmd(s.date)));
-  let wkTotal=0;wkDays.forEach(d=>{const a=(picks[ymd(d)]&&picks[ymd(d)][s.toId])||[];wkTotal+=a.length});
+  let wkTotal=0;wkDays.forEach(d=>{const a=(picks[ymd(d)]&&picks[ymd(d)][String(s.toId)])||[];wkTotal+=a.length});
   if(wkTotal>=MAX_PER_WEEK){showToast(`你本周已选满 ${MAX_PER_WEEK} 个时段，无法接收`);return}
   // 满员校验（排除转出方，因为其将让出该班次）
-  const cap=slotCapOf(s.date,s.sid);
-  if(cap>0){let cnt=slotCount(s.date,s.sid,s.fromId);if(cnt>=cap){showToast('该时段已满员，无法接收');return}}
-  // 执行转让：转出方移除、接收方加入
-  // 使用原子增/删（pick_remove / pick_add）而非整体 pick_set：
-  // 服务器端基于最新行数据操作，彻底避免同一天多笔换班并发时后写覆盖先写
-  const okSwap1=await atomicRemovePick(s.date,s.fromId,s.sid);
-  const okSwap2=await atomicAddPick(s.date,s.toId,s.sid);
-  if(!okSwap1||!okSwap2){showToast('换班保存失败，已刷新最新数据，请重试');try{await pullPicksSelCfg()}catch(e){};renderEmp();return}
+  const cap=slotCapOf(s.date,swapSid);
+  if(cap>0){let cnt=slotCount(s.date,swapSid,s.fromId);if(cnt>=cap){showToast('该时段已满员，无法接收');return}}
+  // 在同一个 Firestore 事务中完成转出和转入，避免任一步失败造成班次丢失。
+  const swapResult=await atomicTransferPick(s.date,s.fromId,s.toId,swapSid);
+  if(!swapResult.ok){showToast('换班保存失败，已刷新最新数据，请重试');try{await pullPicksSelCfg()}catch(e){};renderEmp();return}
   s.status='accepted';s.decidedTs=Date.now();svSwaps();await syncSwaps();
   logEvent('接受换班',`${s.toName} 接收了 ${s.fromName} 的 ${s.date} ${shiftNameOf(s.sid)} 班次`);
   // 发送审批结果通知（v2026.08.14.42）
@@ -4370,15 +4807,15 @@ async function initiateExchange(){
   if(giveDate<td||takeDate<td){showToast('过去的班次不可换班');return}
   const other=TEAM.find(m=>+m.id===+toId);if(!other){showToast('换班对象不存在');return}
   if(+toId===+selectedMember.id){showToast('不能跟自己换班');return}
-  const myGiveArr=(picks[giveDate]&&picks[giveDate][selectedMember.id])||[];
+  const myGiveArr=(picks[giveDate]&&picks[giveDate][String(selectedMember.id)])||[];
   if(!myGiveArr.includes(giveSid)){showToast('你在给出日期没有该班次');return}
-  const otherTakeArr=(picks[takeDate]&&picks[takeDate][toId])||[];
+  const otherTakeArr=(picks[takeDate]&&picks[takeDate][String(toId)])||[];
   if(!otherTakeArr.includes(takeSid)){showToast('对方在接收日期没有该班次');return}
   if(pendingSidsOn(giveDate).includes(giveSid)){showToast('你要给出的班次已在转让流程中');return}
   if(pendingSidsOnFor(toId,takeDate).includes(takeSid)){showToast('对方要给出的班次已在转让流程中');return}
-  const myTakeArr=(picks[takeDate]&&picks[takeDate][selectedMember.id])||[];
+  const myTakeArr=(picks[takeDate]&&picks[takeDate][String(selectedMember.id)])||[];
   if(myTakeArr.includes(takeSid)){showToast('你在接收日期已有该时段，无需交换');return}
-  const otherGiveArr=(picks[giveDate]&&picks[giveDate][toId])||[];
+  const otherGiveArr=(picks[giveDate]&&picks[giveDate][String(toId)])||[];
   if(otherGiveArr.includes(giveSid)){showToast('对方在给出日期已有该时段，无法重复接收');return}
   const rec={id:'sw'+Date.now()+'_'+Math.random().toString(36).slice(2,6),date:giveDate,sid:giveSid,fromId:selectedMember.id,fromName:selectedMember.name,toId:+toId,toName:other.name,status:'pending',ts:Date.now(),decidedTs:0,exchange:{takeDate,takeSid}};
   swaps.push(rec);svSwaps();await syncSwaps();
@@ -4396,10 +4833,10 @@ async function acceptExchange(id){
   const giveDate=s.date,giveSid=s.sid,giverId=s.fromId,takeDate=s.exchange.takeDate,takeSid=s.exchange.takeSid;
   const td=tdStr();
   if(giveDate<td||takeDate<td){s.status='cancelled';s.decidedTs=Date.now();svSwaps();await syncSwaps();showToast('请求中包含已过去的班次，换班已作废');renderEmp();return}
-  const giverGive=(picks[giveDate]&&picks[giveDate][giverId])||[];
-  const giverTake=(picks[takeDate]&&picks[takeDate][giverId])||[];
-  const receiverGive=(picks[giveDate]&&picks[giveDate][selectedMember.id])||[];
-  const receiverTake=(picks[takeDate]&&picks[takeDate][selectedMember.id])||[];
+  const giverGive=(picks[giveDate]&&picks[giveDate][String(giverId)])||[];
+  const giverTake=(picks[takeDate]&&picks[takeDate][String(giverId)])||[];
+  const receiverGive=(picks[giveDate]&&picks[giveDate][String(selectedMember.id)])||[];
+  const receiverTake=(picks[takeDate]&&picks[takeDate][String(selectedMember.id)])||[];
   if(!giverGive.includes(giveSid)){s.status='cancelled';s.decidedTs=Date.now();svSwaps();await syncSwaps();showToast('对方已不再持有给出的班次，换班作废');renderEmp();return}
   if(!receiverTake.includes(takeSid)){s.status='cancelled';s.decidedTs=Date.now();svSwaps();await syncSwaps();showToast('你已不再持有要换出的班次，换班作废');renderEmp();return}
   if(receiverGive.includes(giveSid)){showToast('你在给出日期已有该时段，无法重复接收');return}
@@ -4409,7 +4846,7 @@ async function acceptExchange(id){
   if(!sameDt&&giverTake.length>=MAX_PER_DAY){showToast(`对方接收日期已满 ${MAX_PER_DAY} 个时段，无法完成换班`);return}
   const giveWeekStart=weekStartOf(parseYmd(giveDate)),takeWeekStart=weekStartOf(parseYmd(takeDate));
   const giveWeekStr=ymd(giveWeekStart),takeWeekStr=ymd(takeWeekStart);
-  function countWeek(mid,startDate){let total=0;weekDaysArr(startDate).forEach(d=>{const a=(picks[ymd(d)]&&picks[ymd(d)][mid])||[];total+=a.length});return total}
+  function countWeek(mid,startDate){let total=0;weekDaysArr(startDate).forEach(d=>{const a=(picks[ymd(d)]&&picks[ymd(d)][String(mid)])||[];total+=a.length});return total}
   if(giveWeekStr!==takeWeekStr){
     if(countWeek(selectedMember.id,giveWeekStart)>=MAX_PER_WEEK){showToast(`你给出日期所在周已满 ${MAX_PER_WEEK} 个时段，无法接收新班次`);return}
     if(countWeek(giverId,takeWeekStart)>=MAX_PER_WEEK){showToast(`对方接收日期所在周已满 ${MAX_PER_WEEK} 个时段，无法完成换班`);return}
@@ -4418,20 +4855,8 @@ async function acceptExchange(id){
   if(capGive>0){const cnt=slotCount(giveDate,giveSid,giverId);if(cnt>=capGive){showToast('你要接收的时段已满员，无法换班');return}}
   const capTake=slotCapOf(takeDate,takeSid);
   if(capTake>0){const cnt=slotCount(takeDate,takeSid,selectedMember.id);if(cnt>=capTake){showToast('对方要接收的时段已满员，无法换班');return}}
-  let ok1,ok2,ok3,ok4;
-  if(sameDt){
-    // 同日互换：各自原子增/删，避免并发覆盖
-    ok1=await atomicRemovePick(giveDate,giverId,giveSid);
-    ok2=await atomicAddPick(giveDate,giverId,takeSid);
-    ok3=await atomicRemovePick(giveDate,selectedMember.id,takeSid);
-    ok4=await atomicAddPick(giveDate,selectedMember.id,giveSid);
-  }else{
-    ok1=await atomicRemovePick(giveDate,giverId,giveSid);
-    ok2=await atomicAddPick(takeDate,giverId,takeSid);
-    ok3=await atomicAddPick(giveDate,selectedMember.id,giveSid);
-    ok4=await atomicRemovePick(takeDate,selectedMember.id,takeSid);
-  }
-  if(!ok1||!ok2||!ok3||!ok4){showToast('换班保存失败，已刷新最新数据，请重试');try{await pullPicksSelCfg()}catch(e){};renderEmp();return}
+  const exchangeResult=await atomicExchangePicks(giveDate,giverId,giveSid,takeDate,selectedMember.id,takeSid);
+  if(!exchangeResult.ok){showToast('换班保存失败，已刷新最新数据，请重试');try{await pullPicksSelCfg()}catch(e){};renderEmp();return}
   s.status='accepted';s.decidedTs=Date.now();svSwaps();await syncSwaps();
   logEvent('接受双向换班',`${selectedMember.name} 接受了与 ${s.fromName} 的双向换班：${giveDate} ${shiftNameOf(giveSid)} ↔ ${takeDate} ${shiftNameOf(takeSid)}`);
   showToast('已接受双向换班，班次已互换');renderEmp();
@@ -4465,15 +4890,15 @@ function isPrevDayChainShift(sid,dateStr,mid){
   const sh=state.shifts.find(s=>s.id===sid);if(!sh)return false;
   if(!(sh.cross||toM(sh.end)<=toM(sh.start)))return false;
   // 若该班次在 dateStr 当天也有选班，则当天实例优先（昨天那次由 buildDayInstances 单独保留）
-  const curArr=(picks[dateStr]&&picks[dateStr][mid])||[];
+  const curArr=(picks[dateStr]&&picks[dateStr][String(mid)])||[];
   if(curArr.includes(sid))return false;
   const prev=ymd(addDays(parseYmd(dateStr),-1));
-  const arr=(picks[prev]&&picks[prev][mid])||[];
+  const arr=(picks[prev]&&picks[prev][String(mid)])||[];
   return arr.includes(sid);
 }
 // 补卡视图日期 -> 真正的选班日期
 function makeupPickDate(viewDate,sid,mid){
-  const curArr=(picks[viewDate]&&picks[viewDate][mid])||[];
+  const curArr=(picks[viewDate]&&picks[viewDate][String(mid)])||[];
   if(curArr.includes(sid))return viewDate;
   if(isPrevDayChainShift(sid,viewDate,mid))return ymd(addDays(parseYmd(viewDate),-1));
   return viewDate;
@@ -4509,10 +4934,10 @@ function renderMakeupView(){
   };
   // 过滤：员工在这些日期有选班，或前一天选了跨天/连班链班次（实际占用到当天），或有打卡记录
   const validDates=dates.filter(ds=>{
-    const arr=picks[ds]&&picks[ds][selectedMember.id];
+    const arr=picks[ds]&&picks[ds][String(selectedMember.id)];
     if(Array.isArray(arr)&&arr.length>0)return true;
     const prevDateStr=ymd(addDays(parseYmd(ds),-1));
-    const prevArr=picks[prevDateStr]&&picks[prevDateStr][selectedMember.id];
+    const prevArr=picks[prevDateStr]&&picks[prevDateStr][String(selectedMember.id)];
     if(!Array.isArray(prevArr)){
       // 即使没有选班，如果有打卡记录也允许补卡（含 Supabase 同步记录）
       return hasPunchesOnDate(ds,selectedMember.id)||hasPunchesOnDate(prevDateStr,selectedMember.id);
@@ -4535,7 +4960,7 @@ function renderMakeupView(){
       const shiftsForDate=[]; // {sid,name,hasS,hasE,date(pickDate),prev?}
       // 当天选的班次（按「sid+选班日期」的实例粒度匹配，防止连续两天同班次互相串卡）
       const punchesOnD=getAllPunchesForMember(selectedMember.id,dPicked);
-      ((picks[dPicked]&&picks[dPicked][selectedMember.id])||[]).forEach(sid=>{
+      ((picks[dPicked]&&picks[dPicked][String(selectedMember.id)])||[]).forEach(sid=>{
         const sh=state.shifts.find(s=>s.id===sid);if(!sh)return;
         const hasS=!!instPunch(punchesOnD,sh,dPicked,'s');
         const hasE=!!instPunch(punchesOnD,sh,dPicked,'e');
@@ -4545,7 +4970,7 @@ function renderMakeupView(){
       // 前一天选的跨午夜班次延续到当天的实例（如 23:00-00:00）。
       // 即使当天也选了同一班次，两者是不同实例，选项值用 sid+日期 区分，允许分别补卡。
       const punchesOnPrev=getAllPunchesForMember(selectedMember.id,dPrev);
-      ((picks[dPrev]&&picks[dPrev][selectedMember.id])||[]).forEach(sid=>{
+      ((picks[dPrev]&&picks[dPrev][String(selectedMember.id)])||[]).forEach(sid=>{
         const sh=state.shifts.find(s=>s.id===sid);if(!sh)return;
         if(!(sh.cross||toM(sh.end)<=toM(sh.start)))return; // 只有真正跨午夜的班次才延续到当天
         const hasS=!!instPunch(punchesOnPrev,sh,dPrev,'s');
@@ -4698,7 +5123,7 @@ async function acceptMakeup(id){
     // 候选实例池：选班日期及前后各一天（跨午夜实例的选班日期在相邻日）
     const pool=[];
     [ymd(addDays(parseYmd(m.date),-1)),m.date,ymd(addDays(parseYmd(m.date),1))].forEach(ds=>{
-      ((picks[ds]&&picks[ds][member.id])||[]).forEach(sid=>{
+      ((picks[ds]&&picks[ds][String(member.id)])||[]).forEach(sid=>{
         const s2=state.shifts.find(x=>x.id===sid);if(!s2||!s2.enabled)return;
         if(sid===m.sid&&ds===m.date)return;
         pool.push({sh:s2,sd:ds});
@@ -4805,13 +5230,13 @@ function renderLeaveView(){
   }
 
   // 1) 本人申请请假
-  const myDates=Object.keys(picks).filter(ds=>ds>=td&&(picks[ds]&&picks[ds][selectedMember.id]||[]).length>0).sort();
+  const myDates=Object.keys(picks).filter(ds=>ds>=td&&(picks[ds]&&picks[ds][String(selectedMember.id)]||[]).length>0).sort();
   html+=`<div class="leave-card"><h4>申请请假 · 移除我某天的全部班次</h4>`;
   if(!myDates.length){
     html+=`<div style="font-size:12px;color:var(--muted)">你在未来日期暂无已选班次，无需请假。</div>`;
   }else{
     let dopt='<option value="">选择请假日期</option>';
-    myDates.forEach(ds=>{const d=parseYmd(ds);const cnt=(picks[ds][selectedMember.id]||[]).length;dopt+=`<option value="${ds}"${leaveForm.date===ds?' selected':''}>${d.getMonth()+1}/${d.getDate()} 周${WD_NAMES[d.getDay()]}（${cnt} 个班次）</option>`});
+    myDates.forEach(ds=>{const d=parseYmd(ds);const cnt=(picks[ds][String(selectedMember.id)]||[]).length;dopt+=`<option value="${ds}"${leaveForm.date===ds?' selected':''}>${d.getMonth()+1}/${d.getDate()} 周${WD_NAMES[d.getDay()]}（${cnt} 个班次）</option>`});
     html+=`<select class="swap-sel" onchange="setLeaveDate(this.value)">${dopt}</select>`;
     if(leaveForm.date){
       html+=`<textarea class="swap-sel" rows="2" placeholder="请假原因（可选，如：身体不适/家中有事）" onchange="setLeaveReason(this.value)">${leaveForm.reason||''}</textarea>`;
@@ -4827,12 +5252,13 @@ function renderLeaveView(){
   TEAM.filter(m=>+m.id!==+selectedMember.id).forEach(m=>{mopt+=`<option value="${m.id}"${proxyLeaveForm.mid===+m.id?' selected':''}>${esc(m.name)} · ${esc(m.dept||'')}</option>`});
   html+=`<select class="swap-sel" onchange="setProxyLeaveMid(this.value)">${mopt}</select>`;
   if(proxyLeaveForm.mid!=null){
-    const targetDates=Object.keys(picks).filter(ds=>ds>=td&&(picks[ds]&&picks[ds][proxyLeaveForm.mid]||[]).length>0).sort();
+    const proxyMid=String(proxyLeaveForm.mid);
+    const targetDates=Object.keys(picks).filter(ds=>ds>=td&&(picks[ds]&&picks[ds][proxyMid]||[]).length>0).sort();
     if(!targetDates.length){
       html+=`<div style="font-size:12px;color:var(--muted)">该同事未来日期暂无已选班次。</div>`;
     }else{
       let dopt2='<option value="">选择请假日期</option>';
-      targetDates.forEach(ds=>{const d=parseYmd(ds);const cnt=(picks[ds][proxyLeaveForm.mid]||[]).length;dopt2+=`<option value="${ds}"${proxyLeaveForm.date===ds?' selected':''}>${d.getMonth()+1}/${d.getDate()} 周${WD_NAMES[d.getDay()]}（${cnt} 个班次）</option>`});
+      targetDates.forEach(ds=>{const d=parseYmd(ds);const cnt=(picks[ds][proxyMid]||[]).length;dopt2+=`<option value="${ds}"${proxyLeaveForm.date===ds?' selected':''}>${d.getMonth()+1}/${d.getDate()} 周${WD_NAMES[d.getDay()]}（${cnt} 个班次）</option>`});
       html+=`<select class="swap-sel" onchange="setProxyLeaveDate(this.value)">${dopt2}</select>`;
       if(proxyLeaveForm.date){
         html+=`<textarea class="swap-sel" rows="2" placeholder="请假原因（如：TA 让我帮忙提交/电话说身体不适）" onchange="setProxyLeaveReason(this.value)">${proxyLeaveForm.reason||''}</textarea>`;
@@ -4963,7 +5389,7 @@ async function submitLeave(isProxy){
     if(!date){showToast('请选择请假日期');return}
   }
   if(date<tdStr()){showToast('过去的日期不可请假');return}
-  const arr=(picks[date]&&picks[date][mid])||[];
+  const arr=(picks[date]&&picks[date][String(mid)])||[];
   if(!arr.length){showToast('该日期没有已选班次');return}
   // 检查是否已有待处理的请假
   const dup=leaves.find(l=>+l.mid===+mid&&l.date===date&&(l.status==='pending'||l.status==='proxy_pending'));
@@ -5074,7 +5500,7 @@ async function approveLeave(id){
   const l=leaves.find(x=>x.id===id);if(!l||l.status!=='pending')return;
   if(!confirm(`批准 ${l.name} 在 ${l.date} 的请假？\n批准后将移除该员工当天全部 ${(l.sids||[]).length} 个班次。`))return;
   // 移除该员工当天的班次（服务器端原子写入，防并发覆盖）
-  if(picks[l.date]&&picks[l.date][l.mid]){
+  if(picks[l.date]&&picks[l.date][String(l.mid)]){
     const okLv=await atomicSetPick(l.date,l.mid,[]);
     if(!okLv){showToast('操作失败，已刷新最新数据，请重试');try{await pullPicksSelCfg()}catch(e){};renderLeaveAdmin();return}
   }
@@ -5209,8 +5635,10 @@ function calcMonthMetrics(mid, monthStr) {
     +l.mid === +mid && l.status === 'approved' && (l.date || '').slice(0, 7) === monthStr && (!isCurrentMonth || l.date <= todayStr)
   );
   const leaveDays = approvedLeaves.length;
-  // 用于快速判断某班次是否被已批准请假覆盖
-  const isShiftOnLeave = (ds, sid) => approvedLeaves.some(l => l.date === ds && Array.isArray(l.sids) && l.sids.includes(sid));
+  // 用于快速判断某班次是否被已批准请假覆盖；兼容历史字符串 sid。
+  const isShiftOnLeave = (ds, sid) => approvedLeaves.some(l =>
+    l.date === ds && Array.isArray(l.sids) && l.sids.some(leaveSid => Number(leaveSid) === Number(sid))
+  );
 
   // 已批准的补卡记录（用于扣除缺卡）
   const acceptedMakeups = makeups.filter(m =>
@@ -5221,14 +5649,15 @@ function calcMonthMetrics(mid, monthStr) {
     if (ds.slice(0, 7) !== monthStr) return;
     // 当月只统计到今天，跳过未来日期
     if (isCurrentMonth && ds > todayStr) return;
-    const shiftIds = picks[ds] && picks[ds][mid];
+    const shiftIds = picks[ds] && picks[ds][String(mid)];
     if (!Array.isArray(shiftIds) || !shiftIds.length) return;
 
     const dayPunches = getAllPunchesForMember(mid, ds);
     let dayWorked = false;
 
-    shiftIds.forEach(sid => {
-      const shift = state.shifts.find(s => s.id === sid);
+    shiftIds.forEach(rawSid => {
+      const sid = Number(rawSid);
+      const shift = state.shifts.find(s => Number(s.id) === sid);
       if (!shift) return;
 
       const startPunch = instPunch(dayPunches, shift, ds, 's');
@@ -5259,10 +5688,10 @@ function calcMonthMetrics(mid, monthStr) {
         missingS = false;
         missingE = false;
       } else {
-        if (missingS && acceptedMakeups.some(m => m.date === ds && m.sid === sid && m.t === 's')) {
+        if (missingS && acceptedMakeups.some(m => m.date === ds && Number(m.sid) === sid && m.t === 's')) {
           missingS = false;
         }
-        if (missingE && acceptedMakeups.some(m => m.date === ds && m.sid === sid && m.t === 'e')) {
+        if (missingE && acceptedMakeups.some(m => m.date === ds && Number(m.sid) === sid && m.t === 'e')) {
           missingE = false;
         }
       }
@@ -5513,14 +5942,16 @@ async function initiateProxySwap(){
   if(fromId==null||!date||sid==null||toId==null){showToast('请完整选择同事、日期、时段和接收人');return}
   if(date<tdStr()){showToast('过去的班次不可转让');return}
   const from=TEAM.find(m=>+m.id===+fromId);if(!from){showToast('该同事不存在');return}
-  const fromArr=(picks[date]&&picks[date][fromId])||[];
-  if(!fromArr.includes(sid)){showToast('该同事在该日期没有此班次');return}
+  const normalizedSid=Number(sid);
+  if(!Number.isFinite(normalizedSid)){showToast('班次数据异常，请重新选择');return}
+  const fromArr=(picks[date]&&picks[date][String(fromId)])||[];
+  if(!fromArr.includes(normalizedSid)){showToast('该同事在该日期没有此班次');return}
   if(+toId===+fromId){showToast('不能转让给本人');return}
   // 检查是否已有待处理的代提交
-  const dup=swaps.find(s=>s.status==='proxy_pending'&&+s.fromId===+fromId&&s.date===date&&s.sid===sid);
+  const dup=swaps.find(s=>s.status==='proxy_pending'&&+s.fromId===+fromId&&s.date===date&&Number(s.sid)===normalizedSid);
   if(dup){showToast('该班次已有待确认的代提交换班');return}
   const to=TEAM.find(m=>+m.id===+toId);if(!to){showToast('接收成员不存在');return}
-  const rec={id:'sw'+Date.now()+'_'+Math.random().toString(36).slice(2,6),date,sid,fromId:+fromId,fromName:from.name,toId:+toId,toName:to.name,status:'proxy_pending',ts:Date.now(),decidedTs:0,proxyBy:{id:selectedMember.id,name:selectedMember.name},proxyTs:Date.now()};
+  const rec={id:'sw'+Date.now()+'_'+Math.random().toString(36).slice(2,6),date,sid:normalizedSid,fromId:+fromId,fromName:from.name,toId:+toId,toName:to.name,status:'proxy_pending',ts:Date.now(),decidedTs:0,proxyBy:{id:selectedMember.id,name:selectedMember.name},proxyTs:Date.now()};
   swaps.push(rec);svSwaps();await syncSwaps();
   logEvent('代提交换班',`${selectedMember.name} 帮 ${from.name} 代提交了将 ${date} ${shiftNameOf(sid)} 转给 ${to.name} 的请求`);
   proxySwapForm={fromId:null,date:'',sid:null,toId:null};
@@ -5530,8 +5961,8 @@ async function confirmProxySwap(id){
   const s=swaps.find(x=>x.id===id);if(!s||s.status!=='proxy_pending')return;
   if(!selectedMember||+s.fromId!==+selectedMember.id){showToast('只有班次本人可以确认');return}
   if(s.date<tdStr()){s.status='expired';s.decidedTs=Date.now();svSwaps();await syncSwaps();showToast('该班次已过期，代提交已作废');renderEmp();return}
-  const fromArr=(picks[s.date]&&picks[s.date][s.fromId])||[];
-  if(!fromArr.includes(s.sid)){s.status='cancelled';s.decidedTs=Date.now();svSwaps();await syncSwaps();showToast('你已不再持有该班次，代提交已作废');renderEmp();return}
+  const fromArr=(picks[s.date]&&picks[s.date][String(s.fromId)])||[];
+  if(!fromArr.includes(Number(s.sid))){s.status='cancelled';s.decidedTs=Date.now();svSwaps();await syncSwaps();showToast('你已不再持有该班次，代提交已作废');renderEmp();return}
   s.status='pending';s.proxyTs=0;svSwaps();await syncSwaps();
   logEvent('确认代提交',`${selectedMember.name} 确认了代提交的换班：${s.date} ${shiftNameOf(s.sid)} → ${s.toName}`);
   showToast('已确认，换班请求已发送给对方');renderEmp();
@@ -5806,7 +6237,7 @@ async function clearRowShifts(mid,wsStr,total){
   let ok=0,fail=0;
   for(const d of days){
     const dStr=ymd(d);
-    const cur=(picks[dStr]||{})[mid]||[];
+    const cur=(picks[dStr]||{})[String(mid)]||[];
     if(!cur.length)continue;
     const r=await atomicSetPick(dStr,mid,[]);
     if(r)ok+=cur.length;else fail++;
@@ -5825,7 +6256,7 @@ function updateBulkClearInfo(){
   const dStr=dIn.value;const mid=+mSel.value;
   const m=TEAM.find(x=>x.id===mid);
   // 只看 picks 表真实数据（与"清空"按钮操作的对象一致），不回退旧版 shiftIds，避免"显示有班但清不掉"
-  const n=m?(((picks[dStr]||{})[m.id])||[]).length:0;
+  const n=m?(((picks[dStr]||{})[String(m.id)])||[]).length:0;
   info.textContent=m?(n?`· 当前已选 ${n} 个班次`:'· 当天暂无班次'):'· 请选择小二';
 }
 async function bulkClearByDateMember(){
@@ -5835,7 +6266,7 @@ async function bulkClearByDateMember(){
   const m=TEAM.find(x=>x.id===mid);
   if(!m){showToast('请先选择小二');return}
   if(!dStr){showToast('请先选择日期');return}
-  const cur=(picks[dStr]||{})[mid]||[];
+  const cur=(picks[dStr]||{})[String(mid)]||[];
   if(!cur.length){showToast(`${m.name} 在 ${dStr} 没有班次，无需清空`);return}
   if(!confirm(`确认清空「${m.name}」在 ${dStr} 的全部 ${cur.length} 个班次？`))return;
   const ok=await atomicSetPick(dStr,mid,[]);
@@ -5865,24 +6296,51 @@ function saveResetHour(){
 }
 
 async function resetAllBindings(){
-  if(!confirm('确定重置所有账号的设备绑定？重置后所有设备上的该账号都会强制下线并需重新验证密码。'))return;
+  if(!confirm('确定重置所有账号的设备绑定？重置后所有设备上的该账号都会强制下线并需重新验证密码。'))return false;
   const reason=prompt('请填写重置原因（可选，将告知所有被重置的员工）：')||'';
+  const forceIds=new Set(TEAM.map(m=>String(m.id)));
   if(fbReady){
     try{
-      const {data:rows}=await supa.from('claims').select('*');
-      for(const r of(rows||[])){await supa.from('claims').delete().eq('id',r.id)}
-    }catch(e){showToast('清除Supabase绑定失败：'+e.message)}
+      const {data:rows,error:readError}=await supa.from('claims').select('*');
+      if(readError)throw readError;
+      const targetIds=(rows||[]).map(r=>String(r.id));
+      targetIds.forEach(id=>forceIds.add(id));
+      const {data,error}=await supa.rpc('claims_unbind_atomic',{
+        p_target_ids:targetIds,
+        p_force_ids:[...forceIds],
+        p_reason:reason
+      });
+      if(error||!data||typeof data!=='object')throw error||new Error('全部解绑事务未返回有效结果');
+      forceout=data;
+    }catch(e){
+      console.warn('reset bindings transaction error:',e);
+      renderAll();showToast(`重置未完全成功：${e.message||'设备绑定事务失败'}，请检查网络后重试`);
+      return false;
+    }
+  }else{
+    Object.values(claims).forEach(r=>{if(r?.id!=null)forceIds.add(String(r.id))});
+    const ts=Date.now(),nextForceout={...forceout};
+    forceIds.forEach(id=>{nextForceout[id]={ts,reason}});
+    forceout=nextForceout;
   }
-  // 给每个工号写 forceout 记录（含原因），让所有设备轮询/订阅时自动下线
-  const ts=Date.now();
-  TEAM.forEach(m=>{forceout[m.id]={ts,reason}});
   sv('cfo6',forceout);
-  if(fbReady){try{await supa.from('config').upsert({id:'forceout',data:forceout,updated_at:Date.now()},{onConflict:'id'})}catch(e){}}
+  claims={};
   localStorage.removeItem('cb6');localStorage.removeItem('cb6exp');localStorage.removeItem('cb6auth');localStorage.removeItem('cb6authTs');
   selectedMember=null;stopReminderTimer();
   logEvent('解绑',`管理员重置了所有账号的设备绑定${reason?' · 原因：'+reason:''}`);
   renderAll();showToast('所有绑定已重置');
+  return true;
 }
+
+function findClaimForMember(rows,member){
+  if(!member)return null;
+  const list=(Array.isArray(rows)?rows:Object.values(rows||{})).filter(c=>c&&!isClaimExpired(c));
+  const mid=String(member.id),name=String(member.name);
+  return list.find(c=>String(c.id)===mid&&(!c.by_name||String(c.by_name)===name))
+    ||list.find(c=>String(c.by_name||c.by||'')===name)
+    ||null;
+}
+function claimForMember(member){return findClaimForMember(claims,member)}
 
 function renderBindingStatus(){
   const el=document.getElementById('bindingStatus');
@@ -5894,9 +6352,10 @@ function renderBindingStatus(){
   if(activeCount>0){
     let html=`<b>当前 ${activeCount} 个账号被占用：</b><br>`;
     Object.entries(claims).forEach(([id,c])=>{
-      const m=TEAM.find(x=>x.id===+id);
-      const exp=(c.expires_at||c.expiresAt)?new Date(c.expires_at||c.expiresAt).toLocaleString('zh-CN',{month:'numeric',day:'numeric',hour:'2-digit',minute:'2-digit'}):'无过期时间';
-      html+=`<span style="display:inline-block;margin:2px 4px;padding:1px 6px;background:var(--surface);border-radius:4px">${esc(m?.name||id)} · ${esc(c.by_name||c.by||'?')} · ${exp}</span>`;
+      const claimName=String(c.by_name||c.by||'');
+      const m=TEAM.find(x=>String(x.name)===claimName)||TEAM.find(x=>String(x.id)===String(id));
+      const exp=(c.expires_at||c.expiresAt)?new Date(c.expires_at||c.expiresAt).toLocaleString('zh-CN',{month:'numeric',day:'2-digit',hour:'2-digit',minute:'2-digit'}):'无过期时间';
+      html+=`<span style="display:inline-block;margin:2px 4px;padding:1px 6px;background:var(--surface);border-radius:4px">${esc(m?.name||claimName||id)} · ${exp}</span>`;
     });
     el.innerHTML=html;
   }else{
@@ -6060,7 +6519,11 @@ async function doLogin(){
   // ① 尝试服务端 admin_verify RPC（双轨：仅在 fbReady 且未被标记为"不支持"时尝试）
   if(fbReady&&localStorage.getItem(CS6_SRV_FLAG)!=='0'){
     try{
-      const {data:rpcResult,error:rpcErr}=await supa.rpc('admin_verify',inputHash);
+      // v2026.09.04: 添加 10s 超时保护，防止登录卡死
+      const {data:rpcResult,error:rpcErr}=await Promise.race([
+        supa.rpc('admin_verify',inputHash),
+        new Promise((_, reject) => setTimeout(() => reject(new Error('验证超时')), 10000))
+      ]);
       if(rpcErr){
         // 函数不存在（SQL 尚未执行）→ 标记降级，后续不再尝试
         const em=String(rpcErr.message||rpcErr||'');
@@ -6140,13 +6603,13 @@ async function adminClearAll(){
   if(fbReady){
     try{
       const {data:prows}=await supa.from('punches').select('id');
-      const pdels=await Promise.all((prows||[]).map(r=>supa.from('punches').delete().eq('id',r.id)));
+      const pdels=await Promise.all((prows||[]).map(r=>supa.from('punches').eq('id',String(r.id)).delete()));
       cloudFails+=pdels.filter(x=>x.error).length;
       const {data:crows}=await supa.from('claims').select('id');
-      const cdels=await Promise.all((crows||[]).map(r=>supa.from('claims').delete().eq('id',r.id)));
+      const cdels=await Promise.all((crows||[]).map(r=>supa.from('claims').eq('id',String(r.id)).delete()));
       cloudFails+=cdels.filter(x=>x.error).length;
       const configIds=['shifts','team','picks','selcfg','slotcap','swaps','forceout','makeups','loccfg'];
-      const cfgDels=await Promise.all(configIds.map(cid=>supa.from('config').delete().eq('id',cid)));
+      const cfgDels=await Promise.all(configIds.map(cid=>supa.from('config').eq('id',cid).delete()));
       cloudFails+=cfgDels.filter(x=>x.error).length;
     }catch(e){cloudFails++;console.warn('clear cloud data error:',e)}
   }
@@ -6433,21 +6896,26 @@ function renderMembers(){
     </div>
   </div>`;
   h+=`<div class="sec-t" style="margin-bottom:6px">共${TEAM.length}人</div>`;
-  TEAM.forEach(m=>{const c=clr(m.id);const claimed=fbReady&&claims[m.id];const locOn=!!(locCfg.members&&locCfg.members[m.id]);h+=`<div class="rc"><div class="rc-info"><div style="width:28px;height:28px;border-radius:50%;background:${c.bg};color:${c.fg};display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:600">${m.name[0]}</div><div><div class="rc-name">${esc(m.name)}${claimed?` <span style="font-size:10px;color:var(--success);background:var(--success-soft);padding:0 5px;border-radius:50px;margin-left:4px">● ${esc(claims[m.id]?.by_name||claims[m.id]?.by||'在线')}</span>`:''}</div><div class="rc-desc">${esc(m.dept)}</div></div></div><div class="rc-actions"><span style="font-size:10px;color:var(--muted)">📍</span><div class="toggle${locOn?' on':''}" onclick="toggleLocMember(${m.id})" title="${locOn?'首卡定位：已开启':'首卡定位：未开启'}"></div>${claimed?`<button class="r-btn" style="color:var(--warning)" onclick="forceUnclaim(${m.id})">强制下线</button>`:''}<button class="r-btn" onclick="showMemberForm(${m.id})">编辑</button><button class="r-btn" style="color:var(--danger)" onclick="delMember(${m.id})">删除</button></div></div>`});
+  TEAM.forEach(m=>{
+    const c=clr(m.id),claim=fbReady?claimForMember(m):null,locOn=!!(locCfg.members&&locCfg.members[m.id]);
+    h+=`<div class="rc"><div class="rc-info"><div style="width:28px;height:28px;border-radius:50%;background:${c.bg};color:${c.fg};display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:600">${m.name[0]}</div><div><div class="rc-name">${esc(m.name)}${claim?` <span style="font-size:10px;color:var(--success);background:var(--success-soft);padding:0 5px;border-radius:50px;margin-left:4px">● 已绑定</span>`:' <span style="font-size:10px;color:var(--muted-light);margin-left:4px">未绑定</span>'}</div><div class="rc-desc">${esc(m.dept)}</div></div></div><div class="rc-actions"><span style="font-size:10px;color:var(--muted)">📍</span><div class="toggle${locOn?' on':''}" onclick="toggleLocMember(${m.id})" title="${locOn?'首卡定位：已开启':'首卡定位：未开启'}"></div><button class="r-btn" style="color:var(--warning)" onclick="forceUnclaim(${m.id})">设备解绑</button><button class="r-btn" onclick="showMemberForm(${m.id})">编辑</button><button class="r-btn" style="color:var(--danger)" onclick="delMember(${m.id})">删除</button></div></div>`;
+  });
   el.innerHTML=h;
 }
 // 首卡定位灰度开关操作：本地持久化 + 云端同步 + 操作留痕
 function _applyLocCfg(action,detail){sv('cloccfg6',locCfg);syncLocCfg();logEvent('定位设置',action+(detail?' · '+detail:''));renderMembers()}
 function toggleLocMaster(){locCfg={on:!locCfg.on,members:locCfg.members||{}};_applyLocCfg(locCfg.on?'开启首卡定位总开关':'关闭首卡定位总开关')}
-function toggleLocMember(mid){const cur=!!(locCfg.members&&locCfg.members[mid]);locCfg={on:!!locCfg.on,members:Object.assign({},locCfg.members||{},{[mid]:!cur})};_applyLocCfg((!cur?'开启':'关闭')+'成员首卡定位',memberNameOf(mid))}
+function toggleLocMember(mid){const cur=!!(locCfg.members&&locCfg.members[String(mid)]);locCfg={on:!!locCfg.on,members:Object.assign({},locCfg.members||{},{[String(mid)]:!cur})};_applyLocCfg((!cur?'开启':'关闭')+'成员首卡定位',memberNameOf(mid))}
 function locSetAll(v){const m={};if(v)TEAM.forEach(x=>{m[x.id]=true});locCfg={on:!!locCfg.on,members:m};_applyLocCfg(v?'全部成员开启首卡定位':'全部成员关闭首卡定位')}
 function delMember(id){const m=TEAM.find(x=>x.id===id);if(!m)return;if(!confirm('删除？'))return;TEAM=TEAM.filter(x=>x.id!==id);sv('ct6',TEAM);syncToFB();logEvent('成员变更',`删除成员：${m.name}（${m.dept||''}）`);renderAll()}
 async function forceUnclaim(mid){
-  const reason=prompt(`强制下线成员「${memberNameOf(mid)}」？请填写原因（可选，将告知对方）：`);
+  const reason=prompt(`设备解绑成员「${memberNameOf(mid)}」？该账号当前设备会被强制下线，并可在其他设备重新登录。请填写原因（可选）：`);
   if(reason===null)return;
-  await unclaimAccount(mid,reason.trim());
-  logEvent('解绑',`管理员强制下线成员：${memberNameOf(mid)}${reason?' · 原因：'+reason:''}`);
-  showToast('已强制下线');
+  const ok=await unclaimAccount(mid,reason.trim());
+  renderMembers();renderBindingStatus();
+  if(!ok){showToast('设备解绑未完全成功，请检查网络后重试');return}
+  logEvent('解绑',`管理员设备解绑成员：${memberNameOf(mid)}${reason?' · 原因：'+reason:''}`);
+  showToast('设备已解绑，可重新登录');
 }
 
 let editingId=null;
@@ -6461,8 +6929,9 @@ function refreshMfDateBlock(){
   const label=`${dObj.getMonth()+1}/${dObj.getDate()} 周${WD_NAMES[dObj.getDay()]}${mfDateOffset===0?' · 今天':''}`;
   el.innerHTML=`<div class="week-switch" style="max-width:420px"><button onclick="stepMfDate(-1)">‹ 上一天</button><button class="active" style="flex:1.6">${label}</button><button onclick="stepMfDate(1)">下一天 ›</button>${mfDateOffset!==0?`<button onclick="resetMfDate()">回今天</button>`:''}</div>`;
   const en=enabledShiftsSorted();
-  const saved=picks[ds]&&Array.isArray(picks[ds][editingId])?picks[ds][editingId]:[];
-  let h='';en.forEach(s=>{const on=saved.includes(s.id);h+=`<div class="shift-chk${on?' on':''}" onclick="this.classList.toggle('on')" data-sid="${s.id}">${esc(s.name)}</div>`});
+  const mid=String(editingId);
+  const saved=picks[ds]&&Array.isArray(picks[ds][mid])?picks[ds][mid]:[];
+  let h='';en.forEach(s=>{const on=saved.includes(Number(s.id));h+=`<div class="shift-chk${on?' on':''}" onclick="this.classList.toggle('on')" data-sid="${s.id}">${esc(s.name)}</div>`});
   document.getElementById('mfDateBlock').innerHTML=h;
 }
 function showMemberForm(id){
@@ -6500,18 +6969,59 @@ function saveMemberForm(){
   sv('ct6',TEAM);syncToFB();logEvent('成员变更',`${editingId?'编辑':'新增'}成员：${n}（${d}）`);document.getElementById('memberForm').innerHTML='';editingId=null;renderAll();showToast('已保存');
 }
 
+function stabilizeImportedShifts(rawShifts){
+  const existing=normalizeShiftsData(state.shifts),used=new Set();
+  // 新时段使用时间单调 ID，绝不复用已删除时段可能仍被历史 picks 引用的旧 ID。
+  let nextId=Math.max(Date.now(),...existing.map(s=>Number(s.id)+1).filter(Number.isFinite));
+  return normalizeShiftsData(rawShifts).map(sh=>{
+    const sameTime=existing.find(old=>!used.has(String(old.id))&&old.start===sh.start&&old.end===sh.end);
+    const id=sameTime?Number(sameTime.id):nextId++;
+    used.add(String(id));
+    return{...sh,id};
+  });
+}
+function createMemberIdAllocator(team=TEAM){
+  const used=new Set((team||[]).map(m=>String(m.id)));let nextId=Date.now();
+  return()=>{while(used.has(String(nextId)))nextId++;const id=nextId++;used.add(String(id));return id};
+}
+async function persistImportedDailyPicks(dateStr,members){
+  const imported={};
+  (members||[]).forEach(m=>{setMemberPick(dateStr,m.id,m.shiftIds||[]);imported[String(m.id)]=(m.shiftIds||[]).slice()});
+  sv('cp6',picks);picksLocalVer=Date.now();
+  if(!fbReady)return true;
+  try{
+    const {data,error}=await supa.rpc('picks_import_day',{p_date:dateStr,p_members:imported});
+    if(error)throw error;
+    if(data&&typeof data==='object'){picks=normalizePicksData(data);sv('cp6',picks);_invalidateMonthCache()}
+    if(!await pullPicksSelCfg(true))throw new Error('导入后云端校验失败');
+    return true;
+  }catch(e){
+    console.warn('imported picks sync error:',e);
+    await pullPicksSelCfg(true).catch(()=>{});
+    return false;
+  }
+}
+function shiftIdsForHours(hours){
+  return[...new Set((hours||[]).map(hour=>{
+    const hh=String(Number(hour)).padStart(2,'0')+':00';
+    const shift=state.shifts.find(s=>s.start===hh);
+    return shift?Number(shift.id):NaN;
+  }).filter(Number.isFinite))].sort((a,b)=>a-b);
+}
+
 function handleFile(e){
   const f=e.target.files[0];if(!f)return;const r=new FileReader();
-  r.onload=ev=>{try{
+  r.onload=async ev=>{try{
     const wb=XLSX.read(new Uint8Array(ev.target.result),{type:'array'});
     // Auto-detect DingTalk "选班表" format
-    if(isDingTalkFormat(wb)){parseDingTalkSchedule(wb);return}
+    if(isDingTalkFormat(wb)){await parseDingTalkSchedule(wb);return}
     const cl=x=>{if(typeof x==='number'){const d=XLSX.SSF.parse_date_code(x);if(d)return`${String(d.H||0).padStart(2,'0')}:${String(d.m||0).padStart(2,'0')}`}return String(x).substring(0,5)};
     // Parse shifts from first sheet
     const json=XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]],{defval:''});
-    const shifts=[];
-    json.forEach((row,i)=>{const keys=Object.keys(row);let n='',s='',e='',t=5;keys.forEach(k=>{const v=String(row[k]).trim(),kl=k.toLowerCase();if(kl.includes('名称')||kl.includes('班次')||(!n&&keys.indexOf(k)===0))n=v;if(kl.includes('开始')||kl.includes('start'))s=v;if(kl.includes('结束')||kl.includes('end'))e=v;if(kl.includes('容差')||kl.includes('分钟'))t=parseInt(v)||5});if(n&&s&&e){shifts.push({id:Date.now()+i,name:n,start:cl(s),end:cl(e),tolerance:t,enabled:true,cross:toM(cl(e))<=toM(cl(s))})}});
+    let shifts=[];
+    json.forEach((row,i)=>{const keys=Object.keys(row);let n='',s='',e='',t=5;keys.forEach(k=>{const v=String(row[k]).trim(),kl=k.toLowerCase();if(kl.includes('名称')||kl.includes('班次')||(!n&&keys.indexOf(k)===0))n=v;if(kl.includes('开始')||kl.includes('start'))s=v;if(kl.includes('结束')||kl.includes('end'))e=v;if(kl.includes('容差')||kl.includes('分钟'))t=parseInt(v)||5});if(n&&s&&e){shifts.push({id:i+1,name:n,start:cl(s),end:cl(e),tolerance:t,enabled:true,cross:toM(cl(e))<=toM(cl(s))})}});
     if(!shifts.length){showToast('未识别班次数据');return}
+    shifts=stabilizeImportedShifts(shifts);
     // Check for assignment sheet (second sheet or sheet named 排班)
     let assignments=null;
     const assignSheet=wb.SheetNames.find(n=>n.includes('排班'))||wb.SheetNames[1];
@@ -6533,24 +7043,35 @@ function handleFile(e){
   }catch(err){showToast('解析失败：'+err.message)}};
   r.readAsArrayBuffer(f);e.target.value='';
 }
-function confirmImport(){
+async function confirmImport(){
   if(!pend)return;
   const{shifts,assignments}=pend;
-  // Update shifts
+  // Update shifts while preserving IDs for equivalent time slots.
   upd(s=>({...s,shifts}));
-  // Update member assignments if present
+  // Assignment sheets have no date field, so they update today's actual picks.
   if(assignments?.length){
+    const allocateMemberId=createMemberIdAllocator(),importedMembers=[];
     assignments.forEach(a=>{
       const sids=shifts.filter(sh=>a.shiftNames.some(n=>sh.name.includes(n)||n.includes(sh.name)||sh.name===n)).map(sh=>sh.id);
       const existing=TEAM.find(m=>m.name===a.name);
-      if(existing){TEAM=TEAM.map(m=>m.name===a.name?{...m,dept:a.dept,shiftIds:sids}:m)}
-      else{TEAM.push({id:Date.now()+Math.random()*1000,name:a.name,dept:a.dept,shiftIds:sids})}
+      if(existing){
+        const updated={...existing,dept:a.dept,shiftIds:sids};
+        TEAM=TEAM.map(m=>m.name===a.name?updated:m);importedMembers.push(updated);
+      }else{
+        const added={id:allocateMemberId(),name:a.name,dept:a.dept,shiftIds:sids};
+        TEAM.push(added);importedMembers.push(added);
+      }
     });
     sv('ct6',TEAM);
+    if(!await syncToFB()){showToast('成员或班次同步失败，请检查网络后重试');renderAll();return}
+    const picksOk=await persistImportedDailyPicks(tdStr(),importedMembers);
+    if(!picksOk){showToast('成员和班次已保存，但今日排班同步失败，请重试');renderAll();return}
+  }else if(!await syncToFB()){
+    showToast('班次同步失败，请检查网络后重试');renderAll();return;
   }
-  syncToFB();pend=null;document.getElementById('importPreview').innerHTML='';
-  logEvent('导入',`导入 ${shifts.length} 个班次${assignments?` + ${assignments.length} 人排班`:''}`);
-  showToast('导入成功'+(assignments?` · ${shifts.length}个班次 + ${assignments.length}人排班`:` · ${shifts.length}个班次`));
+  pend=null;document.getElementById('importPreview').innerHTML='';
+  logEvent('导入',`导入 ${shifts.length} 个班次${assignments?` + ${assignments.length} 人排班（${tdStr()}）`:''}`);
+  showToast('导入成功'+(assignments?` · ${shifts.length}个班次 + ${assignments.length}人今日排班`:` · ${shifts.length}个班次`));
   renderAll();
 }
 function downloadTemplate(){
@@ -6612,7 +7133,8 @@ async function fetchScheduleNow(){
     const resp=await fetch(url);
     if(!resp.ok)throw new Error('HTTP '+resp.status);
     const buf=await resp.arrayBuffer();
-    parseScheduleBuffer(buf);
+    const imported=await parseScheduleBuffer(buf);
+    if(imported===false)throw new Error('排班写入失败');
     const now=new Date();
     updateSyncStatus(`上次同步：${String(now.getHours()).padStart(2,'0')}:${String(now.getMinutes()).padStart(2,'0')}:${String(now.getSeconds()).padStart(2,'0')} · 成功`);
   }catch(e){
@@ -6620,25 +7142,36 @@ async function fetchScheduleNow(){
   }
 }
 
-function parseScheduleBuffer(buf){
+async function parseScheduleBuffer(buf){
   const wb=XLSX.read(new Uint8Array(buf),{type:'array'});
   // Auto-detect DingTalk "选班表" format
-  if(isDingTalkFormat(wb)){parseDingTalkSchedule(wb);return}
+  if(isDingTalkFormat(wb))return await parseDingTalkSchedule(wb);
   const cl=x=>{if(typeof x==='number'){const d=XLSX.SSF.parse_date_code(x);if(d)return`${String(d.H||0).padStart(2,'0')}:${String(d.m||0).padStart(2,'0')}`}return String(x).substring(0,5)};
   // Parse shifts
   const json=XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]],{defval:''});
-  const shifts=[];
-  json.forEach((row,i)=>{const keys=Object.keys(row);let n='',s='',e='',t=5;keys.forEach(k=>{const v=String(row[k]).trim(),kl=k.toLowerCase();if(kl.includes('名称')||kl.includes('班次')||(!n&&keys.indexOf(k)===0))n=v;if(kl.includes('开始')||kl.includes('start'))s=v;if(kl.includes('结束')||kl.includes('end'))e=v;if(kl.includes('容差')||kl.includes('分钟'))t=parseInt(v)||5});if(n&&s&&e)shifts.push({id:Date.now()+i,name:n,start:cl(s),end:cl(e),tolerance:t,enabled:true,cross:toM(cl(e))<=toM(cl(s))})});
-  if(!shifts.length){updateSyncStatus('未识别班次数据');return}
-  // Update shifts
-  state.shifts=shifts;sv('cv6',state);
+  let shifts=[];
+  json.forEach((row,i)=>{const keys=Object.keys(row);let n='',s='',e='',t=5;keys.forEach(k=>{const v=String(row[k]).trim(),kl=k.toLowerCase();if(kl.includes('名称')||kl.includes('班次')||(!n&&keys.indexOf(k)===0))n=v;if(kl.includes('开始')||kl.includes('start'))s=v;if(kl.includes('结束')||kl.includes('end'))e=v;if(kl.includes('容差')||kl.includes('分钟'))t=parseInt(v)||5});if(n&&s&&e)shifts.push({id:i+1,name:n,start:cl(s),end:cl(e),tolerance:t,enabled:true,cross:toM(cl(e))<=toM(cl(s))})});
+  if(!shifts.length){updateSyncStatus('未识别班次数据');return false}
+  // Update shifts without invalidating existing picks that reference equivalent slots.
+  shifts=stabilizeImportedShifts(shifts);state.shifts=shifts;sv('cv6',state);
   // Parse assignments if second sheet exists
   const assignSheet=wb.SheetNames.find(n=>n.includes('排班'))||wb.SheetNames[1];
+  let assignmentApplied=false;
   if(assignSheet&&wb.Sheets[assignSheet]){
     const aj=XLSX.utils.sheet_to_json(wb.Sheets[assignSheet],{defval:''});
-    if(aj.length){aj.forEach(row=>{const keys=Object.keys(row);let name='',dept='',shiftNames=[];keys.forEach(k=>{const v=String(row[k]).trim(),kl=k.toLowerCase();if(kl.includes('姓名')||kl.includes('名字')||kl.includes('成员')||(!name&&keys.indexOf(k)===0))name=v;else if(kl.includes('部门')||kl.includes('科室'))dept=v;else if(v)shiftNames.push(v)});if(name){const sids=shifts.filter(sh=>shiftNames.some(n=>sh.name.includes(n)||n.includes(sh.name))).map(sh=>sh.id);const existing=TEAM.find(m=>m.name===name);if(existing)TEAM=TEAM.map(m=>m.name===name?{...m,dept:dept||m.dept,shiftIds:sids}:m);else TEAM.push({id:Date.now()+Math.random()*1000,name,dept:dept||'未设置',shiftIds:sids})}});sv('ct6',TEAM)}
+    if(aj.length){
+      const allocateMemberId=createMemberIdAllocator(),importedMembers=[];
+      aj.forEach(row=>{const keys=Object.keys(row);let name='',dept='',shiftNames=[];keys.forEach(k=>{const v=String(row[k]).trim(),kl=k.toLowerCase();if(kl.includes('姓名')||kl.includes('名字')||kl.includes('成员')||(!name&&keys.indexOf(k)===0))name=v;else if(kl.includes('部门')||kl.includes('科室'))dept=v;else if(v)shiftNames.push(v)});if(name){const sids=shifts.filter(sh=>shiftNames.some(n=>sh.name.includes(n)||n.includes(sh.name))).map(sh=>sh.id);const existing=TEAM.find(m=>m.name===name);if(existing){const updated={...existing,dept:dept||existing.dept,shiftIds:sids};TEAM=TEAM.map(m=>m.name===name?updated:m);importedMembers.push(updated)}else{const added={id:allocateMemberId(),name,dept:dept||'未设置',shiftIds:sids};TEAM.push(added);importedMembers.push(added)}}});
+      sv('ct6',TEAM);
+      if(!await syncToFB()){renderAll();return false}
+      if(!await persistImportedDailyPicks(tdStr(),importedMembers)){renderAll();return false}
+      assignmentApplied=true;
+    }
   }
-  syncToFB();renderAll();
+  if(!assignmentApplied&&!await syncToFB()){
+    renderAll();return false;
+  }
+  renderAll();return true;
 }
 
 // ===== DINGTALK SCHEDULE PARSER =====
@@ -6648,10 +7181,10 @@ function isDingTalkFormat(wb){
   return /\d+月\d+日/.test(name)||wb.SheetNames.some(n=>n.includes('选班'));
 }
 
-function parseDingTalkSchedule(wb){
+async function parseDingTalkSchedule(wb){
   // Find the latest sheet (sheets are ordered newest-first, so pick the first date-matching one)
   const dateSheets=wb.SheetNames.filter(n=>/\d+月\d+日/.test(n));
-  if(!dateSheets.length){showToast('未找到包含日期的工作表');return}
+  if(!dateSheets.length){showToast('未找到包含日期的工作表');return false}
   const ws=wb.Sheets[dateSheets[0]];
   const today=new Date();const todayM=today.getMonth()+1,todayD=today.getDate();
 
@@ -6662,7 +7195,7 @@ function parseDingTalkSchedule(wb){
   for(let c=2;c<=8;c++){const v=ws[XLSX.utils.encode_cell({r:0,c:c-1})];if(v){const vStr=typeof v.v==='object'?JSON.stringify(v.v):String(v.v||'');if(vStr.includes(`${todayM}月${todayD}日`)){todayColLeft=c;break}}}
   for(let c=10;c<=16;c++){const v=ws[XLSX.utils.encode_cell({r:0,c:c-1})];if(v){const vStr=typeof v.v==='object'?JSON.stringify(v.v):String(v.v||'');if(vStr.includes(`${todayM}月${todayD}日`)){todayColMid=c;break}}}
   for(let c=18;c<=24;c++){const v=ws[XLSX.utils.encode_cell({r:0,c:c-1})];if(v){const vStr=typeof v.v==='object'?JSON.stringify(v.v):String(v.v||'');if(vStr.includes(`${todayM}月${todayD}日`)){todayColRight=c;break}}}
-  if(todayColLeft<0&&todayColMid<0&&todayColRight<0){showToast(`未找到${todayM}月${todayD}日的列`);return}
+  if(todayColLeft<0&&todayColMid<0&&todayColRight<0){showToast(`未找到${todayM}月${todayD}日的列`);return false}
 
   // Parse shift time slots from column A (morning), I (afternoon), Q (night)
   const shiftSlots=[]; // {startRow, hour, col}
@@ -6702,34 +7235,32 @@ function parseDingTalkSchedule(wb){
   parseShiftColumn(9,todayColMid,'afternoon'); // I=shifts, J-P=afternoon dates
   parseShiftColumn(17,todayColRight,'night');  // Q=shifts, R-X=night dates
 
-  if(!shiftSlots.length){showToast(`未找到${todayM}月${todayD}日的排班数据`);return}
+  if(!shiftSlots.length){showToast(`未找到${todayM}月${todayD}日的排班数据`);return false}
 
-  // Build new TEAM from parsed data
-  const newTeam=[];
-  let nextId=1;
+  // Build the imported team while preserving every existing member ID.
+  const newTeam=[],allocateMemberId=createMemberIdAllocator();
   shiftSlots.sort((a,b)=>a.eid.localeCompare(b.eid)).forEach(s=>{
-    const hours=Array.from(s.hours).sort((a,b)=>a-b);
-    // Map hours to shift IDs (app uses: 7=id7,...,23=id23,0=id24,1=id25)
-    const sids=hours.map(h=>h>=7?h:(h===0?24:h===1?25:h));
-    // Check if member already exists
+    const sids=shiftIdsForHours(Array.from(s.hours).sort((a,b)=>a-b));
     const existing=TEAM.find(m=>m.name===s.eid);
     if(existing){newTeam.push({...existing,shiftIds:sids})}
-    else{newTeam.push({id:nextId,name:s.eid,dept:'',shiftIds:sids});nextId++}
+    else{newTeam.push({id:allocateMemberId(),name:s.eid,dept:'',shiftIds:sids})}
   });
-  // Add existing members not in the schedule (no shifts)
+  // Keep existing members absent from today's sheet, but clear only today's picks for them.
   TEAM.forEach(m=>{if(!newTeam.find(n=>n.name===m.name)){newTeam.push({...m,shiftIds:[]})}});
-  // Fix IDs
-  newTeam.forEach((m,i)=>m.id=i+1);
   TEAM=newTeam;
-  sv('ct6',TEAM);syncToFB();renderAll();
+  sv('ct6',TEAM);
+  if(!await syncToFB()){renderAll();showToast('成员同步失败，请检查网络后重试');return false}
+  if(!await persistImportedDailyPicks(tdStr(),newTeam)){renderAll();showToast('成员已保存，但钉钉排班写入失败，请重试');return false}
+  renderAll();
   showToast(`钉钉排班同步成功 · ${dateSheets[0]} · ${todayM}月${todayD}日 · ${newTeam.length}人`);
+  return true;
 }
 
 function handleDingTalkFile(e){
   const f=e.target.files[0];if(!f)return;const r=new FileReader();
-  r.onload=ev=>{try{
+  r.onload=async ev=>{try{
     const wb=XLSX.read(new Uint8Array(ev.target.result),{type:'array'});
-    if(isDingTalkFormat(wb)){parseDingTalkSchedule(wb)}
+    if(isDingTalkFormat(wb)){await parseDingTalkSchedule(wb)}
     else{handleFile(e)}
   }catch(err){showToast('解析失败：'+err.message)}};
   r.readAsArrayBuffer(f);e.target.value='';
@@ -6743,7 +7274,7 @@ function handleDingTalkSync(e){
   const syncTimeEl=document.getElementById('dtLastSync');
   badge.textContent='同步中...';badge.style.background='var(--warning-soft)';badge.style.color='var(--warning)';
   const r=new FileReader();
-  r.onload=ev=>{try{
+  r.onload=async ev=>{try{
     const wb=XLSX.read(new Uint8Array(ev.target.result),{type:'array'});
     if(!isDingTalkFormat(wb)){badge.textContent='格式错误';badge.style.background='var(--danger-soft)';badge.style.color='var(--danger)';showToast('不是钉钉选班表格式');return}
     // Save old team for comparison
@@ -6762,17 +7293,15 @@ function handleDingTalkSync(e){
     function psc(sc,dc){for(let r=1;r<=50;r++){const cell=ws[XLSX.utils.encode_cell({r,c:sc-1})];if(!cell||!cell.v)continue;const v=String(cell.v),m=v.match(/(\d{2}):(\d{2})~(\d{2}):(\d{2})/);if(m){const hour=parseInt(m[1]);let ae=r+1;for(let rr=r+1;rr<=50;rr++){const cc=ws[XLSX.utils.encode_cell({r:rr,c:sc-1})];if(cc&&cc.v&&String(cc.v).match(/\d{2}:\d{2}~\d{2}:\d{2}/)){ae=rr;break}if(rr===50)ae=51}if(dc>0){for(let er=r;er<ae;er++){const ec=ws[XLSX.utils.encode_cell({r:er,c:dc-1})];if(ec&&typeof ec.v==='number'&&ec.v>1000){const eid=String(Math.round(ec.v));let ex=slots.find(s=>s.eid===eid);if(!ex){ex={eid,hours:new Set()};slots.push(ex)}ex.hours.add(hour)}}}}}}
     psc(1,tCL);psc(9,tCM);psc(17,tCR);
     if(!slots.length){badge.textContent='无数据';showToast('无排班数据');return}
-    // Build new team
-    const newTeam=[];let nid=1;
+    // Build new team without renumbering existing accounts or invalidating picks/claims.
+    const newTeam=[],allocateMemberId=createMemberIdAllocator();
     slots.sort((a,b)=>a.eid.localeCompare(b.eid)).forEach(s=>{
-      const hours=Array.from(s.hours).sort((a,b)=>a-b);
-      const sids=hours.map(h=>h>=7?h:(h===0?24:h===1?25:h));
+      const sids=shiftIdsForHours(Array.from(s.hours).sort((a,b)=>a-b));
       const existing=TEAM.find(m=>m.name===s.eid);
       if(existing)newTeam.push({...existing,shiftIds:sids});
-      else newTeam.push({id:nid++,name:s.eid,dept:'',shiftIds:sids});
+      else newTeam.push({id:allocateMemberId(),name:s.eid,dept:'',shiftIds:sids});
     });
     TEAM.forEach(m=>{if(!newTeam.find(n=>n.name===m.name))newTeam.push({...m,shiftIds:[]})});
-    newTeam.forEach((m,i)=>m.id=i+1);
     // Compare changes
     const changes=[];
     newTeam.forEach(nm=>{
@@ -6791,8 +7320,17 @@ function handleDingTalkSync(e){
       }
     });
     oldTeam.forEach(om=>{if(!newTeam.find(n=>n.name===om.name)&&om.shiftIds?.length){changes.push({name:om.name,type:'remove',detail:'无排班'})}});
-    // Apply
-    TEAM=newTeam;sv('ct6',TEAM);syncToFB();renderAll();
+    // Apply both account metadata and today's authoritative picks.
+    TEAM=newTeam;sv('ct6',TEAM);
+    if(!await syncToFB()){
+      badge.textContent='成员同步失败';badge.style.background='var(--danger-soft)';badge.style.color='var(--danger)';
+      renderAll();showToast('成员同步失败，请检查网络后重试');return;
+    }
+    if(!await persistImportedDailyPicks(tdStr(),newTeam)){
+      badge.textContent='排班写入失败';badge.style.background='var(--danger-soft)';badge.style.color='var(--danger)';
+      renderAll();showToast('成员已保存，但钉钉排班写入失败，请重试');return;
+    }
+    renderAll();
     // Update UI
     const now=new Date();
     const timeStr=`${String(now.getHours()).padStart(2,'0')}:${String(now.getMinutes()).padStart(2,'0')}:${String(now.getSeconds()).padStart(2,'0')}`;

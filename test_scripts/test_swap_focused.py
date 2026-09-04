@@ -123,8 +123,8 @@ async def test_two_way_swap(page):
     assert len(swaps) == 1, f'expected 1 swap, got {len(swaps)}'
     s = swaps[0]
     assert s['status'] == 'pending'
-    assert s['fromId'] == 1
-    assert s['toId'] == 2
+    assert s['fromId'] == '1'
+    assert s['toId'] == '2'
     assert s['date'] == d1
     assert s['sid'] == 7
     assert s['exchange']['takeDate'] == d2
