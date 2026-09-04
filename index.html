@@ -762,14 +762,14 @@ class _FSQueryBuilder {
           q = q.where(this._inField, 'in', batch);
           if (this._orderField) q=q.orderBy(this._orderField, this._orderAsc?'asc':'desc');
           if (this._limitN) q=q.limit(this._limitN);
-          const snap = await q.get();
+          const snap = await Promise.race([q.get(), new Promise((_, reject) => setTimeout(() => reject(new Error('查询超时')), 15000))]);
           snap.forEach(doc => allRows.push(this._docToRow(doc)));
         }
         console.log(`[FS._exec] 结果: ${allRows.length} 条`);
       } else {
         const q = await this._buildQuery();
         console.log(`[FS._exec] 路径: 普通查询`);
-        const snap = await q.get();
+        const snap = await Promise.race([q.get(), new Promise((_, reject) => setTimeout(() => reject(new Error('查询超时')), 15000))]);
         snap.forEach(doc => allRows.push(this._docToRow(doc)));
         console.log(`[FS._exec] 结果: ${allRows.length} 条 (快照 ${snap.size} 条)`);
       }
@@ -851,7 +851,7 @@ class _FSQueryBuilder {
       } else {
         let q = this._fs.collection(this._col);
         filters.forEach(f => { q = q.where(f.field, '==', f.value); });
-        const snap = await q.get();
+        const snap = await Promise.race([q.get(), new Promise((_, reject) => setTimeout(() => reject(new Error('查询超时')), 15000))]);
         snap.forEach(doc => { batch.update(doc.ref, updateData); });
       }
       await batch.commit();
@@ -875,7 +875,7 @@ class _FSQueryBuilder {
         for (const f of this._filters) {
           if (f.type==='eq') q=q.where(f.field,'==',f.value);
         }
-        const snap = await q.get();
+        const snap = await Promise.race([q.get(), new Promise((_, reject) => setTimeout(() => reject(new Error('查询超时')), 15000))]);
         snap.forEach(doc => batch.delete(doc.ref));
       }
       await batch.commit();
