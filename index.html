@@ -1916,12 +1916,34 @@ async function atomicSetPick(dateStr,mid,sids){
   const arr=(sids||[]).slice().sort((a,b)=>a-b);
   if(!fbReady){setMemberPick(dateStr,mid,arr);sv('cp6',picks);picksLocalVer=Date.now();return true}
   const mySeq=picksOptSeq;
-  try{
-    const {data,error}=await supa.rpc('pick_set',{p_date:dateStr,p_mid:String(mid),p_sids:arr});
-    if(error){console.warn('pick_set error:',error);return false}
-    if(data&&typeof data==='object'&&picksOptSeq===mySeq){picks=data;sv('cp6',picks);picksLocalVer=Date.now();_invalidateMonthCache()}
-    return true;
-  }catch(e){console.warn('atomicSetPick error:',e);return false}
+  // v2026.09.04: 添加重试逻辑，解决 15 人并发选班时的事务冲突
+  const maxRetries = 3;
+  for (let attempt = 0; attempt < maxRetries; attempt++) {
+    try {
+      const {data,error}=await supa.rpc('pick_set',{p_date:dateStr,p_mid:String(mid),p_sids:arr});
+      if(error){
+        // 事务冲突时重试
+        if (error.message && /transaction|conflict/i.test(error.message) && attempt < maxRetries - 1) {
+          console.log(`pick_set 冲突，重试 ${attempt + 1}/${maxRetries}`);
+          await new Promise(r => setTimeout(r, 100 * (attempt + 1))); // 指数退避
+          continue;
+        }
+        console.warn('pick_set error:',error);
+        return false;
+      }
+      if(data&&typeof data==='object'&&picksOptSeq===mySeq){picks=data;sv('cp6',picks);picksLocalVer=Date.now();_invalidateMonthCache()}
+      return true;
+    } catch(e) {
+      if (attempt < maxRetries - 1) {
+        console.log(`pick_set 异常，重试 ${attempt + 1}/${maxRetries}:`, e.message);
+        await new Promise(r => setTimeout(r, 100 * (attempt + 1)));
+        continue;
+      }
+      console.warn('atomicSetPick error:',e);
+      return false;
+    }
+  }
+  return false;
 }
 // 增量原子写：只增/删单个班次，服务器端基于"最新"数据加行锁修改，
 // 彻底规避"客户端读到旧快照→整体覆盖→把别人/自己刚选的班次冲掉"的并发问题。
@@ -1934,15 +1956,35 @@ async function atomicAddPick(dateStr,mid,sid){
     setMemberPick(dateStr,mid,cur);sv('cp6',picks);picksLocalVer=Date.now();return true;
   }
   const mySeq=picksOptSeq;
-  try{
-    const {data,error}=await supa.rpc('pick_add',{p_date:dateStr,p_mid:String(mid),p_sid:sid});
-    if(error){
-      if(_isMissingFn(error)){const cur=((picks[dateStr]||{})[mid]||[]).slice();if(!cur.includes(sid))cur.push(sid);return await atomicSetPick(dateStr,mid,cur)}
-      console.warn('pick_add error:',error);return false;
+  // v2026.09.04: 添加重试逻辑
+  const maxRetries = 3;
+  for (let attempt = 0; attempt < maxRetries; attempt++) {
+    try {
+      const {data,error}=await supa.rpc('pick_add',{p_date:dateStr,p_mid:String(mid),p_sid:sid});
+      if(error){
+        if(_isMissingFn(error)){const cur=((picks[dateStr]||{})[mid]||[]).slice();if(!cur.includes(sid))cur.push(sid);return await atomicSetPick(dateStr,mid,cur)}
+        // 事务冲突时重试
+        if (error.message && /transaction|conflict/i.test(error.message) && attempt < maxRetries - 1) {
+          console.log(`pick_add 冲突，重试 ${attempt + 1}/${maxRetries}`);
+          await new Promise(r => setTimeout(r, 100 * (attempt + 1)));
+          continue;
+        }
+        console.warn('pick_add error:',error);
+        return false;
+      }
+      if(data&&typeof data==='object'&&picksOptSeq===mySeq){picks=data;sv('cp6',picks);picksLocalVer=Date.now();_invalidateMonthCache()}
+      return true;
+    } catch(e) {
+      if (attempt < maxRetries - 1) {
+        console.log(`pick_add 异常，重试 ${attempt + 1}/${maxRetries}:`, e.message);
+        await new Promise(r => setTimeout(r, 100 * (attempt + 1)));
+        continue;
+      }
+      console.warn('atomicAddPick error:',e);
+      return false;
     }
-    if(data&&typeof data==='object'&&picksOptSeq===mySeq){picks=data;sv('cp6',picks);picksLocalVer=Date.now();_invalidateMonthCache()}
-    return true;
-  }catch(e){console.warn('atomicAddPick error:',e);return false}
+  }
+  return false;
 }
 async function atomicRemovePick(dateStr,mid,sid){
   if(!fbReady){
@@ -3842,56 +3884,63 @@ async function reconcilePicks(){
   }
   return false;
 }
+// v2026.09.04: 选班忙状态，防止 15 人并发时重复点击
+let _pickBusy = false;
+
 async function togglePickSlot(dateStr,sid){
-  if(!dayEditable(dateStr)){
-    if(selCfg.lock)showToast('选班已锁定，无法修改');
-    else if(dateStr<tdStr())showToast('过去的日期无法选班');
-    else showToast('选班尚未开放');
-    return;
-  }
-  // Validate inputs
-  if(!isValidDate(dateStr)){logSecurityEvent('invalid_pick_date','Invalid date: '+dateStr);return}
-  if(!isValidShiftId(sid)){logSecurityEvent('invalid_pick_shift','Invalid shift: '+sid);return}
-  // Rate limit: max 10 picks per 10 seconds
-  if(!checkOpRate('pick')){return}
-  const admin=isAdminNow();
-  const cur=pickSel(dateStr).slice();const i=cur.indexOf(sid);
-  const isRemove=i>=0;
-  const dObj=parseYmd(dateStr);
-  const sh=state.shifts.find(s=>s.id===sid);
+  // 防止并发操作
+  if(_pickBusy){showToast('操作进行中，请稍候');return}
+  _pickBusy = true;
+  try {
+    if(!dayEditable(dateStr)){
+      if(selCfg.lock)showToast('选班已锁定，无法修改');
+      else if(dateStr<tdStr())showToast('过去的日期无法选班');
+      else showToast('选班尚未开放');
+      return;
+    }
+    // Validate inputs
+    if(!isValidDate(dateStr)){logSecurityEvent('invalid_pick_date','Invalid date: '+dateStr);return}
+    if(!isValidShiftId(sid)){logSecurityEvent('invalid_pick_shift','Invalid shift: '+sid);return}
+    // Rate limit: max 10 picks per 10 seconds
+    if(!checkOpRate('pick')){return}
+    const admin=isAdminNow();
+    const cur=pickSel(dateStr).slice();const i=cur.indexOf(sid);
+    const isRemove=i>=0;
+    const dObj=parseYmd(dateStr);
+    const sh=state.shifts.find(s=>s.id===sid);
 
-  if(isRemove){
-    // 员工不可取消已选班次，仅管理员可操作
-    if(!admin){showToast('已选班次不可取消，如需修改请联系管理员');return}
-    cur.splice(i,1);
-    // 乐观更新 + 增量原子删除（取消不涉及满员，无需服务器预检）
-    setMemberPick(dateStr,selectedMember.id,cur);sv('cp6',picks);picksLocalVer=Date.now();renderPickView();
-    const okR=await atomicRemovePick(dateStr,selectedMember.id,sid);
-    if(!okR){showToast('保存失败，已为你刷新最新数据，请重试');try{await pullPicksSelCfg()}catch(e){};renderPickView();return}
-    logEvent('保存选班',`${selectedMember.name} 取消了 ${dObj.getMonth()+1}/${dObj.getDate()} ${sh?sh.name:''}（当天 ${cur.length} 个时段）`);
-    return;
-  }
+    if(isRemove){
+      // 员工不可取消已选班次，仅管理员可操作
+      if(!admin){showToast('已选班次不可取消，如需修改请联系管理员');return}
+      cur.splice(i,1);
+      // 乐观更新 + 增量原子删除（取消不涉及满员，无需服务器预检）
+      setMemberPick(dateStr,selectedMember.id,cur);sv('cp6',picks);picksLocalVer=Date.now();renderPickView();
+      const okR=await atomicRemovePick(dateStr,selectedMember.id,sid);
+      if(!okR){showToast('保存失败，已为你刷新最新数据，请重试');try{await pullPicksSelCfg()}catch(e){};renderPickView();return}
+      logEvent('保存选班',`${selectedMember.name} 取消了 ${dObj.getMonth()+1}/${dObj.getDate()} ${sh?sh.name:''}（当天 ${cur.length} 个时段）`);
+      return;
+    }
 
-  // ===== 选班（新增）=====
-  // 每天最多 7 个（硬性上限，管理员同样受限）
-  if(cur.length>=MAX_PER_DAY){showToast(`每天最多选 ${MAX_PER_DAY} 个时段`);return}
-  // 整周最多 49 个（硬性上限，管理员同样受限）
-  if(draftWeekTotalExcept(dateStr)+cur.length>=MAX_PER_WEEK){showToast(`本周最多选 ${MAX_PER_WEEK} 个时段`);return}
-  // 乐观更新：点击后立即在界面上显示已选（即时反馈，避免延迟高时"点了没反应/以为没选上"），
-  // 并标记本地刚写入，防止在途快照在服务器返回前把它冲掉
-  setMemberPick(dateStr,selectedMember.id,[...new Set(cur.concat(sid))]);
-  sv('cp6',picks);picksLocalVer=Date.now();renderPickView();
-  // 满员校验 + 加班 在服务器端原子完成：先数人数→满员拒绝→不满才加，杜绝并发超员
-  const res=await atomicAddPickCap(dateStr,selectedMember.id,sid,admin);
-  if(res.ok===false){
-    if(res.reason==='full'||res.reason==='dayfull'){
-      // 服务器明确拒绝（满员/超每日上限，服务器没存）：回滚乐观更新
-      setMemberPick(dateStr,selectedMember.id,((picks[dateStr]||{})[selectedMember.id]||[]).filter(x=>x!==sid));
-      sv('cp6',picks);picksLocalVer=Date.now();renderPickView();
-      if(res.reason==='full'){showToast(`该时段已满员（${res.count}/${res.cap}），无法选择`)}
-      else{showToast(`每天最多选 ${res.max||MAX_PER_DAY} 个时段，当天已有 ${res.count} 个，无法再选`)}
-    }else{
-      // 网络错误：保留本地乐观更新，提示用户刷新确认
+    // ===== 选班（新增）=====
+    // 每天最多 7 个（硬性上限，管理员同样受限）
+    if(cur.length>=MAX_PER_DAY){showToast(`每天最多选 ${MAX_PER_DAY} 个时段`);return}
+    // 整周最多 49 个（硬性上限，管理员同样受限）
+    if(draftWeekTotalExcept(dateStr)+cur.length>=MAX_PER_WEEK){showToast(`本周最多选 ${MAX_PER_WEEK} 个时段`);return}
+    // 乐观更新：点击后立即在界面上显示已选（即时反馈，避免延迟高时"点了没反应/以为没选上"），
+    // 并标记本地刚写入，防止在途快照在服务器返回前把它冲掉
+    setMemberPick(dateStr,selectedMember.id,[...new Set(cur.concat(sid))]);
+    sv('cp6',picks);picksLocalVer=Date.now();renderPickView();
+    // 满员校验 + 加班 在服务器端原子完成：先数人数→满员拒绝→不满才加，杜绝并发超员
+    const res=await atomicAddPickCap(dateStr,selectedMember.id,sid,admin);
+    if(res.ok===false){
+      if(res.reason==='full'||res.reason==='dayfull'){
+        // 服务器明确拒绝（满员/超每日上限，服务器没存）：回滚乐观更新
+        setMemberPick(dateStr,selectedMember.id,((picks[dateStr]||{})[selectedMember.id]||[]).filter(x=>x!==sid));
+        sv('cp6',picks);picksLocalVer=Date.now();renderPickView();
+        if(res.reason==='full'){showToast(`该时段已满员（${res.count}/${res.cap}），无法选择`)}
+        else{showToast(`每天最多选 ${res.max||MAX_PER_DAY} 个时段，当天已有 ${res.count} 个，无法再选`)}
+      }else{
+        // 网络错误：保留本地乐观更新，提示用户刷新确认
       // 不调用 reconcilePicks()，避免"刚选上就被旧数据冲掉"
       showToast('网络不稳定，已暂时保存，请刷新页面确认');
     }
@@ -3900,6 +3949,9 @@ async function togglePickSlot(dateStr,sid){
   // [性能] 保存成功后不再重复渲染：乐观更新时已即时渲染了正确的选中状态。
   // 去掉这次多余的整格重建，避免快速连点时按钮被销毁重建导致点击落空（"选7个总有1-2个点不上"的元凶）
   logEvent('保存选班',`${selectedMember.name} 选择了 ${dObj.getMonth()+1}/${dObj.getDate()} ${sh?sh.name:''}（当天 ${pickSel(dateStr).length} 个时段）`);
+  } finally {
+    _pickBusy = false;
+  }
 }
 async function savePicks(){
   if(!pickDraft||!Object.keys(pickDraft).length)return;
