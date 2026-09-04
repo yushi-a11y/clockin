@@ -727,6 +727,17 @@ class _FSQueryBuilder {
     return null;
   }
 
+  // 关键配置文档优先从服务器读取，避免 Firestore 离线持久化返回旧缓存导致数据不一致。
+  async _cfgDocGet(docRef) {
+    if (this._col !== 'config') return docRef.get();
+    try {
+      return await docRef.get({ source: 'server' });
+    } catch (e) {
+      // 离线或请求失败时回退到本地缓存
+      return docRef.get({ source: 'cache' });
+    }
+  }
+
   async _exec() {
     try {
       let allRows = [];
@@ -740,7 +751,7 @@ class _FSQueryBuilder {
         // 直接按文档 ID 查找，避免 .where('id','==',...) 查不到迁移后无 id 字段的文档
         console.log(`[FS._exec] 路径: 按文档 ID 查找 (${idF.value})`);
         const doc = await Promise.race([
-          this._fs.collection(this._col).doc(idF.value).get(),
+          this._cfgDocGet(this._fs.collection(this._col).doc(idF.value)),
           new Promise((_, reject) => setTimeout(() => reject(new Error('查询超时')), 10000))
         ]);
         if (doc.exists) allRows.push(this._docToRow(doc));
@@ -749,7 +760,7 @@ class _FSQueryBuilder {
         // in('id', [...]) → 逐个按文档 ID 查找
         console.log(`[FS._exec] 路径: 批量文档 ID 查找 (${idF.values.length} 个)`);
         const results = await Promise.race([
-          Promise.all(idF.values.map(v => this._fs.collection(this._col).doc(v).get())),
+          Promise.all(idF.values.map(v => this._cfgDocGet(this._fs.collection(this._col).doc(v)))),
           new Promise((_, reject) => setTimeout(() => reject(new Error('查询超时')), 12000))
         ]);
         results.forEach(doc => { if (doc.exists) allRows.push(this._docToRow(doc)); });
@@ -948,10 +959,16 @@ class _FSProvider {
     try {
       switch(fnName) {
         case 'picks_snapshot': {
-          const doc = await Promise.race([
-            this._fs.collection('config').doc('picks').get(),
-            new Promise((_, reject) => setTimeout(() => reject(new Error('查询超时')), 10000))
-          ]);
+          let doc;
+          try {
+            doc = await Promise.race([
+              this._fs.collection('config').doc('picks').get({ source: 'server' }),
+              new Promise((_, reject) => setTimeout(() => reject(new Error('查询超时')), 10000))
+            ]);
+          } catch (e) {
+            // 离线/超时时回退到本地缓存，避免无数据可用
+            doc = await this._fs.collection('config').doc('picks').get({ source: 'cache' });
+          }
           if (!doc.exists) return { data: null, error: { message: 'picks snapshot document missing' } };
           const snapshot = doc.data();
           // 文档存在但 data 字段缺失属于损坏快照，不能伪装成空排班覆盖本地有效数据。
@@ -986,7 +1003,12 @@ class _FSProvider {
         }
         case 'picks_count': {
           const { p_date, p_sid, p_except_mid } = params || {};
-          const picksDoc = await this._fs.collection('config').doc('picks').get();
+          let picksDoc;
+          try {
+            picksDoc = await this._fs.collection('config').doc('picks').get({ source: 'server' });
+          } catch (e) {
+            picksDoc = await this._fs.collection('config').doc('picks').get({ source: 'cache' });
+          }
           if (!picksDoc.exists) return { data: 0, error: null };
           const picksData = picksDoc.data().data || {};
           const dayPicks = picksData[p_date] || {};
@@ -2779,7 +2801,7 @@ async function pullPicksSelCfg(force){if(!fbReady)return;try{
         logSecurityEvent('malformed_picks','Pulled picks failed structure validation');
         throw new Error('云端选班快照结构异常');
       }
-      picks=normalizePicksData(pcData);sv('cp6',picks);_invalidateMonthCache();
+      picks=normalizePicksData(pcData);sv('cp6',picks);picksLocalVer=Date.now();_invalidateMonthCache();
     }
   }
   const scfgData = safeExtract(scfgRow);
