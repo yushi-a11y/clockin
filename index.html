@@ -2843,7 +2843,18 @@ function punchAbsTs(p){
 }
 function isPunchOfInstance(p,sh,sd){
   if(!p||p.sid!==sh.id)return false;
-  if(p.sd)return p.sd===sd;
+  // v2026.09.04 修复：sd 匹配太严格导致跨天班次打卡匹配失败
+  // 如果 sd 存在但不匹配，尝试用时间范围匹配作为 fallback
+  if(p.sd){
+    if(p.sd===sd)return true;
+    // sd 不匹配，尝试时间范围匹配
+    const {sD,eD}=shiftDateTimes(sh,sd,sd);
+    const ts=punchAbsTs(p);
+    if(ts!=null){
+      return ts>=sD.getTime()-LEGACY_INST_PAD_MS&&ts<=eD.getTime()+LEGACY_INST_PAD_MS;
+    }
+    return false;
+  }
   const {sD,eD}=shiftDateTimes(sh,sd,sd);
   const ts=punchAbsTs(p);
   if(ts==null)return p.date===sd;
