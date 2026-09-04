@@ -1144,6 +1144,9 @@ class _SupabaseProvider {
 }
 
 // ====== INIT DATABASE ======
+let _fsConnectionTested = false;
+let _fsConnectionOk = false;
+
 (function initDB() {
   console.log('Database provider:', DB_PROVIDER);
   if (DB_PROVIDER === 'firestore') {
@@ -1151,7 +1154,23 @@ class _SupabaseProvider {
     if (fsProvider.init(FIREBASE_CONFIG)) {
       supa = fsProvider;
       fbReady = true;
-      console.log('Firestore connected');
+      console.log('Firestore SDK initialized');
+      // v2026.09.04: 异步测试连接，超时则降级到本地模式
+      (async () => {
+        try {
+          await Promise.race([
+            supa._fs.collection('config').limit(1).get(),
+            new Promise((_, reject) => setTimeout(() => reject(new Error('连接超时')), 3000))
+          ]);
+          _fsConnectionOk = true;
+          console.log('Firestore 连接正常');
+        } catch(e) {
+          _fsConnectionOk = false;
+          console.warn('Firestore 连接失败，使用本地模式:', e.message);
+          showToast('云端连接慢，已切换本地模式（数据暂存本地）');
+        }
+        _fsConnectionTested = true;
+      })();
     } else {
       console.error('Firestore init failed, falling back to Supabase');
       try {
@@ -2554,6 +2573,12 @@ async function checkOfflineQueue(){
 // Account claiming via Supabase (daily reset)
 async function claimAccount(memberId){
   const expAt=nextResetTime();
+  // v2026.09.04: 本地模式下直接返回成功，不访问 Firestore
+  if(_fsConnectionTested && !_fsConnectionOk){
+    console.log('[claimAccount] 本地模式，跳过 Firestore');
+    localStorage.setItem('cb6',String(memberId));localStorage.setItem('cb6exp',String(expAt));
+    return{ok:true,expiresAt:expAt,fallback:true};
+  }
   if(!fbReady){localStorage.setItem('cb6',String(memberId));localStorage.setItem('cb6exp',String(expAt));return{ok:true,expiresAt:expAt}}
   try{
     const {data:existing}=await supa.from('claims').select('*').eq('id',String(memberId)).maybeSingle();
@@ -2618,6 +2643,11 @@ function checkForceOut(){
 async function fbPunch(punchData){
   console.log('[fbPunch] 开始写入打卡:', punchData);
   if(!fbReady){console.warn('[fbPunch] fbReady=false, 无法写入');return false}
+  // v2026.09.04: 如果 Firestore 连接失败，使用本地模式（数据已存 localStorage，跳过云端写入）
+  if(_fsConnectionTested && !_fsConnectionOk){
+    console.log('[fbPunch] 本地模式，跳过 Firestore 写入');
+    return true;
+  }
   // Validate punch data integrity before writing
   if(!validatePunch(punchData)){
     console.error('[fbPunch] 验证失败:', punchData);
@@ -2751,13 +2781,36 @@ async function flushOfflinePunches(silent){
   finally{_opqFlushing=false}
 }
 function initOfflinePunchSync(){
-  window.addEventListener('online',()=>{flushOfflinePunches();updateNetworkStatus(true)});
+  window.addEventListener('online',()=>{flushOfflinePunches();updateNetworkStatus(true);tryReconnectFirestore()});
   window.addEventListener('offline',()=>updateNetworkStatus(false));
-  document.addEventListener('visibilitychange',()=>{if(!document.hidden)flushOfflinePunches()});
+  document.addEventListener('visibilitychange',()=>{if(!document.hidden){flushOfflinePunches();tryReconnectFirestore()}});
   setInterval(()=>{if(offlinePunchQueue().length)flushOfflinePunches(true)},60000);
+  // v2026.09.04: 每 5 分钟尝试重连 Firestore
+  setInterval(tryReconnectFirestore, 300000);
   if(offlinePunchQueue().length)flushOfflinePunches(true);
   // 初始化网络状态指示器（v2026.08.14.39）
   updateNetworkStatus(navigator.onLine);
+}
+
+// v2026.09.04: 尝试重新连接 Firestore
+async function tryReconnectFirestore(){
+  if(!fbReady || DB_PROVIDER!=='firestore')return;
+  if(_fsConnectionOk)return; // 已经连接正常
+  try{
+    await Promise.race([
+      supa._fs.collection('config').limit(1).get(),
+      new Promise((_, reject) => setTimeout(() => reject(new Error('超时')), 3000))
+    ]);
+    if(!_fsConnectionOk){
+      _fsConnectionOk = true;
+      console.log('Firestore 重连成功，切换回云端模式');
+      showToast('云端已连接，恢复同步');
+      // 同步本地数据到云端
+      if(offlinePunchQueue().length)flushOfflinePunches();
+    }
+  }catch(e){
+    // 仍然无法连接
+  }
 }
 // 更新网络状态指示器（v2026.08.14.39）
 function updateNetworkStatus(online){
