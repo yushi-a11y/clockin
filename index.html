@@ -5,13 +5,15 @@
   <meta name="viewport" content="width=device-width,initial-scale=1"/>
   <meta http-equiv="Content-Security-Policy" content="default-src 'self' https://txtduqfhugjupxdoxdvp.supabase.co https://cdn.jsdelivr.net https://cdnjs.cloudflare.com https://fonts.googleapis.com https://fonts.gstatic.com https://firestore.googleapis.com https://clockin-b691a.firebaseio.com; script-src 'self' 'unsafe-inline' 'unsafe-eval' https://cdn.jsdelivr.net https://cdnjs.cloudflare.com https://www.gstatic.com https://restapi.amap.com blob:; worker-src blob:; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; connect-src 'self' https://txtduqfhugjupxdoxdvp.supabase.co wss://txtduqfhugjupxdoxdvp.supabase.co https://cdn.jsdelivr.net https://restapi.amap.com https://firestore.googleapis.com wss://clockin-b691a.firebaseio.com https://clockin-b691a.firebaseio.com; img-src 'self' data: blob:; frame-ancestors 'none'"/>
   <title>ClockIn 考勤打卡</title>
-  <link rel="preconnect" href="https://fonts.googleapis.com"/>
-  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet"/>
+  <!-- v2026.09.05 移除 Google Fonts 阻塞资源：fonts.googleapis.com 属 Google，国内网络被墙，
+       作为 render-blocking <link> 会让每次打开页面卡数秒。body/mono 字体在 CSS 中已配置系统字体回退
+       （-apple-system / Segoe UI / SF Mono / sans-serif），移除后视觉差异极小、加载显著变快。 -->
   <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
-  <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
-  <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore-compat.js"></script>
+  <!-- v2026.09.05 移除阻塞式 Firebase SDK：www.gstatic.com 属 Google，国内被墙，作为阻塞式脚本标签
+       会拖慢首屏（即便 supabase 模式根本不用 Firebase）。现改为仅当 DB_PROVIDER 为 firestore
+       时由 loadFirebaseSDK() 懒加载；supabase 模式永不请求 gstatic。 -->
   <style>
     :root{--seed-bg:#f8f9fb;--seed-fg:#111827;--seed-primary:#2563eb;--seed-success:#16a34a;--seed-warning:#ea580c;--seed-danger:#dc2626;--seed-surface:#ffffff;--seed-radius:10px;--bg:var(--seed-bg);--fg:var(--seed-fg);--surface:var(--seed-surface);--surface-alt:#f1f5f9;--border:#e2e8f0;--border-light:#f1f5f9;--muted:#64748b;--muted-light:#94a3b8;--primary:var(--seed-primary);--primary-soft:#dbeafe;--primary-hover:#1d4ed8;--success:var(--seed-success);--success-soft:#dcfce7;--warning:var(--seed-warning);--warning-soft:#fff7ed;--danger:var(--seed-danger);--danger-soft:#fef2f2;--radius:var(--seed-radius);--radius-sm:6px;--radius-lg:14px;--radius-xl:20px;--shadow-sm:0 1px 2px rgba(0,0,0,.04);--shadow-md:0 4px 12px rgba(0,0,0,.06);--shadow-lg:0 8px 24px rgba(0,0,0,.08);--font-body:'Inter',-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;--font-mono:'JetBrains Mono','SF Mono',monospace}
     *{margin:0;padding:0;box-sizing:border-box}body{font-family:var(--font-body);font-size:15px;line-height:1.5;color:var(--fg);background:var(--bg);-webkit-font-smoothing:antialiased}button,select,input{font-family:var(--font-body)}button{cursor:pointer}
@@ -616,8 +618,9 @@ window.addEventListener('beforeunload',function(){
   if(window.ocrWorker){try{window.ocrWorker.terminate();}catch(e){} window.ocrWorker=null;}
 });
 // ====== DATABASE CONFIG (DUAL BACKEND) ======
-// 强制使用 Firestore，不再依赖 localStorage 设置（v2026.09.03 修复）
-const DB_PROVIDER = 'firestore';
+// v2026.09.05 回滚：当前网络环境下 firestore.googleapis.com 不可达（登录卡死/全站超时），
+// 切回迁移前的 Supabase 链路；Firestore 适配器代码保留，如需重新启用改回 'firestore'。
+const DB_PROVIDER = 'supabase';
 
 // --- Supabase 配置 ---
 const SUPABASE_URL='https://txtduqfhugjupxdoxdvp.supabase.co';
@@ -971,14 +974,24 @@ class _FSProvider {
           }
           if (!doc.exists) return { data: null, error: { message: 'picks snapshot document missing' } };
           const snapshot = doc.data();
+          if (!snapshot || typeof snapshot !== 'object' || Array.isArray(snapshot)) {
+            return { data: null, error: { message: 'picks snapshot document malformed' } };
+          }
+          // 兼容两种存储形态：
+          //   标准形态：{ id:'picks', data: dateMap, updated_at: ts }
+          //   同步脚本误写的形态：{ data: dateMap }（少了一层 id wrapper）
+          let picksData = snapshot.data;
+          if (picksData && typeof picksData === 'object' && !Array.isArray(picksData)) {
+            const hasDate = Object.keys(picksData).some(k => /^\d{4}-\d{2}-\d{2}$/.test(k));
+            if (!hasDate && Object.prototype.hasOwnProperty.call(picksData, 'data')) {
+              picksData = picksData.data;
+            }
+          }
           // 文档存在但 data 字段缺失属于损坏快照，不能伪装成空排班覆盖本地有效数据。
-          if (!snapshot || !Object.prototype.hasOwnProperty.call(snapshot, 'data')) {
+          if (!picksData || typeof picksData !== 'object' || Array.isArray(picksData)) {
             return { data: null, error: { message: 'picks snapshot missing data field' } };
           }
-          if(!snapshot.data||typeof snapshot.data!=='object'||Array.isArray(snapshot.data)){
-            return {data:null,error:{message:'picks snapshot data must be an object'}};
-          }
-          return { data: { id: 'picks', data: snapshot.data }, error: null };
+          return { data: { id: 'picks', data: picksData }, error: null };
         }
         case 'claims_unbind_atomic': {
           const targetIds=[...new Set((params?.p_target_ids||[]).map(String).filter(Boolean))];
@@ -1361,44 +1374,66 @@ class _SupabaseProvider {
 let _fsConnectionTested = false;
 let _fsConnectionOk = false;
 
+// Supabase provider 初始化（当前 active 后端）。失败返回 false，fbReady 保持 false → 单机版。
+function initSupabaseProvider(){
+  try{
+    if(!window.supabase){console.warn('supabase-js 未加载（CDN 不可达？）');return false;}
+    const client = window.supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
+    supa = new _SupabaseProvider(client);
+    fbReady = true;
+    return true;
+  }catch(e){ console.warn('Supabase init failed:', e); return false; }
+}
+// 懒加载 Firebase SDK：仅 firestore 模式需要。gstatic 在国内被墙，故不再放阻塞式 <script>。
+// 加载失败（被墙）时 resolve(false)，调用方回退 Supabase，保证应用始终可用。
+let _fbSdkPromise=null;
+function loadFirebaseSDK(){
+  if(window.firebase&&window.firebase.firestore)return Promise.resolve(true);
+  if(_fbSdkPromise)return _fbSdkPromise;
+  const srcs=['https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js','https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore-compat.js'];
+  _fbSdkPromise=(async()=>{
+    for(const s of srcs){
+      await new Promise((res,rej)=>{const el=document.createElement('script');el.src=s;el.async=true;el.onload=()=>res();el.onerror=()=>rej(new Error('SDK 加载失败: '+s));document.head.appendChild(el);});
+    }
+    return !!(window.firebase&&window.firebase.firestore);
+  })().catch(e=>{console.warn('[loadFirebaseSDK]',e.message);_fbSdkPromise=null;return false;});
+  return _fbSdkPromise;
+}
+
 (function initDB() {
   console.log('Database provider:', DB_PROVIDER);
   if (DB_PROVIDER === 'firestore') {
-    const fsProvider = new _FSProvider();
-    if (fsProvider.init(FIREBASE_CONFIG)) {
-      supa = fsProvider;
-      fbReady = true;
-      console.log('Firestore SDK initialized');
-      // v2026.09.04: 异步测试连接，超时则降级到本地模式
-      (async () => {
-        try {
-          await Promise.race([
-            supa._fs.collection('config').limit(1).get(),
-            new Promise((_, reject) => setTimeout(() => reject(new Error('连接超时')), 3000))
-          ]);
-          _fsConnectionOk = true;
-          console.log('Firestore 连接正常');
-        } catch(e) {
-          _fsConnectionOk = false;
-          console.warn('Firestore 连接失败，使用本地模式:', e.message);
-          showToast('云端连接慢，已切换本地模式（数据暂存本地）');
-        }
-        _fsConnectionTested = true;
-      })();
-    } else {
-      console.error('Firestore init failed, falling back to Supabase');
-      try {
-        const client = window.supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
-        supa = new _SupabaseProvider(client);
+    // 懒加载 SDK 后再初始化；SDK 不可达（gstatic 被墙）则回退 Supabase，保证应用可用。
+    loadFirebaseSDK().then(ok => {
+      if(!ok){ console.error('Firebase SDK 不可用（gstatic 被墙），回退 Supabase'); initSupabaseProvider(); return; }
+      const fsProvider = new _FSProvider();
+      if (fsProvider.init(FIREBASE_CONFIG)) {
+        supa = fsProvider;
         fbReady = true;
-      } catch(e) { console.warn('Supabase fallback failed:', e); }
-    }
+        console.log('Firestore SDK initialized');
+        // v2026.09.04: 异步测试连接，超时则降级到本地模式
+        (async () => {
+          try {
+            await Promise.race([
+              supa._fs.collection('config').limit(1).get(),
+              new Promise((_, reject) => setTimeout(() => reject(new Error('连接超时')), 3000))
+            ]);
+            _fsConnectionOk = true;
+            console.log('Firestore 连接正常');
+          } catch(e) {
+            _fsConnectionOk = false;
+            console.warn('Firestore 连接失败，使用本地模式:', e.message);
+            showToast('云端连接慢，已切换本地模式（数据暂存本地）');
+          }
+          _fsConnectionTested = true;
+        })();
+      } else {
+        console.error('Firestore init failed, falling back to Supabase');
+        initSupabaseProvider();
+      }
+    });
   } else {
-    try {
-      const client = window.supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
-      supa = new _SupabaseProvider(client);
-      fbReady = true;
-    } catch(e) { console.warn('Supabase init failed:', e); }
+    initSupabaseProvider();
   }
 })();
 
@@ -1822,12 +1857,12 @@ async function ensureAdminToken(){
   // 尽力服务端校验（RPC 不可达时不阻塞操作）
   if(!fbReady)return true;
   try{
-    const {data:valid,error:rpcErr}=await supa.rpc('admin_token_valid',token,expText);
+    const {data:valid,error:rpcErr}=await supa.rpc('admin_token_valid',{token,exp_text:expText});
     if(rpcErr){
       // RPC 不存在或其他错误 → 不阻塞（降级模式）
       return true;
     }
-    if(valid===false){
+    if(valid&&valid.ok===false){
       // 服务端明确判定令牌无效
       logSecurityEvent('server_token_invalid','Server rejected admin token during operation');
       localStorage.removeItem('cs6');localStorage.removeItem('cs6tk');
@@ -2033,8 +2068,10 @@ function slotCount(dateStr,sid,exceptMid){let n=0;TEAM.forEach(m=>{if(exceptMid!
 function slotCapOf(dateStr,sid){const d=slotCap[dateStr];const v=d&&d[sid];return v>0?v:0}
 function setSlotCap(dateStr,sid,n){if(!slotCap[dateStr])slotCap[dateStr]={};if(n>0)slotCap[dateStr][sid]=n;else delete slotCap[dateStr][sid];if(!Object.keys(slotCap[dateStr]).length)delete slotCap[dateStr]}
 function pruneSlotCap(){const cutoff=ymd(addDays(new Date(),-60));Object.keys(slotCap).forEach(d=>{if(d<cutoff)delete slotCap[d]})}
-// 自动同步 slotCap 为实际选班人数（选班人数=容量上限，保持一致）
-function reconcileSlotCap(){let changed=false;const en=state.shifts.filter(s=>s.enabled);Object.keys(picks).forEach(ds=>{if(!slotCap[ds])slotCap[ds]={};en.forEach(sh=>{const actual=slotCount(ds,sh.id);const cur=slotCap[ds][sh.id]||0;if(actual!==cur){slotCap[ds][sh.id]=actual;changed=true}})});if(changed){sv('csc6',slotCap);syncSlotCap()}}
+// 名额不变量维护：slotCap 只应由管理员显式设定(setSlotCap)。
+// 此处仅保证"上限不低于实际占用"（避免管理员上限被历史导入数据打破），
+// 绝不把上限覆写为当前人数（那会让已有人的时段对其他人永久满员），也绝不下调管理员上限。
+function reconcileSlotCap(){let changed=false;const en=state.shifts.filter(s=>s.enabled);Object.keys(picks).forEach(ds=>{en.forEach(sh=>{const actual=slotCount(ds,sh.id);const cur=slotCapOf(ds,sh.id);if(cur>0&&actual>cur){if(!slotCap[ds])slotCap[ds]={};slotCap[ds][sh.id]=actual;changed=true}})});if(changed){sv('csc6',slotCap);syncSlotCap()}}
 // 实时满员校验：直接从 Supabase 拉取最新选班数据统计某时段人数，规避本地缓存延迟（并发抢班防护）
 async function freshSlotCount(dateStr,sid,exceptMid){
   if(!fbReady)return slotCount(dateStr,sid,exceptMid);
@@ -2049,10 +2086,20 @@ function curMonthStr(){const d=new Date();return`${d.getFullYear()}-${String(d.g
 // 相对当前月的月份字符串：off=0 当前月, -1 上月, 1 下月
 function monthStrByOffset(off){const d=new Date();d.setDate(1);d.setMonth(d.getMonth()+off);return`${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}`}
 function dayValid(n){return Math.min(n,MAX_PER_DAY)}                 // 每日最多计入 7 个有效
-// 早补=07:00-08:00 时段(id 7)，夜补=次日01:00-02:00 时段(id 25)。按月自动统计选中该时段的天数
-// 早补/夜补时段 id 从 selCfg 读取，便于业务调整
-function amShiftId(){return +selCfg.amShiftId||7}
-function pmShiftId(){return +selCfg.pmShiftId||25}
+// 早补=07:00-08:00 时段，夜补=次日01:00-02:00 时段。按月自动统计选中该时段的天数
+// 早补/夜补时段 id 解析（P1）：优先尊重管理员在 selCfg 中配置的 id；若该 id 已失效
+// （如导入重建班次表后消失），按标准时段开始时间（早补 07:00 / 夜补 01:00）在现存班次中
+// 重新定位，避免统计指向错误时段；都找不到时才退回配置值或历史默认 id（7 / 25）。
+const AM_SHIFT_START='07:00',PM_SHIFT_START='01:00';
+function resolveSelShiftId(cfgId,startStr,fallbackId){
+  const cfg=Number(cfgId);
+  if(Number.isFinite(cfg)&&cfg&&state.shifts.some(s=>Number(s.id)===cfg))return cfg;
+  const byTime=state.shifts.find(s=>s.start===startStr);
+  if(byTime)return Number(byTime.id);
+  return (Number.isFinite(cfg)&&cfg)?cfg:fallbackId;
+}
+function amShiftId(){return resolveSelShiftId(selCfg.amShiftId,AM_SHIFT_START,7)}
+function pmShiftId(){return resolveSelShiftId(selCfg.pmShiftId,PM_SHIFT_START,25)}
 // ===== 月度统计缓存：避免每次渲染重复遍历 picks =====
 let _mmcCache={},_mmvCache={},_mmcPicksSig='';
 function _invalidateMonthCache(){_mmcCache={};_mmvCache={}}
@@ -2185,7 +2232,7 @@ async function atomicSetPick(dateStr,mid,sids){
 // 增量原子写：只增/删单个班次，服务器端基于"最新"数据加行锁修改，
 // 彻底规避"客户端读到旧快照→整体覆盖→把别人/自己刚选的班次冲掉"的并发问题。
 // 若增量函数尚未部署（undefined function），自动回退到整体 pick_set，避免选班整体不可用。
-function _isMissingFn(error){return !!(error&&(error.code==='42883'||/does not exist/i.test(error.message||'')))}
+function _isMissingFn(error){return !!(error&&(error.code==='42883'||error.code==='PGRST202'||/does not exist/i.test(error.message||'')||/Could not find the function/i.test(error.message||'')||/no matches were found in the schema cache/i.test((error.details||'')+(error.message||''))))}
 async function atomicAddPick(dateStr,mid,sid){
   sid=Number(sid);
   if(!Number.isFinite(sid))return false;
@@ -2352,6 +2399,7 @@ async function atomicTransferPick(dateStr,fromMid,toMid,sid){
     try{
       const {data,error}=await supa.rpc('pick_transfer',{p_date:dateStr,p_from_mid:fromMid,p_to_mid:toMid,p_sid:sid});
       if(error){
+        if(_isMissingFn(error))break; // Supabase 未部署 pick_transfer → 走组合降级
         if(attempt<4&&/transaction|conflict|timeout|fetch/i.test(error.message||'')){await new Promise(r=>setTimeout(r,100*(attempt+1)+Math.floor(Math.random()*200)));continue}
         return{ok:false,reason:'error'};
       }
@@ -2359,10 +2407,34 @@ async function atomicTransferPick(dateStr,fromMid,toMid,sid){
       if(data.data&&picksOptSeq===mySeq){picks=normalizePicksData(data.data);sv('cp6',picks);picksLocalVer=Date.now();_invalidateMonthCache()}
       return{ok:true,alreadyApplied:!!data.alreadyApplied};
     }catch(e){
+      if(_isMissingFn(e))break;
       if(attempt<4){await new Promise(r=>setTimeout(r,100*(attempt+1)+Math.floor(Math.random()*200)));continue}
     }
   }
-  return{ok:false,reason:'error'};
+  // 降级：pick_transfer 不存在时，用 pick_add_cap + pick_remove 组合完成（先加后删，杜绝丢班次）
+  return await composeTransferPick(dateStr,fromMid,toMid,sid,mySeq);
+}
+async function composeTransferPick(dateStr,fromMid,toMid,sid,mySeq){
+  sid=Number(sid);fromMid=String(fromMid);toMid=String(toMid);
+  const day=picks[dateStr]||{};
+  const fromArr=[...new Set((day[fromMid]||[]).map(Number).filter(Number.isFinite))];
+  const toArr=[...new Set((day[toMid]||[]).map(Number).filter(Number.isFinite))];
+  if(!fromArr.includes(sid)&&toArr.includes(sid))return{ok:true,alreadyApplied:true};
+  if(!fromArr.includes(sid))return{ok:false,reason:'not_owner'};
+  if(toArr.includes(sid))return{ok:false,reason:'duplicate'};
+  if(toArr.length>=MAX_PER_DAY)return{ok:false,reason:'dayfull'};
+  const admin=typeof isAdminNow==='function'?isAdminNow():false;
+  // 先给接收方加（服务端校验上限），成功后再从转出方删，任一步失败都不丢班次
+  const addRes=await atomicAddPickCap(dateStr,toMid,sid,admin);
+  if(!addRes||addRes.ok===false)return addRes||{ok:false,reason:'error'};
+  const removed=await atomicRemovePick(dateStr,fromMid,sid);
+  if(!removed){
+    // 删除失败：接收方已拿到班次，转出方仍持有 → 出现重复，补偿性重试一次
+    const retry=await atomicRemovePick(dateStr,fromMid,sid);
+    if(!retry){console.warn('composeTransferPick: 转出方删除失败，可能出现重复班次',dateStr,fromMid,sid);return{ok:false,reason:'error'}}
+  }
+  if(picksOptSeq===mySeq){sv('cp6',picks);picksLocalVer=Date.now();_invalidateMonthCache()}
+  return{ok:true};
 }
 async function atomicExchangePicks(giveDate,giverMid,giveSid,takeDate,receiverMid,takeSid){
   giveSid=Number(giveSid);takeSid=Number(takeSid);giverMid=String(giverMid);receiverMid=String(receiverMid);
@@ -2387,6 +2459,7 @@ async function atomicExchangePicks(giveDate,giverMid,giveSid,takeDate,receiverMi
     try{
       const {data,error}=await supa.rpc('pick_exchange',{p_give_date:giveDate,p_giver_mid:giverMid,p_give_sid:giveSid,p_take_date:takeDate,p_receiver_mid:receiverMid,p_take_sid:takeSid});
       if(error){
+        if(_isMissingFn(error))break; // Supabase 未部署 pick_exchange → 走组合降级
         if(attempt<4&&/transaction|conflict|timeout|fetch/i.test(error.message||'')){await new Promise(r=>setTimeout(r,100*(attempt+1)+Math.floor(Math.random()*200)));continue}
         return{ok:false,reason:'error'};
       }
@@ -2394,10 +2467,40 @@ async function atomicExchangePicks(giveDate,giverMid,giveSid,takeDate,receiverMi
       if(data.data&&picksOptSeq===mySeq){picks=normalizePicksData(data.data);sv('cp6',picks);picksLocalVer=Date.now();_invalidateMonthCache()}
       return{ok:true,alreadyApplied:!!data.alreadyApplied};
     }catch(e){
+      if(_isMissingFn(e))break;
       if(attempt<4){await new Promise(r=>setTimeout(r,100*(attempt+1)+Math.floor(Math.random()*200)));continue}
     }
   }
-  return{ok:false,reason:'error'};
+  // 降级：pick_exchange 不存在时，用 pick_set 逐个 (date,mid) 组合完成
+  return await composeExchangePicks(giveDate,giverMid,giveSid,takeDate,receiverMid,takeSid,mySeq);
+}
+async function composeExchangePicks(giveDate,giverMid,giveSid,takeDate,receiverMid,takeSid,mySeq){
+  giveSid=Number(giveSid);takeSid=Number(takeSid);giverMid=String(giverMid);receiverMid=String(receiverMid);
+  const draft=normalizePicksData(picks),cache=new Map();
+  const arr=(date,mid)=>{const key=date+'\u0000'+mid;if(!cache.has(key))cache.set(key,((draft[date]||{})[mid]||[]).slice());return cache.get(key)};
+  const giverGive=arr(giveDate,giverMid),giverTake=arr(takeDate,giverMid);
+  const receiverGive=arr(giveDate,receiverMid),receiverTake=arr(takeDate,receiverMid);
+  const alreadyApplied=!giverGive.includes(giveSid)&&giverTake.includes(takeSid)&&receiverGive.includes(giveSid)&&!receiverTake.includes(takeSid);
+  if(alreadyApplied)return{ok:true,alreadyApplied:true};
+  if(!giverGive.includes(giveSid)||!receiverTake.includes(takeSid))return{ok:false,reason:'not_owner'};
+  if(receiverGive.includes(giveSid)||giverTake.includes(takeSid))return{ok:false,reason:'duplicate'};
+  giverGive.splice(giverGive.indexOf(giveSid),1);if(!giverTake.includes(takeSid))giverTake.push(takeSid);
+  receiverTake.splice(receiverTake.indexOf(takeSid),1);if(!receiverGive.includes(giveSid))receiverGive.push(giveSid);
+  if([...cache.values()].some(items=>items.length>MAX_PER_DAY))return{ok:false,reason:'dayfull'};
+  const writes=[];
+  cache.forEach((items,key)=>{const[date,mid]=key.split('\u0000');writes.push({date,mid,arr:[...new Set(items.map(Number).filter(Number.isFinite))].sort((a,b)=>a-b)})});
+  try{
+    for(const w of writes){
+      const ok=await atomicSetPick(w.date,w.mid,w.arr);
+      if(!ok)throw new Error('pick_set failed '+w.date+'/'+w.mid);
+    }
+  }catch(e){
+    console.warn('composeExchangePicks fallback error:',e);
+    try{if(typeof pullPicksSelCfg==='function')await pullPicksSelCfg(true)}catch(_){}
+    return{ok:false,reason:'error'};
+  }
+  if(picksOptSeq===mySeq){_invalidateMonthCache();sv('cp6',picks);picksLocalVer=Date.now();}
+  return{ok:true};
 }
 // 清理超过 60 天的历史 picks，避免无限增长
 function prunePicks(){const days=Math.max(7,+selCfg.retainDays||60);const cutoff=ymd(addDays(new Date(),-days));Object.keys(picks).forEach(d=>{if(d<cutoff)delete picks[d]})}
@@ -2809,7 +2912,7 @@ async function pullPicksSelCfg(force){if(!fbReady)return;try{
   const lcfgData = safeExtract(lcfgRow);
   if(lcfgData&&typeof lcfgData==='object'){locCfg=Object.assign({on:false,members:{}},lcfgData);sv('cloccfg6',locCfg)}
   if(scData&&typeof scData==='object'){slotCap=scData;sv('csc6',slotCap)}
-  if(Array.isArray(swcData)){swaps=normalizeSwapsData(swcData);sv('cswap6',swaps)}
+  if(Array.isArray(swcData)){mergeSwapsFromServer(swcData)}
 
   await Promise.all([fetchLeavesConfig(),syncPullMakeups(),syncForceOut(),fetchPerformancesConfig()]);
   if((JSON.stringify(picks)!==oldPicksSig||JSON.stringify(locCfg)!==oldLocSig)&&selectedMember){
@@ -2818,6 +2921,46 @@ async function pullPicksSelCfg(force){if(!fbReady)return;try{
   }
   return true;
 }catch(e){console.error('pullPicksSelCfg error:',e);return false}}
+// [egress 优化] 增量应用 picks 实时差量：INSERT/DELETE 直接改本地 picks，避免每次选班重拉全量快照。
+// 遇到 UPDATE 或关键字段缺失返回 false，调用方回退到全量 pullPicksSelCfg 保证正确性。
+function applyPicksDelta(evs){
+  if(!Array.isArray(evs)||!evs.length)return false;
+  let changed=false;
+  for(const ev of evs){
+    const t=ev.eventType;
+    if(t==='INSERT'){
+      const n=ev.new||{};const d=n.date,m=String(n.mid),s=Number(n.sid);
+      if(!d||!m||!Number.isFinite(s))return false;
+      if(!picks[d])picks[d]={};
+      const arr=Array.isArray(picks[d][m])?picks[d][m]:[];
+      if(!arr.includes(s))arr.push(s);
+      picks[d][m]=arr.sort((a,b)=>a-b);changed=true;
+    }else if(t==='DELETE'){
+      const o=ev.old||{};const d=o.date,m=String(o.mid),s=Number(o.sid);
+      if(!d||!m||!Number.isFinite(s))return false;
+      if(picks[d]&&Array.isArray(picks[d][m])){picks[d][m]=picks[d][m].filter(x=>Number(x)!==s);if(!picks[d][m].length)delete picks[d][m];changed=true;}
+    }else{
+      return false;
+    }
+  }
+  if(changed){sv('cp6',picks);picksLocalVer=Date.now();_invalidateMonthCache();}
+  return true;
+}
+// [egress 优化] 按 id 选择性拉取单个 config 行并更新本地状态，替代整包 pullPicksSelCfg。
+async function pullConfigRow(id){
+  try{
+    if(id==='leaves'){await fetchLeavesConfig();return true}
+    if(id==='makeups'){await syncPullMakeups();return true}
+    if(id==='performances'){await fetchPerformancesConfig();return true}
+    const {data}=await supa.from('config').select('*').eq('id',id).maybeSingle();
+    const v=safeExtract(data);
+    if(id==='selcfg'&&v&&typeof v==='object'){selCfg=Object.assign({},DEF_SELCFG,v);sv('csel6',selCfg)}
+    else if(id==='loccfg'&&v&&typeof v==='object'){locCfg=Object.assign({on:false,members:{}},v);sv('cloccfg6',locCfg)}
+    else if(id==='slotcap'&&v&&typeof v==='object'){slotCap=v;sv('csc6',slotCap)}
+    else if(id==='swaps'&&Array.isArray(v)){mergeSwapsFromServer(v)}
+    return true;
+  }catch(e){return false}
+}
 async function initFBListeners(){
   if(!fbReady)return;
   document.getElementById('syncBadge').className='sync-badge on';document.getElementById('syncBadge').innerHTML='<span class="dot"></span>已同步';
@@ -2892,8 +3035,10 @@ async function initFBListeners(){
       }else if(changedId==='forceout'){
         // 强制下线必须独立拉取，不能被 picks/slotcap 等无关请求失败阻塞。
         await syncForceOut();
-      }else if(['picks','selcfg','slotcap','swaps','makeups','leaves','loccfg'].includes(changedId)){
-        await pullPicksSelCfg();
+      }else if(changedId==='picks'){
+        // picks 镜像变更已由 picks-sync 增量通道处理，无需重拉全量快照（省 egress）
+      }else if(['selcfg','slotcap','swaps','makeups','leaves','loccfg','performances'].includes(changedId)){
+        await pullConfigRow(changedId);
       }else{
         // 未知 id 或全量事件 → 拉全部
         const {data:sc}=await supa.from('config').select('*').eq('id','shifts').maybeSingle();
@@ -2913,20 +3058,34 @@ async function initFBListeners(){
   supa.channel('logs-sync').on('postgres_changes',{event:'INSERT',schema:'public',table:'logs'},()=>{
     if(document.getElementById('ap-logs')?.classList.contains('active'))renderLogs();
   }).subscribe();
-  // picks 表实时同步：选班数据已独立存于 picks 表，他人选/取消时实时刷新（300ms 防抖合并高频变更）
-  let _pickSyncTimer=null;
-  supa.channel('picks-sync').on('postgres_changes',{event:'*',schema:'public',table:'picks'},()=>{
+  // picks 表实时同步：增量应用差量（INSERT/DELETE），不再每次事件重拉全量快照（egress 优化）；300ms 防抖合并高频变更
+  let _pickSyncTimer=null;const _pickDeltaBuf=[];
+  supa.channel('picks-sync').on('postgres_changes',{event:'*',schema:'public',table:'picks'},(payload)=>{
+    _pickDeltaBuf.push(payload);
     if(_pickSyncTimer)return;
     _pickSyncTimer=setTimeout(async()=>{
       _pickSyncTimer=null;
-      try{await pullPicksSelCfg();syncSelectedMember();renderAll();refreshEmpAfterSync();}catch(e){}
+      const evs=_pickDeltaBuf.splice(0);
+      try{
+        if(!applyPicksDelta(evs))await pullPicksSelCfg(true);
+        syncSelectedMember();renderAll();refreshEmpAfterSync();
+      }catch(e){}
     },300);
-  }).subscribe();
-  // Polling: 30s 轮询一次（数据同步 + 定时刷新页面）
+  }).subscribe((st)=>{
+    // 通道（重）连成功：全量对齐一次，修复断线期间漏收的选班事件（增量同步的自愈点）
+    if(st==='SUBSCRIBED')pullPicksSelCfg(true);
+  });
+  // Polling 兜底轮询（egress 优化）：实时通道已覆盖即时变更，轮询仅作安全网。
+  // - 标签页隐藏时跳过本轮，后台不烧流量
+  // - 实时通道活跃时降频到 5 分钟，不活跃时 30 秒
+  // - 不再拉全量选班快照（picks 由 picks-sync 增量维护），只刷新小体量数据
   const POLL_INTERVAL=30000;
+  const POLL_INTERVAL_RT=300000;
   let pollTimer=null;
   function schedulePoll(){
+    const delay=(rtConfigActive&&Date.now()-rtLastHit<120000)?POLL_INTERVAL_RT:POLL_INTERVAL;
     pollTimer=setTimeout(async()=>{
+      if(document.hidden){schedulePoll();return;}
       try{
         const {data:cr}=await supa.from('claims').select('*');
         claims={};(cr||[]).forEach(r=>{if(!isClaimExpired(r))claims[r.id]=r});
@@ -2936,6 +3095,8 @@ async function initFBListeners(){
         if(sc?.data){state.shifts=normalizeShiftsData(sc.data);sv('cv6',state)}
         const {data:tc}=await supa.from('config').select('*').eq('id','team').maybeSingle();
         if(tc?.data)mergeTeamFromCloud(tc.data);
+        // 低频全量对齐（自愈）：修复漏收实时事件造成的本地选班漂移。
+        // 实时活跃时本轮回间隔为 5 分钟，故全量拉取频率仅为原来的 1/10；实时失效时回到 30 秒兜底。
         await pullPicksSelCfg();
         syncSelectedMember();
         renderAll();
@@ -2944,7 +3105,7 @@ async function initFBListeners(){
         checkForceOut();
       }catch(e){}
       schedulePoll();
-    },POLL_INTERVAL);
+    },delay);
   }
   schedulePoll();
 }
@@ -3083,6 +3244,10 @@ async function unclaimAccount(memberId,reason){
       p_force_ids:[...forceIds],
       p_reason:reason||''
     });
+    if(_isMissingFn(error)){
+      // Supabase 未部署 claims_unbind_atomic → 直接删 claims 行并发布 forceout
+      return await composeUnclaim(targetIds,[...forceIds],reason||'',clearLocalBinding);
+    }
     if(error||!data||typeof data!=='object')throw error||new Error('设备解绑事务未返回有效结果');
     targetIds.forEach(id=>{delete claims[id]});
     forceout=data;sv('cfo6',forceout);
@@ -3090,6 +3255,34 @@ async function unclaimAccount(memberId,reason){
     return true;
   }catch(e){
     console.warn('atomic unclaim error:',e);
+    return false;
+  }
+}
+// claims_unbind_atomic 缺失时的降级：直接删 claims 行 + 合并发布 forceout 到 config
+async function composeUnclaim(targetIds,forceIds,reason,clearLocalBinding){
+  try{
+    const ids=[...new Set((targetIds||[]).map(String))];
+    if(ids.length){
+      const {error:delErr}=await supa.from('claims').delete().in('id',ids);
+      if(delErr)throw delErr;
+    }
+    // 读取现有 forceout 再合并，避免覆盖其它待生效的强退信号
+    let base={};
+    try{
+      const {data:fo}=await supa.from('config').select('*').eq('id','forceout').maybeSingle();
+      if(fo&&fo.data&&typeof fo.data==='object'&&!Array.isArray(fo.data))base=fo.data;
+    }catch(_){}
+    const ts=Date.now();
+    const merged=Object.assign({},base);
+    [...new Set((forceIds||[]).map(String))].forEach(id=>{merged[id]={ts,reason:reason||''}});
+    const {error:upErr}=await supa.from('config').upsert({id:'forceout',data:merged,updated_at:ts},{onConflict:'id'});
+    if(upErr)throw upErr;
+    ids.forEach(id=>{delete claims[id]});
+    forceout=merged;sv('cfo6',forceout);
+    if(typeof clearLocalBinding==='function')clearLocalBinding();
+    return true;
+  }catch(e){
+    console.warn('composeUnclaim fallback error:',e);
     return false;
   }
 }
@@ -3161,6 +3354,17 @@ async function fbPunch(punchData){
           console.error('[fbPunch] 降级重试也失败:', e2);
         }
       }
+      // 幂等保护（P1）：上一次 insert 可能已在服务端提交、但响应因网络抖动超时，
+      // 直接重试会产生重复行（导致导出/报表翻倍）。重试前先按指纹查云端，
+      // 若已存在则视为写入成功、幂等返回，避免重复打卡。
+      try{
+        const fp=fbPunchKey(sanitized);
+        const dayRows=await queryPunchesByDate(sanitized.date);
+        if(dayRows.some(r=>fbPunchKey(r)===fp)){
+          console.log('[fbPunch] ✓ 检测到云端已存在该指纹（上次写入实际已提交），幂等返回成功:', fp);
+          return true;
+        }
+      }catch(eIdem){console.warn('[fbPunch] 幂等检查失败，退回普通重试:', eIdem)}
       if(attempt===2){
         console.error('[fbPunch] ✗ 3次尝试全部失败，打卡进入离线队列');
         showToast('打卡已保存本地 · 云端同步失败，联网后将自动重试');
@@ -3297,6 +3501,14 @@ function updateNetworkStatus(online){
   else{el.className='sync-badge off';el.innerHTML='<span class="dot"></span>离线'}
 }
 
+// 打卡相对班次起点的分钟差（正=晚到，负=早到）。
+// 用"班次实例起点(sd+start)"与"打卡自身日期时间(p.date+p.time)"的绝对差比较，
+// 跨午夜班次双向都正确：23:00 班次日 00:30 卡=+90(迟到)、00:00 班前一日 23:55 卡=-5(早到,ok)。
+function punchLateMin(p,sd,sh){
+  const sD=parseYmd(sd);const [shh,smm]=String(sh.start).split(':').map(Number);sD.setHours(shh,smm,0,0);
+  const pD=parseYmd(p&&p.date?p.date:sd);const [phh,pmm]=String(p&&p.time?p.time:'00:00').split(':').map(Number);pD.setHours(phh,pmm,0,0);
+  return Math.round((pD-sD)/60000);
+}
 function ss(sh,p,ctxDate,shiftStartDate){
   const now=nowM(),sM=toM(sh.start);let eM=toM(sh.end);if(sh.cross||eM<=sM)eM+=1440;
   const dur=eM-sM;
@@ -3329,7 +3541,7 @@ function ss(sh,p,ctxDate,shiftStartDate){
   // 按「班次实例」(sid + 选班日期) 取打卡，避免跨天班次连续两天排班时互相串卡
   const sp=instPunch(p,sh,sd,'s'),ep=instPunch(p,sh,sd,'e');
   let ss='w',es='w';
-  if(sp)ss=toM(sp.time)<=sM+sh.tolerance?'ok':'late';else if(ended)ss='miss';
+  if(sp)ss=punchLateMin(sp,sd,sh)<=sh.tolerance?'ok':'late';else if(ended)ss='miss';
   if(ep)es='ok';else if(ended)es='miss';
   let ov='w';
   if(ss==='ok'&&es==='ok')ov='ok';else if(ss==='miss'||es==='miss')ov='miss';else if(ss==='late')ov='warn';else if(ss==='ok'&&es==='w')ov='active';
@@ -3911,7 +4123,9 @@ async function renderEmp(){
   if(empTab==='help'){renderHelpView();return}
   if(empTab==='performance'){renderPerformanceView();return}
 
-  const viewDateObj=new Date();viewDateObj.setDate(viewDateObj.getDate()+punchDateOffset);
+  // 查看日期必须与 tdStr() 同源（serverDate，含服务器偏差），否则本地时钟跨日偏差会让
+  // isToday 误判为 false，员工在"今天"看到按钮被禁用为"仅供预览"而打不了卡
+  const viewDateObj=serverDate();viewDateObj.setDate(viewDateObj.getDate()+punchDateOffset);
   const viewDate=ymd(viewDateObj);
   // 查看历史/未来日期时，先从 Supabase 拉取该日打卡记录，避免本地缓存缺失导致状态为空
   await ensurePunchesForDate(viewDate);
@@ -4529,8 +4743,19 @@ function renderPickView(){
 }
 
 // ===== 员工端：选班情况实时计数表（只读，伴随实际选班实时更新）=====
+let _countPicksSig='';
 function setCountWeek(off){countWeekOffset=off;renderCountView()}
-function renderCountView(){
+async function renderCountView(){
+  // 进入计数表时强制拉取最新选班快照，避免本地/localStorage 缓存为空导致全 0
+  if(fbReady){
+    try{
+      const fresh=await pullPicksSelCfg(true);
+      if(fresh){
+        const sig=JSON.stringify(picks);
+        if(sig!==_countPicksSig){_countPicksSig=sig;renderCountView();return;}
+      }
+    }catch(e){}
+  }
   const curWs=weekStartOf(new Date()),ws=addDays(curWs,countWeekOffset*7),days=weekDaysArr(ws);
   let html=rulesBlockHtml();
   html+=`<div class="week-switch"><button class="${countWeekOffset===0?'active':''}" onclick="setCountWeek(0)">本周</button><button class="${countWeekOffset===1?'active':''}" onclick="setCountWeek(1)">下周</button></div>`;
@@ -4542,7 +4767,30 @@ function renderCountView(){
 
 // ===== 员工端：换班（转让班次给任意成员，需接收人确认后生效）=====
 function svSwaps(){swaps=normalizeSwapsData(swaps);sv('cswap6',swaps)}
-async function syncSwaps(){if(!fbReady)return;try{swaps=normalizeSwapsData(swaps);await supa.from('config').upsert({id:'swaps',data:swaps,updated_at:Date.now()},{onConflict:'id'})}catch(e){console.warn('Swaps sync error:',e)}}
+// [并发安全] 无状态收敛合并：同一 id 取 decidedTs 较大者（决定晚的赢）；未决定(pending)为 0。
+// 并发接受不同换班互不覆盖；陈旧端与服务端合并后自动收敛到已决定状态，不会把在途/已决定变更覆盖回旧值。
+function mergeSwapRecords(a,b){
+  const map=new Map();const key=r=>Math.max(r&&r.decidedTs||0,0);
+  for(const r of a)if(r&&r.id)map.set(r.id,r);
+  for(const r of b)if(r&&r.id){const cur=map.get(r.id);if(!cur||key(r)>key(cur))map.set(r.id,r);}
+  return [...map.values()];
+}
+// [并发安全] 服务端读-合并-写：与服务端按 decidedTs 收敛合并后推送，避免整表 upsert 丢他人并发变更
+async function syncSwaps(){
+  if(!fbReady)return;
+  swaps=normalizeSwapsData(swaps);
+  try{
+    let merged=swaps;
+    const {data:row,error}=await supa.from('config').select('data').eq('id','swaps').maybeSingle();
+    if(!error){merged=mergeSwapRecords(normalizeSwapsData(safeExtract(row)||[]),swaps);}
+    await supa.from('config').upsert({id:'swaps',data:merged,updated_at:Date.now()},{onConflict:'id'});
+    swaps=normalizeSwapsData(merged);sv('cswap6',swaps);
+  }catch(e){console.warn('Swaps sync error:',e)}
+}
+// [并发安全] 拉取/实时路径合并：与服务端按 decidedTs 收敛，保留本地较新的决定
+function mergeSwapsFromServer(arr){
+  swaps=mergeSwapRecords(normalizeSwapsData(arr),swaps);sv('cswap6',swaps);
+}
 function shiftNameOf(sid){const s=state.shifts.find(x=>Number(x.id)===Number(sid));return s?s.name:('时段'+sid)}
 function memberNameOf(mid){const m=TEAM.find(x=>String(x.id)===String(mid));return m?m.name:('工号'+mid)}
 // 清理已结束且超过 60 天的换班记录（双向换班以 give/take 两个日期中较晚者判断）
@@ -5170,17 +5418,24 @@ async function acceptMakeup(id){
   // 避免断网/离线时审批被整体阻断，导致补卡功能在离线模式完全不可用
   let syncOk=true;
   for(const rec of recs){
-    upd(s=>{const p={...s.punches};if(!p[rec.date])p[rec.date]=[];p[rec.date]=[...p[rec.date],rec];return{...s,punches:p}});
+    // 按指纹去重再追加，防止重试审批时本地重复写入（翻倍）
+    upd(s=>{const p={...s.punches};if(!p[rec.date])p[rec.date]=[];const has=p[rec.date].some(x=>fbPunchKey(x)===fbPunchKey(rec));if(!has)p[rec.date]=[...p[rec.date],rec];return{...s,punches:p}});
     if(!fbPunches.some(x=>fbPunchKey(x)===fbPunchKey(rec)))fbPunches.push(rec);
     const ok=await fbPunch(rec);
-    if(!ok){syncOk=false;queueOfflinePunches([rec])}
+    if(!ok){syncOk=false;if(!fbReady)queueOfflinePunches([rec]);}
   }
   // 关键修复：在线模式下，仅当所有打卡记录都成功同步到 Supabase 时，才标记补卡为已通过
   // 否则员工端（其他设备）从 Supabase 查不到记录，仍会显示缺卡
   // 离线模式（fbReady=false）下允许本地生效，联网后自动同步
   if(!syncOk&&fbReady){
-    showToast(' 云端同步失败，补卡暂未生效。请检查网络后重试审批');
+    // 回滚本地写入（按指纹移除），保证管理员本机与云端一致仍显示缺卡，避免"本机已补、他端缺卡"的假象
+    for(const rec of recs){
+      upd(s=>{const p={...s.punches};if(p[rec.date])p[rec.date]=p[rec.date].filter(x=>fbPunchKey(x)!==fbPunchKey(rec));return{...s,punches:p}});
+      fbPunches=fbPunches.filter(x=>fbPunchKey(x)!==fbPunchKey(rec));
+    }
+    showToast(' 云端同步失败，补卡暂未生效（本机已回滚）。请检查网络后重试审批');
     logSecurityEvent('makeup_sync_failed',`补卡审批云端同步失败：${m.name} ${m.date} ${shiftNameOf(m.sid)}`);
+    renderAll();
     return; // 不标记为 accepted，保持 pending 状态供重试
   }
   m.status='accepted';m.decidedTs=Date.now();m.decidedBy=adminDisplayName();svMakeups();await syncMakeups();
@@ -5694,13 +5949,9 @@ function calcMonthMetrics(mid, monthStr) {
       if (hours <= 0) hours += 24; // 跨天或 00:00 结束
       workHours += hours;
 
-      // 迟到判断：使用班次自身容忍值，与打卡页 ss() 保持一致
+      // 迟到判断：复用跨午夜安全的 punchLateMin，与打卡页 ss() 判定一致
       if (startPunch && startPunch.time) {
-        const [sh, sm] = shift.start.split(':').map(Number);
-        const [ph, pm] = startPunch.time.split(':').map(Number);
-        const punchMin = ph * 60 + pm;
-        const shiftStartMin = sh * 60 + sm;
-        if (punchMin > shiftStartMin + shiftTol) lateCount++;
+        if (punchLateMin(startPunch, ds, shift) > shiftTol) lateCount++;
       }
 
       // 缺卡判断：已请假班次不计缺卡；已批准补卡可抵扣对应 start/end
@@ -6332,8 +6583,14 @@ async function resetAllBindings(){
         p_force_ids:[...forceIds],
         p_reason:reason
       });
-      if(error||!data||typeof data!=='object')throw error||new Error('全部解绑事务未返回有效结果');
-      forceout=data;
+      if(_isMissingFn(error)){
+        // Supabase 未部署 claims_unbind_atomic → 直接删行 + 发布 forceout（本地清理由下方统一处理）
+        const okc=await composeUnclaim(targetIds,[...forceIds],reason,()=>{});
+        if(!okc)throw new Error('全部解绑降级失败');
+      }else{
+        if(error||!data||typeof data!=='object')throw error||new Error('全部解绑事务未返回有效结果');
+        forceout=data;
+      }
     }catch(e){
       console.warn('reset bindings transaction error:',e);
       renderAll();showToast(`重置未完全成功：${e.message||'设备绑定事务失败'}，请检查网络后重试`);
@@ -6433,7 +6690,7 @@ async function changeAdminPwd(){
     const token=localStorage.getItem(CS6_STK)||localStorage.getItem('cs6tk');
     const expText=localStorage.getItem('cs6exp')||'';
     try{
-      const {data:rpcResult,error:rpcErr}=await supa.rpc('admin_set_pwd',token,expText,newHash);
+      const {data:rpcResult,error:rpcErr}=await supa.rpc('admin_set_pwd',{token,exp_text:expText,new_hash:newHash});
       if(rpcErr){
         console.warn('[admin_auth] admin_set_pwd RPC error:',rpcErr);
         showToast('服务端修改失败（'+((rpcErr.message||'')+'').slice(0,40)+'），已降级为本地存储');
@@ -6543,14 +6800,13 @@ async function doLogin(){
     try{
       // v2026.09.04: 添加 10s 超时保护，防止登录卡死
       const {data:rpcResult,error:rpcErr}=await Promise.race([
-        supa.rpc('admin_verify',inputHash),
+        supa.rpc('admin_verify',{input_hash:inputHash}),
         new Promise((_, reject) => setTimeout(() => reject(new Error('验证超时')), 10000))
       ]);
       if(rpcErr){
-        // 函数不存在（SQL 尚未执行）→ 标记降级，后续不再尝试
+        // 函数不存在（SQL 尚未部署）→ 本次降级到本地口令；不做永久标记，便于服务端部署后自愈
         const em=String(rpcErr.message||rpcErr||'');
         if(/does not exist|42883|undefined function|could not find/i.test(em)){
-          localStorage.setItem(CS6_SRV_FLAG,'0');
           console.info('[admin_auth] admin_verify RPC not found, falling back to local auth');
         }
         // 其他 RPC 错误（网络等）→ 静默降级，不标记（下次可能恢复）
@@ -7002,6 +7258,16 @@ function stabilizeImportedShifts(rawShifts){
     return{...sh,id};
   });
 }
+// 合并式导入（P1）：不再用文件内容整表替换 state.shifts。
+// stabilizeImportedShifts 已按开始/结束时间复用旧 ID，因此按 ID 合并即可：
+// 命中的更新、新增的追加、文件中未出现的旧班次予以保留，
+// 避免历史 picks 引用的班次因本次导入未包含而丢失定义（渲染空白/考勤错乱）。
+function mergeImportedShifts(imported){
+  const byId=new Map();
+  normalizeShiftsData(state.shifts).forEach(s=>byId.set(String(s.id),s));
+  normalizeShiftsData(imported).forEach(s=>byId.set(String(s.id),s));
+  return [...byId.values()];
+}
 function createMemberIdAllocator(team=TEAM){
   const used=new Set((team||[]).map(m=>String(m.id)));let nextId=Date.now();
   return()=>{while(used.has(String(nextId)))nextId++;const id=nextId++;used.add(String(id));return id};
@@ -7013,6 +7279,15 @@ async function persistImportedDailyPicks(dateStr,members){
   if(!fbReady)return true;
   try{
     const {data,error}=await supa.rpc('picks_import_day',{p_date:dateStr,p_members:imported});
+    if(_isMissingFn(error)){
+      // Supabase 未部署 picks_import_day → 用 pick_set 逐人落库
+      for(const [mid,sids] of Object.entries(imported)){
+        const ok=await atomicSetPick(dateStr,mid,[...new Set((sids||[]).map(Number).filter(Number.isFinite))].sort((a,b)=>a-b));
+        if(!ok)throw new Error('pick_set failed for member '+mid);
+      }
+      if(!await pullPicksSelCfg(true))throw new Error('导入后云端校验失败');
+      return true;
+    }
     if(error)throw error;
     if(data&&typeof data==='object'){picks=normalizePicksData(data);sv('cp6',picks);_invalidateMonthCache()}
     if(!await pullPicksSelCfg(true))throw new Error('导入后云端校验失败');
@@ -7069,7 +7344,8 @@ async function confirmImport(){
   if(!pend)return;
   const{shifts,assignments}=pend;
   // Update shifts while preserving IDs for equivalent time slots.
-  upd(s=>({...s,shifts}));
+  // 合并式写入（P1）：保留文件中未出现、但仍被历史 picks 引用的班次，避免整表替换丢班次。
+  upd(s=>({...s,shifts:mergeImportedShifts(shifts)}));
   // Assignment sheets have no date field, so they update today's actual picks.
   if(assignments?.length){
     const allocateMemberId=createMemberIdAllocator(),importedMembers=[];
@@ -7175,7 +7451,8 @@ async function parseScheduleBuffer(buf){
   json.forEach((row,i)=>{const keys=Object.keys(row);let n='',s='',e='',t=5;keys.forEach(k=>{const v=String(row[k]).trim(),kl=k.toLowerCase();if(kl.includes('名称')||kl.includes('班次')||(!n&&keys.indexOf(k)===0))n=v;if(kl.includes('开始')||kl.includes('start'))s=v;if(kl.includes('结束')||kl.includes('end'))e=v;if(kl.includes('容差')||kl.includes('分钟'))t=parseInt(v)||5});if(n&&s&&e)shifts.push({id:i+1,name:n,start:cl(s),end:cl(e),tolerance:t,enabled:true,cross:toM(cl(e))<=toM(cl(s))})});
   if(!shifts.length){updateSyncStatus('未识别班次数据');return false}
   // Update shifts without invalidating existing picks that reference equivalent slots.
-  shifts=stabilizeImportedShifts(shifts);state.shifts=shifts;sv('cv6',state);
+  // 合并式写入（P1）：保留文件中未出现的旧班次，避免定时同步整表替换丢班次。
+  shifts=stabilizeImportedShifts(shifts);state.shifts=mergeImportedShifts(shifts);sv('cv6',state);
   // Parse assignments if second sheet exists
   const assignSheet=wb.SheetNames.find(n=>n.includes('排班'))||wb.SheetNames[1];
   let assignmentApplied=false;
@@ -7426,7 +7703,11 @@ async function fetchAllPunches(){
   Object.entries(state.punches||{}).forEach(([date,arr])=>arr.forEach(p=>{
     if(!rows.some(r=>r.mid===p.mid&&r.date===date&&r.sid===p.sid&&r.t===p.t))rows.push({...p,date});
   }));
-  return rows;
+  // 防御性去重（P1）：历史"超时但已提交"的重试可能在云端留下重复行，
+  // 若不去重会导致备份导出与考勤报表翻倍。按指纹（fbPunchKey）去重，保留首次出现。
+  const _seen=new Set();const _dedup=[];
+  for(const r of rows){const k=fbPunchKey({...r,date:r.date});if(_seen.has(k))continue;_seen.add(k);_dedup.push(r)}
+  return _dedup;
 }
 
 async function exportPunchesBackup(){
@@ -7688,6 +7969,8 @@ function showVersionBanner(latest){
 checkAppVersion();
 setInterval(checkAppVersion,60000);
 document.addEventListener('visibilitychange',()=>{if(!document.hidden)checkAppVersion()});
+// 切回可见时全量对齐选班：修复后台期间漏收的实时事件（增量同步的自愈点）
+document.addEventListener('visibilitychange',()=>{if(!document.hidden&&fbReady)pullPicksSelCfg(true)});
 // Check every 60s if we've crossed the 7AM boundary — auto-reset bindings
 let lastResetDay='';
 (function checkReset(){
@@ -7727,7 +8010,8 @@ async function syncHistoricalPunches() {
         const key = `${punch.mid}_${punch.sid}_${punch.t}_${punch.time}`;
         if (!existingKeys.has(key)) {
           try {
-            await supa.from('punches').insert(_opqSanitize(punch));
+            const insRes = await supa.from('punches').insert(_opqSanitize(punch));
+            if (insRes && insRes.error) throw (insRes.error instanceof Error ? insRes.error : new Error(insRes.error.message || 'insert failed'));
             synced++;
           } catch (e) {
             console.warn(`[syncHistoricalPunches] 同步失败 ${key}:`, e.message);
