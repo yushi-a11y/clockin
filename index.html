@@ -1253,9 +1253,9 @@ class _FSProvider {
           return { data: result, error: null };
         }
         case 'admin_token_valid': {
-          // args: [token, expText]
-          const token = args[0];
-          const expText = args[1];
+          // args: {token, exp_text} or [token, expText]
+          const token = args.token ?? args[0];
+          const expText = args.exp_text ?? args[1];
           const doc = await this._fs.collection('config').doc('admin_auth').get();
           if (!doc.exists) return { data: { ok: true }, error: null };
           const auth = doc.data();
@@ -1264,8 +1264,8 @@ class _FSProvider {
           return { data: { ok: valid }, error: null };
         }
         case 'admin_verify': {
-          // args: [inputHash]
-          const inputHash = args[0];
+          // args: {client_hash} or [inputHash]
+          const inputHash = args.client_hash ?? args[0];
           const doc = await this._fs.collection('config').doc('admin_auth').get();
           if (!doc.exists) return { data: { ok: true, token: 'local', exp: '' }, error: null };
           const auth = doc.data();
@@ -1282,8 +1282,8 @@ class _FSProvider {
           return { data: { ok: false, reason: 'bad_credentials' }, error: null };
         }
         case 'admin_set_pwd': {
-          // args: [token, expText, newHash]
-          const newHash = args[2] || args[0];
+          // args: {token, exp_text, new_hash} or [token, expText, newHash]
+          const newHash = args.new_hash ?? args[2];
           await this._fs.collection('config').doc('admin_auth').set({
             pwdHash: newHash,
             updated_at: Date.now()
