@@ -3341,10 +3341,14 @@ async function fbPunch(punchData){
   for(let attempt=0;attempt<3;attempt++){
     // offline 是本地专有字段（punches 表无此列），写云端前统一剔除；sd（班次实例日期）已加入 OPQ_PUNCH_COLS 以支持跨天班次准确匹配
     try{
-      console.log(`[fbPunch] 尝试 ${attempt+1}/3 写入 Firestore...`);
+      console.log(`[fbPunch] 尝试 ${attempt+1}/3 写入...`);
       const res=await supa.from('punches').insert(sanitized);
       console.log('[fbPunch] insert 结果:', {data: res.data, error: res.error});
-      if(res.error){console.error('[fbPunch] insert 返回错误:', res.error);throw res.error}  // 适配器不抛异常，需手动检查 error
+      if(res.error){
+        const errDetail=typeof res.error==='object'?JSON.stringify(res.error):String(res.error);
+        console.error('[fbPunch] insert 返回错误:', errDetail);
+        throw res.error;
+      }  // 适配器不抛异常，需手动检查 error
       console.log('[fbPunch] ✓ 打卡写入成功:', sanitized);
       return true;
     }catch(e){
