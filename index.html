@@ -5740,24 +5740,44 @@ function parseMakeupTs(dateStr,timeStr){const[y,mo,d]=dateStr.split('-').map(Num
 let swapRequests=[];
 let swapFilterStatus='pending';
 function svSwapRequests(){sv('csr6',swapRequests)}
-async function syncSwapRequests(){
-  if(!fbReady)return false;
-  // Path 1: supabase-js client
-  try{
-    const {error}=await supa.from('config').upsert({id:'swap_requests',data:swapRequests,updated_at:Date.now()},{onConflict:'id'});
-    if(!error)return true;
-    console.warn('Swap sync via supa failed:',error.message||error);
-  }catch(e){console.warn('Swap sync via supa exception:',e)}
-  // Path 2: direct HTTP fallback
-  try{
-    const res=await fetch(SUPABASE_URL+'/rest/v1/config',{
-      method:'POST',
-      headers:{'apikey':SUPABASE_KEY,'Authorization':'Bearer '+SUPABASE_KEY,'Content-Type':'application/json','Prefer':'return=minimal,resolution=merge-duplicates'},
-      body:JSON.stringify({id:'swap_requests',data:swapRequests,updated_at:Date.now()})
-    });
-    if(res.ok)return true;
-    console.warn('Swap sync via fetch failed:',res.status,res.statusText);
-  }catch(e){console.warn('Swap sync via fetch exception:',e)}
+async function syncSwapRequests(maxRetries=3){
+  if(!fbReady){console.warn('[swapSync] fbReady=false, cannot sync');return false}
+  for(let attempt=1;attempt<=maxRetries;attempt++){
+    try{
+      // Step 1: 拉云端最新数据
+      let cloudData=[];
+      try{
+        const {data:sr}=await supa.from('config').select('data').eq('id','swap_requests').maybeSingle();
+        if(sr?.data&&Array.isArray(sr.data))cloudData=sr.data;
+      }catch(e){
+        // supa-js 失败，尝试 HTTP 读取
+        try{
+          const res=await fetch(SUPABASE_URL+'/rest/v1/config?id=eq.swap_requests&select=data',{headers:{'apikey':SUPABASE_KEY,'Authorization':'Bearer '+SUPABASE_KEY}});
+          if(res.ok){const rows=await res.json();if(rows.length&&Array.isArray(rows[0].data))cloudData=rows[0].data}
+        }catch(e2){}
+      }
+      // Step 2: 合并——以本地数据为主，保留云端有但本地没有的记录
+      const localIds=new Set(swapRequests.map(r=>r.id));
+      const merged=[...swapRequests];
+      cloudData.forEach(r=>{if(!localIds.has(r.id))merged.push(r)});
+      // Step 3: 写入合并后的数据
+      const {error}=await supa.from('config').upsert({id:'swap_requests',data:merged,updated_at:Date.now()},{onConflict:'id'});
+      if(!error){swapRequests=merged;sv('csr6',swapRequests);return true}
+      console.warn(`[swapSync] supa upsert failed (attempt ${attempt}):`,error.message||error);
+      // supa-js 失败，尝试 HTTP 写入
+      const res=await fetch(SUPABASE_URL+'/rest/v1/config',{
+        method:'POST',
+        headers:{'apikey':SUPABASE_KEY,'Authorization':'Bearer '+SUPABASE_KEY,'Content-Type':'application/json','Prefer':'return=minimal,resolution=merge-duplicates'},
+        body:JSON.stringify({id:'swap_requests',data:merged,updated_at:Date.now()})
+      });
+      if(res.ok){swapRequests=merged;sv('csr6',swapRequests);return true}
+      console.warn(`[swapSync] HTTP write failed (attempt ${attempt}):`,res.status,res.statusText);
+    }catch(e){
+      console.warn(`[swapSync] exception (attempt ${attempt}):`,e.message||e);
+    }
+    if(attempt<maxRetries)await new Promise(r=>setTimeout(r,1000*attempt));
+  }
+  console.error('[swapSync] all retries exhausted');
   return false;
 }
 async function fetchSwapRequests(){
