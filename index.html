@@ -6825,7 +6825,7 @@ async function doLogin(){
     try{
       // v2026.09.04: 添加 10s 超时保护，防止登录卡死
       const {data:rpcResult,error:rpcErr}=await Promise.race([
-        supa.rpc('admin_verify',{input_hash:inputHash}),
+        supa.rpc('admin_verify',{client_hash:inputHash}),
         new Promise((_, reject) => setTimeout(() => reject(new Error('验证超时')), 10000))
       ]);
       if(rpcErr){
