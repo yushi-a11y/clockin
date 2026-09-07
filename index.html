@@ -5135,9 +5135,14 @@ async function submitRetroSwap(){
   };
   swapRequests.push(newRequest);
   svSwapRequests();
-  await syncSwapRequests();
-  logEvent('申请补录换班',`${requester.name} 和 ${partner.name} 在 ${date} 的换班补录申请（${origShift.name} ↔ ${newShift.name}）`);
-  showToast('补录申请已提交，等待管理员审批');
+  const synced=await syncSwapRequests();
+  if(!synced){
+    showToast('补录申请已保存本地，但云端同步失败，管理员可能看不到');
+    console.error('[submitRetroSwap] Cloud sync failed, request saved locally only');
+  }else{
+    logEvent('申请补录换班',`${requester.name} 和 ${partner.name} 在 ${date} 的换班补录申请（${origShift.name} ↔ ${newShift.name}）`);
+    showToast('补录申请已提交，等待管理员审批');
+  }
   // 重置表单
   document.getElementById('retroSwapDate').value='';
   document.getElementById('retroSwapPartner').value='';
@@ -5604,13 +5609,43 @@ function parseMakeupTs(dateStr,timeStr){const[y,mo,d]=dateStr.split('-').map(Num
 let swapRequests=[];
 let swapFilterStatus='pending';
 function svSwapRequests(){sv('csr6',swapRequests)}
-async function syncSwapRequests(){if(!fbReady)return;try{await supa.from('config').upsert({id:'swap_requests',data:swapRequests,updated_at:Date.now()},{onConflict:'id'})}catch(e){console.warn('Swap requests sync error:',e)}}
+async function syncSwapRequests(){
+  if(!fbReady)return false;
+  // Path 1: supabase-js client
+  try{
+    const {error}=await supa.from('config').upsert({id:'swap_requests',data:swapRequests,updated_at:Date.now()},{onConflict:'id'});
+    if(!error)return true;
+    console.warn('Swap sync via supa failed:',error.message||error);
+  }catch(e){console.warn('Swap sync via supa exception:',e)}
+  // Path 2: direct HTTP fallback
+  try{
+    const res=await fetch(SUPABASE_URL+'/rest/v1/config',{
+      method:'POST',
+      headers:{'apikey':SUPABASE_KEY,'Authorization':'Bearer '+SUPABASE_KEY,'Content-Type':'application/json','Prefer':'return=minimal,resolution=merge-duplicates'},
+      body:JSON.stringify({id:'swap_requests',data:swapRequests,updated_at:Date.now()})
+    });
+    if(res.ok)return true;
+    console.warn('Swap sync via fetch failed:',res.status,res.statusText);
+  }catch(e){console.warn('Swap sync via fetch exception:',e)}
+  return false;
+}
 async function fetchSwapRequests(){
   if(!fbReady)return;
+  // Path 1: supabase-js client
   try{
     const {data:sr}=await supa.from('config').select('*').eq('id','swap_requests').maybeSingle();
-    if(sr?.data&&Array.isArray(sr.data)){swapRequests=sr.data;sv('csr6',swapRequests)}
-  }catch(e){console.warn('Fetch swap requests error:',e)}
+    if(sr?.data&&Array.isArray(sr.data)){swapRequests=sr.data;sv('csr6',swapRequests);return}
+  }catch(e){console.warn('Fetch swap requests via supa error:',e)}
+  // Path 2: direct HTTP fallback
+  try{
+    const res=await fetch(SUPABASE_URL+'/rest/v1/config?id=eq.swap_requests&select=data',{
+      headers:{'apikey':SUPABASE_KEY,'Authorization':'Bearer '+SUPABASE_KEY}
+    });
+    if(res.ok){
+      const rows=await res.json();
+      if(rows.length&&rows[0].data&&Array.isArray(rows[0].data)){swapRequests=rows[0].data;sv('csr6',swapRequests)}
+    }
+  }catch(e){console.warn('Fetch swap requests via fetch error:',e)}
 }
 function setSwapFilter(st){swapFilterStatus=st;renderSwapAdmin()}
 function renderSwapAdmin(){
