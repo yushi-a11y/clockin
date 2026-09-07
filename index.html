@@ -7343,7 +7343,9 @@ function saveMemberForm(){
     atomicSetPick(targetDate,editingId,daySids).then(ok=>{if(!ok){showToast('选班保存失败，请重试');pullPicksSelCfg().catch(()=>{})}});
     logEvent('后台改选班',`管理员通过成员表单将 ${memberNameOf(editingId)} 在 ${targetDate} 的班次改为 ${daySids.map(shiftNameOf).join('、')||'空'}`);
   }else{
-    TEAM.push({id:Date.now(),name:n,dept:d,pwd:pInput||'123456',shiftIds:[]});
+    // 新成员 ID 用现有最大 ID + 1（避免 Date.now() 超出 punches.mid 的 integer 范围）
+    const nextMid=TEAM.length?Math.max(...TEAM.map(m=>Number(m.id)).filter(Number.isFinite))+1:1;
+    TEAM.push({id:nextMid,name:n,dept:d,pwd:pInput||'123456',shiftIds:[]});
   }
   sv('ct6',TEAM);syncToFB();logEvent('成员变更',`${editingId?'编辑':'新增'}成员：${n}（${d}）`);document.getElementById('memberForm').innerHTML='';editingId=null;renderAll();showToast('已保存');
 }
