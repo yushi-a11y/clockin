@@ -5091,15 +5091,40 @@ function renderSwapView(){
   html+=`<button class="btn p" style="width:100%;padding:10px" onclick="submitRetroSwap()">提交补录申请</button>`;
   html+=`</div>`;
 
+  // 6) 单方面转班（把自己的班次转给别人，需管理员审批）
+  if(!window._transferState)window._transferState={date:'',shiftId:'',toId:'',reason:''};
+  const _ts2=window._transferState;
+  html+=`<div class="swap-card" style="border-left:3px solid var(--success)"><h4>转班给同事 <span style="font-size:10px;padding:2px 6px;background:#e8f7ee;color:#1a7f45;border-radius:8px;margin-left:6px">管理员审批</span></h4>`;
+  html+=`<div style="font-size:11px;color:var(--muted);margin-bottom:8px">把自己的班次转给同事，<b>不需要互换</b>。提交后管理员审批，通过后你的班次将转移给对方。</div>`;
+  // 日期下拉
+  html+=`<select class="swap-sel" id="transferDate"><option value="">选择日期</option>`;
+  allDates.forEach(ds=>{const d=parseYmd(ds);html+=`<option value="${ds}"${_ts2.date===ds?' selected':''}>${d.getMonth()+1}/${d.getDate()} 周${WD_NAMES[d.getDay()]}</option>`});
+  html+=`</select>`;
+  // 我的班次下拉
+  html+=`<select class="swap-sel" id="transferShift"><option value="">你的班次</option></select>`;
+  // 转给谁
+  html+=`<select class="swap-sel" id="transferTo"><option value="">转给谁</option>`;
+  TEAM.filter(m=>+m.id!==+selectedMember.id).forEach(m=>{html+=`<option value="${m.id}"${_ts2.toId===String(m.id)?' selected':''}>${esc(m.name)} · ${esc(m.dept||'')}</option>`});
+  html+=`</select>`;
+  html+=`<textarea class="swap-sel" id="transferReason" placeholder="转班原因（可选）" style="min-height:50px;resize:vertical">${esc(_ts2.reason)}</textarea>`;
+  html+=`<button class="btn p" style="width:100%;padding:10px;background:var(--success)" onclick="submitTransfer()">提交转班申请</button>`;
+  html+=`</div>`;
+
   document.getElementById('empContent').innerHTML=html;
 
-  // 渲染后用 addEventListener 绑定事件（不用 onchange 属性，避免 DOM 操作干扰）
+  // 补录换班事件绑定
   const dateSel=document.getElementById('retroSwapDate');
   const partnerSel=document.getElementById('retroSwapPartner');
   if(dateSel)dateSel.addEventListener('change',function(){_rs.date=this.value;_rs.origSid='';_rs.newSid='';_retroSwapFillShifts()});
   if(partnerSel)partnerSel.addEventListener('change',function(){_rs.partnerId=this.value;_rs.newSid='';_retroSwapFillShifts()});
-  // 恢复已有选择
   if(_rs.date||_rs.partnerId)_retroSwapFillShifts();
+
+  // 转班事件绑定
+  const tDateSel=document.getElementById('transferDate');
+  const tToSel=document.getElementById('transferTo');
+  if(tDateSel)tDateSel.addEventListener('change',function(){_ts2.date=this.value;_ts2.shiftId='';_transferFillShifts()});
+  if(tToSel)tToSel.addEventListener('change',function(){_ts2.toId=this.value});
+  if(_ts2.date)_transferFillShifts();
 }
 // 根据当前日期和对象填充班次下拉选项（不触碰其他字段）
 function _retroSwapFillShifts(){
@@ -5121,6 +5146,18 @@ function _retroSwapFillShifts(){
     partnerSids.forEach(sid=>{newHtml+=`<option value="${sid}"${_rs.newSid===String(sid)?' selected':''}>${shiftNameOf(sid)}</option>`});
   }
   newSel.innerHTML=newHtml;
+}
+// 转班：根据日期填充我的班次下拉
+function _transferFillShifts(){
+  const _ts2=window._transferState||{date:'',shiftId:''};
+  const sel=document.getElementById('transferShift');
+  if(!sel)return;
+  let h='<option value="">你的班次</option>';
+  if(_ts2.date&&selectedMember){
+    const mySids=(picks[_ts2.date]&&picks[_ts2.date][String(selectedMember.id)])||[];
+    mySids.forEach(sid=>{h+=`<option value="${sid}"${_ts2.shiftId===String(sid)?' selected':''}>${shiftNameOf(sid)}</option>`});
+  }
+  sel.innerHTML=h;
 }
 function fmtTs(ts){if(!ts)return'';const d=new Date(ts);return`${d.getMonth()+1}/${d.getDate()} ${String(d.getHours()).padStart(2,'0')}:${String(d.getMinutes()).padStart(2,'0')}`}
 // 提交补录换班申请
@@ -5180,6 +5217,59 @@ async function submitRetroSwap(){
   const ro=document.getElementById('retroSwapOriginal');if(ro)ro.innerHTML='<option value="">你的原班次</option>';
   const rn=document.getElementById('retroSwapNew');if(rn)rn.innerHTML='<option value="">对方的班次（你将换成这个）</option>';
   const rr=document.getElementById('retroSwapReason');if(rr)rr.value='';
+}
+// 提交单方面转班申请
+async function submitTransfer(){
+  if(!selectedMember){showToast('请先选择你的姓名');return}
+  const _ts2=window._transferState||{};
+  const date=_ts2.date||document.getElementById('transferDate')?.value;
+  const shiftId=_ts2.shiftId||document.getElementById('transferShift')?.value;
+  const toId=_ts2.toId||document.getElementById('transferTo')?.value;
+  const reason=(document.getElementById('transferReason')?.value||'').trim();
+  if(!date){showToast('请选择日期');return}
+  if(!shiftId){showToast('请选择要转出的班次');return}
+  if(!toId){showToast('请选择转给谁');return}
+  if(+toId===+selectedMember.id){showToast('不能转给自己');return}
+  const requester=TEAM.find(m=>+m.id===+selectedMember.id);
+  const receiver=TEAM.find(m=>+m.id===+toId);
+  if(!requester||!receiver){showToast('成员信息错误');return}
+  const shift=state.shifts.find(s=>s.id===+shiftId);
+  if(!shift){showToast('班次信息错误');return}
+  // 创建转班申请（复用 swapRequests，type 区分）
+  const newRequest={
+    id:'tr'+Date.now()+'_'+Math.random().toString(36).slice(2,6),
+    type:'transfer',
+    requester_mid:+selectedMember.id,
+    requester_name:requester.name,
+    partner_mid:+toId,
+    partner_name:receiver.name,
+    date:date,
+    original_shift_id:+shiftId,
+    original_shift_name:shiftNameOf(+shiftId),
+    new_shift_id:+shiftId,
+    new_shift_name:shiftNameOf(+shiftId),
+    reason:reason||'单方面转班',
+    status:'pending',
+    ts:Date.now(),
+    decidedTs:0,
+    decidedBy:''
+  };
+  swapRequests.push(newRequest);
+  svSwapRequests();
+  const synced=await syncSwapRequests();
+  if(!synced){
+    showToast('转班申请已保存本地，但云端同步失败');
+    console.error('[submitTransfer] Cloud sync failed');
+  }else{
+    logEvent('申请转班',`${requester.name} 将 ${date} 的 ${shift.name} 转给 ${receiver.name}`);
+    showToast('转班申请已提交，等待管理员审批');
+  }
+  // 重置
+  if(window._transferState)window._transferState={date:'',shiftId:'',toId:'',reason:''};
+  const td2=document.getElementById('transferDate');if(td2)td2.value='';
+  const ts3=document.getElementById('transferShift');if(ts3)ts3.innerHTML='<option value="">你的班次</option>';
+  const tt=document.getElementById('transferTo');if(tt)tt.value='';
+  const tr2=document.getElementById('transferReason');if(tr2)tr2.value='';
 }
 async function initiateSwap(){
   if(!selectedMember){showToast('请先选择你的姓名');return}
@@ -5682,19 +5772,21 @@ function setSwapFilter(st){swapFilterStatus=st;renderSwapAdmin()}
 function renderSwapAdmin(){
   const el=document.getElementById('swapAdminList');if(!el)return;
   const filtered=swapRequests.filter(s=>swapFilterStatus==='all'||s.status===swapFilterStatus).sort((a,b)=>b.ts-a.ts);
-  const pendingList=filtered.filter(s=>s.status==='pending');
+  const pendingN=swapRequests.filter(s=>s.status==='pending').length;
   let h=`<div style="display:flex;gap:6px;margin-bottom:10px;flex-wrap:wrap;align-items:center">`;
   const tabs=[['pending','待审批'],['approved','已通过'],['rejected','已驳回'],['all','全部']];
-  const pendingN=swapRequests.filter(s=>s.status==='pending').length;
   tabs.forEach(([k,label])=>{const n=k==='pending'&&pendingN?` <span class="tab-badge" style="background:var(--danger)">${pendingN}</span>`:'';h+=`<button class="btn-s" style="background:${swapFilterStatus===k?'var(--primary-soft)':'var(--surface)'};border:1px solid ${swapFilterStatus===k?'var(--primary)':'var(--border)'};color:${swapFilterStatus===k?'var(--primary)':'var(--muted)'}" onclick="setSwapFilter('${k}')">${label}${n}</button>`});
   h+=`<button class="btn-s" onclick="renderSwapAdmin()">刷新</button></div>`;
-  if(!filtered.length){h+=`<div style="padding:24px;text-align:center;color:var(--muted);font-size:13px">暂无${swapFilterStatus==='pending'?'待审批的':''}换班申请</div>`}
+  if(!filtered.length){h+=`<div style="padding:24px;text-align:center;color:var(--muted);font-size:13px">暂无${swapFilterStatus==='pending'?'待审批的':''}申请</div>`}
   else{
-    h+='<table class="cnt-tbl"><thead><tr><th>申请时间</th><th>员工 A</th><th>员工 B</th><th>换班日期</th><th>原班次 → 新班次</th><th>原因</th><th>状态</th><th>操作</th></tr></thead><tbody>';
+    h+='<table class="cnt-tbl"><thead><tr><th>类型</th><th>申请时间</th><th>转出方</th><th>接收方</th><th>日期</th><th>班次</th><th>原因</th><th>状态</th><th>操作</th></tr></thead><tbody>';
     filtered.forEach(s=>{
+      const isTransfer=s.type==='transfer';
+      const typeLabel=isTransfer?'<span style="color:var(--success);font-weight:600">转班</span>':'<span style="color:var(--primary);font-weight:600">换班</span>';
       const stTxt={pending:'待审批',approved:'已通过',rejected:'已驳回'}[s.status]||s.status;
       const acts=s.status==='pending'?`<button class="btn-s" style="background:var(--success);color:#fff;border:none" onclick="approveSwapRequest('${s.id}')">通过</button> <button class="btn-s" style="color:var(--danger);border-color:var(--danger)" onclick="rejectSwapRequest('${s.id}')">驳回</button>`:'—';
-      h+=`<tr><td class="wk" style="white-space:nowrap">${fmtTs(s.ts)}</td><td>${esc(s.requester_name)}</td><td>${esc(s.partner_name)}</td><td>${s.date}</td><td>${esc(s.original_shift_name)} → ${esc(s.new_shift_name)}</td><td style="font-size:11px;color:var(--muted);max-width:180px;text-align:left">${esc(s.reason||'—')}</td><td><span class="swap-st ${s.status}">${stTxt}</span></td><td>${acts}</td></tr>`;
+      const shiftCol=isTransfer?esc(s.original_shift_name):`${esc(s.original_shift_name)} → ${esc(s.new_shift_name)}`;
+      h+=`<tr><td>${typeLabel}</td><td class="wk" style="white-space:nowrap">${fmtTs(s.ts)}</td><td>${esc(s.requester_name)}</td><td>${esc(s.partner_name)}</td><td>${s.date}</td><td>${shiftCol}</td><td style="font-size:11px;color:var(--muted);max-width:180px;text-align:left">${esc(s.reason||'—')}</td><td><span class="swap-st ${s.status}">${stTxt}</span></td><td>${acts}</td></tr>`;
     });
     h+='</tbody></table>';
   }
@@ -5703,35 +5795,53 @@ function renderSwapAdmin(){
 async function approveSwapRequest(id){
   const s=swapRequests.find(x=>x.id===id);if(!s||s.status!=='pending')return;
   if(!await ensureAdminToken())return;
-  if(!confirm(`确认批准换班？\n\n${s.requester_name} 和 ${s.partner_name} 在 ${s.date} 的班次将从 ${s.original_shift_name} 改为 ${s.new_shift_name}`))return;
-  // 更新双方 picks
+  const isTransfer=s.type==='transfer';
+  const confirmMsg=isTransfer
+    ?`确认批准转班？\n\n${s.requester_name} 在 ${s.date} 的 ${s.original_shift_name} 将转给 ${s.partner_name}`
+    :`确认批准换班？\n\n${s.requester_name} 和 ${s.partner_name} 在 ${s.date} 的班次将从 ${s.original_shift_name} 改为 ${s.new_shift_name}`;
+  if(!confirm(confirmMsg))return;
   try{
     const date=s.date;
     const requesterMid=s.requester_mid;
     const partnerMid=s.partner_mid;
     const newShiftId=s.new_shift_id;
     const originalShiftId=s.original_shift_id;
-    // 更新员工 A 的选班
-    const reqPicks=picks[date]||{};
-    const reqSids=reqPicks[String(requesterMid)]||[];
-    reqPicks[String(requesterMid)]=reqSids.filter(sid=>sid!==originalShiftId);
-    if(!reqPicks[String(requesterMid)].includes(newShiftId))reqPicks[String(requesterMid)].push(newShiftId);
-    picks[date]=reqPicks;
-    // 更新员工 B 的选班
-    const partnerPicks=picks[date]||{};
-    const partnerSids=partnerPicks[String(partnerMid)]||[];
-    partnerPicks[String(partnerMid)]=partnerSids.filter(sid=>sid!==newShiftId);
-    if(!partnerPicks[String(partnerMid)].includes(originalShiftId))partnerPicks[String(partnerMid)].push(originalShiftId);
-    picks[date]=partnerPicks;
+    if(isTransfer){
+      // 转班：requester 失去班次，partner 获得班次
+      const reqPicks=picks[date]||{};
+      const reqSids=reqPicks[String(requesterMid)]||[];
+      reqPicks[String(requesterMid)]=reqSids.filter(sid=>sid!==originalShiftId);
+      picks[date]=reqPicks;
+      const partnerPicks=picks[date]||{};
+      const partnerSids=partnerPicks[String(partnerMid)]||[];
+      if(!partnerSids.includes(newShiftId))partnerSids.push(newShiftId);
+      partnerPicks[String(partnerMid)]=partnerSids;
+      picks[date]=partnerPicks;
+    }else{
+      // 换班：双方互换班次
+      const reqPicks=picks[date]||{};
+      const reqSids=reqPicks[String(requesterMid)]||[];
+      reqPicks[String(requesterMid)]=reqSids.filter(sid=>sid!==originalShiftId);
+      if(!reqPicks[String(requesterMid)].includes(newShiftId))reqPicks[String(requesterMid)].push(newShiftId);
+      picks[date]=reqPicks;
+      const partnerPicks=picks[date]||{};
+      const partnerSids=partnerPicks[String(partnerMid)]||[];
+      partnerPicks[String(partnerMid)]=partnerSids.filter(sid=>sid!==newShiftId);
+      if(!partnerPicks[String(partnerMid)].includes(originalShiftId))partnerPicks[String(partnerMid)].push(originalShiftId);
+      picks[date]=partnerPicks;
+    }
     sv('cp6',picks);
-    // 同步到 Supabase
     if(fbReady){
       await supa.from('config').upsert({id:'picks',data:picks,updated_at:Date.now()},{onConflict:'id'});
     }
     s.status='approved';s.decidedTs=Date.now();s.decidedBy=adminDisplayName();
     svSwapRequests();await syncSwapRequests();
-    logEvent('批准换班',`管理员批准 ${s.requester_name} 和 ${s.partner_name} 在 ${s.date} 的换班申请`);
-    showToast('换班已批准，双方选班记录已更新');
+    const actionLabel=isTransfer?'批准转班':'批准换班';
+    const actionDesc=isTransfer
+      ?`管理员批准 ${s.requester_name} 将 ${s.date} 的 ${s.original_shift_name} 转给 ${s.partner_name}`
+      :`管理员批准 ${s.requester_name} 和 ${s.partner_name} 在 ${s.date} 的换班申请`;
+    logEvent(actionLabel,actionDesc);
+    showToast(isTransfer?'转班已批准，班次已转移':'换班已批准，双方选班记录已更新');
     renderSwapAdmin();updateSwapAdminBadge();renderAll();
   }catch(e){
     console.error('Approve swap error:',e);
