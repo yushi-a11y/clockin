@@ -1402,6 +1402,7 @@ function loadFirebaseSDK(){
 
 (function initDB() {
   console.log('Database provider:', DB_PROVIDER);
+  console.log('[build] 2026-09-07d client_hash+delete-eq+cols');
   if (DB_PROVIDER === 'firestore') {
     // 懒加载 SDK 后再初始化；SDK 不可达（gstatic 被墙）则回退 Supabase，保证应用可用。
     loadFirebaseSDK().then(ok => {
@@ -3142,8 +3143,8 @@ async function testFBConnection(){
     }else{
       showToast('连接异常：写入验证失败');
     }
-    // 清理测试数据
-    await supa.from('config').eq('id','_conn_test').delete();
+    // 清理测试数据（filter 必须跟在动词 delete() 之后）
+    await supa.from('config').delete().eq('id','_conn_test');
   }catch(e){
     showToast('连接失败：'+e.message);
   }finally{
@@ -8061,7 +8062,7 @@ chkSess();initSupabaseTables().then(()=>{initFBListeners();syncServerTime(true);
   if(!fbReady)return;
   try{
     await Promise.race([supa.from('config').upsert({id:'_diag',data:{t:Date.now()},updated_at:Date.now()},{onConflict:'id'}),new Promise((_,r)=>setTimeout(()=>r(new Error('超时')),5000))]);
-    await Promise.race([supa.from('config').eq('id','_diag').delete(),new Promise((_,r)=>setTimeout(()=>r(new Error('超时')),3000))]);
+    await Promise.race([supa.from('config').delete().eq('id','_diag'),new Promise((_,r)=>setTimeout(()=>r(new Error('超时')),3000))]);
   }catch(e){console.warn('Supabase写入不可用:',e.message)}
 })();
 if(!fbReady)document.getElementById('syncBadge').innerHTML='<span class="dot"></span>单机版';
