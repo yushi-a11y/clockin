@@ -1845,7 +1845,12 @@ let _securityChecksPassed=false;
 //    在关键写操作前调用：验证服务端 HMAC 令牌仍然有效。
 //    双轨兼容：本地模式直接放行；服务端模式尝试验证，RPC 不可达时放行（不阻塞操作）。
 async function ensureAdminToken(){
-  if(!isSrvAdminMode())return true;
+  if(!isSrvAdminMode()){
+    // 本地降级会话没有服务端 HMAC 令牌，无法通过补卡等服务端鉴权。
+    // 在线时强制重新走服务端登录；离线（fbReady=false）仍放行本地操作。
+    if(fbReady){showToast('当前为本地会话，请重新登录（服务端验证）后再审批');return false;}
+    return true;
+  }
   const token=localStorage.getItem(CS6_STK)||localStorage.getItem('cs6tk');
   const expText=localStorage.getItem('cs6exp')||'';
   if(!token||!expText)return false;
@@ -1855,6 +1860,7 @@ async function ensureAdminToken(){
     logSecurityEvent('server_token_expired','Token expired before admin operation');
     localStorage.removeItem('cs6');localStorage.removeItem('cs6tk');
     localStorage.removeItem(CS6_SRV);localStorage.removeItem('cs6exp');localStorage.removeItem(CS6_STK);
+    showToast('管理员会话已过期，请重新登录');
     return false;
   }
   // 尽力服务端校验（RPC 不可达时不阻塞操作）
@@ -1865,8 +1871,8 @@ async function ensureAdminToken(){
       // RPC 不存在或其他错误 → 不阻塞（降级模式）
       return true;
     }
-    if(valid&&valid.ok===false){
-      // 服务端明确判定令牌无效
+    if(valid===false||(valid&&valid.ok===false)){
+      // 服务端明确判定令牌无效（admin_token_valid 直接返回 boolean）
       logSecurityEvent('server_token_invalid','Server rejected admin token during operation');
       localStorage.removeItem('cs6');localStorage.removeItem('cs6tk');
       localStorage.removeItem(CS6_SRV);localStorage.removeItem('cs6exp');localStorage.removeItem(CS6_STK);
