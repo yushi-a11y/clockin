@@ -2569,7 +2569,6 @@ async function syncLocCfg(){if(!fbReady)return;try{await supa.from('config').ups
 // 打卡时强制重新获取（不直接用缓存），并在管理端展示精度、实时性等反作弊提示。
 let _locCache=null;      // {lat,lng,acc,ts}
 let _locPrefetching=false;
-let _locDenied=false;    // 浏览器定位授权被拒绝（平台层无法禁止员工点拒绝，故标记并告知管理员）
 const LOC_FRESH_MS=5*60*1000; // 缓存新鲜窗口：5 分钟内直接复用（仅用于预取和权限探测）
 const LOC_SAME_KM=0.3;   // 首尾对比「同地」判定阈值（参考值，300 米）
 const LOC_LOW_ACC_M=200; // 定位精度超过此值视为「精度低」，提示管理员复核
@@ -2663,8 +2662,10 @@ function _locReadPosition(){
     }catch(e){res({err:2})}
   });
 }
-let _locDeniedAt=+(localStorage.getItem('_locDeniedAt')||'0'); // 上次拒绝时间戳，用于控制重试间隔（跨会话持久化）
-if(_locDeniedAt>0)_locDenied=true; // 恢复拒绝状态
+// 一次性迁移：清除旧的定位拒绝标记（之前拒绝后 24h 内不会重试，导致浏览器已授权仍提示拒绝）
+if(localStorage.getItem('_locDeniedAt')){localStorage.removeItem('_locDeniedAt');console.log('[loc] cleared stale _locDeniedAt')}
+let _locDeniedAt=0; // 上次拒绝时间戳，用于控制重试间隔（跨会话持久化）
+let _locDenied=false; // 浏览器定位授权被拒绝（平台层无法禁止员工点拒绝，故标记并告知管理员）
 function _setLocDenied(){
   if(_locDenied)return;
   _locDenied=true;
