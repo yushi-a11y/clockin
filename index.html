@@ -5122,7 +5122,12 @@ function renderSwapView(){
   // 转班事件绑定
   const tDateSel=document.getElementById('transferDate');
   const tToSel=document.getElementById('transferTo');
-  if(tDateSel)tDateSel.addEventListener('change',function(){_ts2.date=this.value;_ts2.shiftId='';_transferFillShifts()});
+  if(tDateSel){
+    tDateSel.addEventListener('change',function(){
+      console.log('[transfer] date changed to:',this.value);
+      _ts2.date=this.value;_ts2.shiftId='';_transferFillShifts();
+    });
+  }else{console.warn('[transfer] transferDate element not found')}
   if(tToSel)tToSel.addEventListener('change',function(){_ts2.toId=this.value});
   if(_ts2.date)_transferFillShifts();
 }
@@ -5151,13 +5156,18 @@ function _retroSwapFillShifts(){
 function _transferFillShifts(){
   const _ts2=window._transferState||{date:'',shiftId:''};
   const sel=document.getElementById('transferShift');
-  if(!sel)return;
+  if(!sel){console.warn('[transfer] transferShift element not found');return}
+  console.log('[transfer] fill shifts, date:',_ts2.date,'selectedMember:',selectedMember?.id,'picks for date:',picks[_ts2.date]);
   let h='<option value="">你的班次</option>';
   if(_ts2.date&&selectedMember){
     const mySids=(picks[_ts2.date]&&picks[_ts2.date][String(selectedMember.id)])||[];
+    console.log('[transfer] mySids:',mySids);
     mySids.forEach(sid=>{h+=`<option value="${sid}"${_ts2.shiftId===String(sid)?' selected':''}>${shiftNameOf(sid)}</option>`});
+  }else{
+    console.warn('[transfer] missing date or selectedMember, date:',_ts2.date,'member:',selectedMember?.id);
   }
   sel.innerHTML=h;
+  console.log('[transfer] options count:',sel.options.length);
 }
 function fmtTs(ts){if(!ts)return'';const d=new Date(ts);return`${d.getMonth()+1}/${d.getDate()} ${String(d.getHours()).padStart(2,'0')}:${String(d.getMinutes()).padStart(2,'0')}`}
 // 提交补录换班申请
