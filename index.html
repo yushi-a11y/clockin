@@ -6821,17 +6821,27 @@ async function doLogin(){
   const inputHash=await sha256(inputVal);
   if(!inputHash){showToast('哈希计算失败');return}
   let serverOk=false,serverToken='',serverExp='';
-  // ① 尝试服务端 admin_verify RPC（双轨：fbReady 时始终尝试，不再依赖可能残留的 SRV_FLAG）
+  // ① 尝试服务端 admin_verify RPC（用 raw fetch 绕过 supabase-js 的 404 问题）
   if(fbReady){
     localStorage.removeItem(CS6_SRV_FLAG); // 清除旧标记
     console.log('[admin_auth] entering server path, fbReady=',fbReady);
     try{
-      // v2026.09.04: 添加 10s 超时保护，防止登录卡死
-      const {data:rpcResult,error:rpcErr}=await Promise.race([
-        supa.rpc('admin_verify',{client_hash:inputHash}),
+      // 用 raw fetch 直接调用（supabase-js 在此环境 consistently 返回 404）
+      const fetchRes=await Promise.race([
+        fetch(SUPABASE_URL+'/rest/v1/rpc/admin_verify',{
+          method:'POST',
+          headers:{
+            'apikey':SUPABASE_KEY,
+            'Authorization':'Bearer '+SUPABASE_KEY,
+            'Content-Type':'application/json'
+          },
+          body:JSON.stringify({client_hash:inputHash})
+        }),
         new Promise((_, reject) => setTimeout(() => reject(new Error('验证超时')), 10000))
       ]);
-      console.log('[admin_auth] rpcResult=',rpcResult,'rpcErr=',rpcErr);
+      const rpcResult=await fetchRes.json();
+      const rpcErr=fetchRes.ok?null:{message:'HTTP '+fetchRes.status};
+      console.log('[admin_auth] fetchStatus=',fetchRes.status,'rpcResult=',rpcResult);
       if(rpcErr){
         // 函数不存在（SQL 尚未部署）→ 本次降级到本地口令；不做永久标记，便于服务端部署后自愈
         const em=String(rpcErr.message||rpcErr||'');
