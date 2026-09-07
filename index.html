@@ -6823,19 +6823,22 @@ async function doLogin(){
   let serverOk=false,serverToken='',serverExp='';
   // ① 尝试服务端 admin_verify RPC（双轨：仅在 fbReady 且未被标记为"不支持"时尝试）
   if(fbReady&&localStorage.getItem(CS6_SRV_FLAG)!=='0'){
+    console.log('[admin_auth] entering server path, fbReady=',fbReady,'flag=',localStorage.getItem(CS6_SRV_FLAG));
     try{
       // v2026.09.04: 添加 10s 超时保护，防止登录卡死
       const {data:rpcResult,error:rpcErr}=await Promise.race([
         supa.rpc('admin_verify',{client_hash:inputHash}),
         new Promise((_, reject) => setTimeout(() => reject(new Error('验证超时')), 10000))
       ]);
+      console.log('[admin_auth] rpcResult=',rpcResult,'rpcErr=',rpcErr);
       if(rpcErr){
         // 函数不存在（SQL 尚未部署）→ 本次降级到本地口令；不做永久标记，便于服务端部署后自愈
         const em=String(rpcErr.message||rpcErr||'');
         if(/does not exist|42883|undefined function|could not find/i.test(em)){
           console.info('[admin_auth] admin_verify RPC not found, falling back to local auth');
+        }else{
+          console.warn('[admin_auth] admin_verify RPC error, falling back:',rpcErr);
         }
-        // 其他 RPC 错误（网络等）→ 静默降级，不标记（下次可能恢复）
       }else if(rpcResult&&rpcResult.ok){
         serverOk=true;serverToken=rpcResult.token||'';serverExp=rpcResult.exp||'';
       }else{
