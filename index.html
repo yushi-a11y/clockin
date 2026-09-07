@@ -5795,6 +5795,13 @@ function renderSwapAdmin(){
 async function approveSwapRequest(id){
   const s=swapRequests.find(x=>x.id===id);if(!s||s.status!=='pending')return;
   if(!await ensureAdminToken())return;
+  // 审批前先从云端拉最新数据，确保基于最新状态操作
+  if(fbReady){
+    try{
+      const {data:latestPicks}=await supa.from('config').select('data').eq('id','picks').maybeSingle();
+      if(latestPicks?.data&&typeof latestPicks.data==='object'){picks=latestPicks.data;sv('cp6',picks)}
+    }catch(e){console.warn('Fetch latest picks before approve:',e)}
+  }
   const isTransfer=s.type==='transfer';
   const confirmMsg=isTransfer
     ?`确认批准转班？\n\n${s.requester_name} 在 ${s.date} 的 ${s.original_shift_name} 将转给 ${s.partner_name}`
@@ -5807,7 +5814,6 @@ async function approveSwapRequest(id){
     const newShiftId=s.new_shift_id;
     const originalShiftId=s.original_shift_id;
     if(isTransfer){
-      // 转班：requester 失去班次，partner 获得班次
       const reqPicks=picks[date]||{};
       const reqSids=reqPicks[String(requesterMid)]||[];
       reqPicks[String(requesterMid)]=reqSids.filter(sid=>sid!==originalShiftId);
@@ -5818,7 +5824,6 @@ async function approveSwapRequest(id){
       partnerPicks[String(partnerMid)]=partnerSids;
       picks[date]=partnerPicks;
     }else{
-      // 换班：双方互换班次
       const reqPicks=picks[date]||{};
       const reqSids=reqPicks[String(requesterMid)]||[];
       reqPicks[String(requesterMid)]=reqSids.filter(sid=>sid!==originalShiftId);
@@ -5831,17 +5836,40 @@ async function approveSwapRequest(id){
       picks[date]=partnerPicks;
     }
     sv('cp6',picks);
+    // 写 picks 到云端（带 HTTP 降级）
+    let picksSynced=false;
     if(fbReady){
-      await supa.from('config').upsert({id:'picks',data:picks,updated_at:Date.now()},{onConflict:'id'});
+      try{
+        const {error}=await supa.from('config').upsert({id:'picks',data:picks,updated_at:Date.now()},{onConflict:'id'});
+        if(!error)picksSynced=true;
+      }catch(e){}
+      if(!picksSynced){
+        try{
+          const res=await fetch(SUPABASE_URL+'/rest/v1/config',{
+            method:'POST',
+            headers:{'apikey':SUPABASE_KEY,'Authorization':'Bearer '+SUPABASE_KEY,'Content-Type':'application/json','Prefer':'return=minimal,resolution=merge-duplicates'},
+            body:JSON.stringify({id:'picks',data:picks,updated_at:Date.now()})
+          });
+          if(res.ok)picksSynced=true;
+        }catch(e){}
+      }
     }
     s.status='approved';s.decidedTs=Date.now();s.decidedBy=adminDisplayName();
-    svSwapRequests();await syncSwapRequests();
+    svSwapRequests();
+    const swapSynced=await syncSwapRequests();
     const actionLabel=isTransfer?'批准转班':'批准换班';
     const actionDesc=isTransfer
       ?`管理员批准 ${s.requester_name} 将 ${s.date} 的 ${s.original_shift_name} 转给 ${s.partner_name}`
       :`管理员批准 ${s.requester_name} 和 ${s.partner_name} 在 ${s.date} 的换班申请`;
     logEvent(actionLabel,actionDesc);
-    showToast(isTransfer?'转班已批准，班次已转移':'换班已批准，双方选班记录已更新');
+    if(!picksSynced){
+      showToast('班次已更新本地，但云端同步失败，员工端可能看不到变化');
+      console.error('[approveSwapRequest] Picks sync failed');
+    }else if(!swapSynced){
+      showToast('班次已更新，但审批记录同步失败');
+    }else{
+      showToast(isTransfer?'转班已批准，班次已转移':'换班已批准，双方选班记录已更新');
+    }
     renderSwapAdmin();updateSwapAdminBadge();renderAll();
   }catch(e){
     console.error('Approve swap error:',e);
@@ -5851,12 +5879,15 @@ async function approveSwapRequest(id){
 async function rejectSwapRequest(id){
   const s=swapRequests.find(x=>x.id===id);if(!s||s.status!=='pending')return;
   if(!await ensureAdminToken())return;
-  const reason=prompt(`驳回 ${s.requester_name} 的换班申请？请填写原因（可选）：`);
+  const reason=prompt(`驳回 ${s.requester_name} 的申请？请填写原因（可选）：`);
   if(reason===null)return;
   s.status='rejected';s.decidedTs=Date.now();s.decidedBy=adminDisplayName();s.rejectReason=(reason||'').trim();
-  svSwapRequests();await syncSwapRequests();
-  logEvent('驳回换班',`管理员驳回 ${s.requester_name} 和 ${s.partner_name} 在 ${s.date} 的换班申请${reason?' · 原因：'+reason:''}`);
-  showToast('已驳回');renderSwapAdmin();updateSwapAdminBadge();
+  svSwapRequests();
+  const synced=await syncSwapRequests();
+  logEvent('驳回换班',`管理员驳回 ${s.requester_name} 和 ${s.partner_name} 在 ${s.date} 的申请${reason?' · 原因：'+reason:''}`);
+  if(!synced){showToast('已驳回（本地），云端同步失败');console.error('[rejectSwapRequest] Sync failed')}
+  else{showToast('已驳回')}
+  renderSwapAdmin();updateSwapAdminBadge();
 }
 function updateSwapAdminBadge(){
   const badge=document.getElementById('swapAdminBadge');
