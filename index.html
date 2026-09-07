@@ -5070,54 +5070,68 @@ function renderSwapView(){
   html+=`</div>`;
 
   // 5) 申请补录换班（不受时间窗口限制，需管理员审批）
+  // 用状态变量管理表单值，避免 DOM 操作导致字段值丢失
+  if(!window._retroSwapState)window._retroSwapState={date:'',partnerId:'',origSid:'',newSid:'',reason:''};
+  const _rs=window._retroSwapState;
   html+=`<div class="swap-card" style="border-left:3px solid var(--primary)"><h4>申请补录换班 <span style="font-size:10px;padding:2px 6px;background:var(--primary-soft);color:var(--primary);border-radius:8px;margin-left:6px">管理员审批</span></h4>`;
   html+=`<div style="font-size:11px;color:var(--muted);margin-bottom:8px">私下已换班但忘记在系统操作？可在此提交补录申请，<b>不受时间窗口限制</b>，管理员批准后自动更新双方选班记录。</div>`;
-  html+=`<select class="swap-sel" id="retroSwapDate" onchange="updateRetroSwapForm()"><option value="">选择换班日期</option>`;
-  // 显示所有有选班的日期（包括过去日期）
+  // 日期下拉
+  html+=`<select class="swap-sel" id="retroSwapDate"><option value="">选择换班日期</option>`;
   const allDates=Object.keys(picks).filter(ds=>(picks[ds]&&picks[ds][String(selectedMember.id)]||[]).length>0).sort();
-  allDates.forEach(ds=>{const d=parseYmd(ds);html+=`<option value="${ds}">${d.getMonth()+1}/${d.getDate()} 周${WD_NAMES[d.getDay()]}</option>`});
+  allDates.forEach(ds=>{const d=parseYmd(ds);html+=`<option value="${ds}"${_rs.date===ds?' selected':''}>${d.getMonth()+1}/${d.getDate()} 周${WD_NAMES[d.getDay()]}</option>`});
   html+=`</select>`;
-  html+=`<select class="swap-sel" id="retroSwapPartner" onchange="updateRetroSwapForm()"><option value="">选择换班对象</option>`;
-  TEAM.filter(m=>+m.id!==+selectedMember.id).forEach(m=>{html+=`<option value="${m.id}">${esc(m.name)} · ${esc(m.dept||'')}</option>`});
+  // 对象下拉
+  html+=`<select class="swap-sel" id="retroSwapPartner"><option value="">选择换班对象</option>`;
+  TEAM.filter(m=>+m.id!==+selectedMember.id).forEach(m=>{html+=`<option value="${m.id}"${_rs.partnerId===String(m.id)?' selected':''}>${esc(m.name)} · ${esc(m.dept||'')}</option>`});
   html+=`</select>`;
+  // 班次下拉（选项由 JS 动态填充）
   html+=`<select class="swap-sel" id="retroSwapOriginal"><option value="">你的原班次</option></select>`;
   html+=`<select class="swap-sel" id="retroSwapNew"><option value="">对方的班次（你将换成这个）</option></select>`;
-  html+=`<textarea class="swap-sel" id="retroSwapReason" placeholder="换班原因（如：私下已协商换班，忘记在系统操作）" style="min-height:60px;resize:vertical"></textarea>`;
+  html+=`<textarea class="swap-sel" id="retroSwapReason" placeholder="换班原因（如：私下已协商换班，忘记在系统操作）" style="min-height:60px;resize:vertical">${esc(_rs.reason)}</textarea>`;
   html+=`<button class="btn p" style="width:100%;padding:10px" onclick="submitRetroSwap()">提交补录申请</button>`;
   html+=`</div>`;
 
   document.getElementById('empContent').innerHTML=html;
-}
-function fmtTs(ts){if(!ts)return'';const d=new Date(ts);return`${d.getMonth()+1}/${d.getDate()} ${String(d.getHours()).padStart(2,'0')}:${String(d.getMinutes()).padStart(2,'0')}`}
 
-// 补录换班表单联动
-function updateRetroSwapForm(){
-  const date=document.getElementById('retroSwapDate')?.value;
-  const partnerId=document.getElementById('retroSwapPartner')?.value;
+  // 渲染后用 addEventListener 绑定事件（不用 onchange 属性，避免 DOM 操作干扰）
+  const dateSel=document.getElementById('retroSwapDate');
+  const partnerSel=document.getElementById('retroSwapPartner');
+  if(dateSel)dateSel.addEventListener('change',function(){_rs.date=this.value;_rs.origSid='';_rs.newSid='';_retroSwapFillShifts()});
+  if(partnerSel)partnerSel.addEventListener('change',function(){_rs.partnerId=this.value;_rs.newSid='';_retroSwapFillShifts()});
+  // 恢复已有选择
+  if(_rs.date||_rs.partnerId)_retroSwapFillShifts();
+}
+// 根据当前日期和对象填充班次下拉选项（不触碰其他字段）
+function _retroSwapFillShifts(){
+  const _rs=window._retroSwapState||{date:'',partnerId:''};
   const origSel=document.getElementById('retroSwapOriginal');
   const newSel=document.getElementById('retroSwapNew');
   if(!origSel||!newSel)return;
-  // 更新我的原班次选项
-  origSel.innerHTML='<option value="">你的原班次</option>';
-  if(date&&selectedMember){
-    const mySids=(picks[date]&&picks[date][String(selectedMember.id)])||[];
-    mySids.forEach(sid=>{origSel.innerHTML+=`<option value="${sid}">${shiftNameOf(sid)}</option>`});
+  // 填充我的原班次
+  let origHtml='<option value="">你的原班次</option>';
+  if(_rs.date&&selectedMember){
+    const mySids=(picks[_rs.date]&&picks[_rs.date][String(selectedMember.id)])||[];
+    mySids.forEach(sid=>{origHtml+=`<option value="${sid}"${_rs.origSid===String(sid)?' selected':''}>${shiftNameOf(sid)}</option>`});
   }
-  // 更新对方的班次选项
-  newSel.innerHTML='<option value="">对方的班次（你将换成这个）</option>';
-  if(date&&partnerId){
-    const partnerSids=(picks[date]&&picks[date][String(partnerId)])||[];
-    partnerSids.forEach(sid=>{newSel.innerHTML+=`<option value="${sid}">${shiftNameOf(sid)}</option>`});
+  origSel.innerHTML=origHtml;
+  // 填充对方的班次
+  let newHtml='<option value="">对方的班次（你将换成这个）</option>';
+  if(_rs.date&&_rs.partnerId){
+    const partnerSids=(picks[_rs.date]&&picks[_rs.date][String(_rs.partnerId)])||[];
+    partnerSids.forEach(sid=>{newHtml+=`<option value="${sid}"${_rs.newSid===String(sid)?' selected':''}>${shiftNameOf(sid)}</option>`});
   }
+  newSel.innerHTML=newHtml;
 }
+function fmtTs(ts){if(!ts)return'';const d=new Date(ts);return`${d.getMonth()+1}/${d.getDate()} ${String(d.getHours()).padStart(2,'0')}:${String(d.getMinutes()).padStart(2,'0')}`}
 // 提交补录换班申请
 async function submitRetroSwap(){
   if(!selectedMember){showToast('请先选择你的姓名');return}
-  const date=document.getElementById('retroSwapDate')?.value;
-  const partnerId=document.getElementById('retroSwapPartner')?.value;
-  const originalShiftId=document.getElementById('retroSwapOriginal')?.value;
-  const newShiftId=document.getElementById('retroSwapNew')?.value;
-  const reason=document.getElementById('retroSwapReason')?.value?.trim();
+  const _rs=window._retroSwapState||{};
+  const date=_rs.date||document.getElementById('retroSwapDate')?.value;
+  const partnerId=_rs.partnerId||document.getElementById('retroSwapPartner')?.value;
+  const originalShiftId=_rs.origSid||document.getElementById('retroSwapOriginal')?.value;
+  const newShiftId=_rs.newSid||document.getElementById('retroSwapNew')?.value;
+  const reason=(document.getElementById('retroSwapReason')?.value||'').trim();
   if(!date){showToast('请选择换班日期');return}
   if(!partnerId){showToast('请选择换班对象');return}
   if(!originalShiftId){showToast('请选择你的原班次');return}
@@ -5159,12 +5173,13 @@ async function submitRetroSwap(){
     logEvent('申请补录换班',`${requester.name} 和 ${partner.name} 在 ${date} 的换班补录申请（${origShift.name} ↔ ${newShift.name}）`);
     showToast('补录申请已提交，等待管理员审批');
   }
-  // 重置表单
-  document.getElementById('retroSwapDate').value='';
-  document.getElementById('retroSwapPartner').value='';
-  document.getElementById('retroSwapOriginal').innerHTML='<option value="">你的原班次</option>';
-  document.getElementById('retroSwapNew').innerHTML='<option value="">对方的班次（你将换成这个）</option>';
-  document.getElementById('retroSwapReason').value='';
+  // 重置表单和状态
+  if(window._retroSwapState)window._retroSwapState={date:'',partnerId:'',origSid:'',newSid:'',reason:''};
+  const rd=document.getElementById('retroSwapDate');if(rd)rd.value='';
+  const rp=document.getElementById('retroSwapPartner');if(rp)rp.value='';
+  const ro=document.getElementById('retroSwapOriginal');if(ro)ro.innerHTML='<option value="">你的原班次</option>';
+  const rn=document.getElementById('retroSwapNew');if(rn)rn.innerHTML='<option value="">对方的班次（你将换成这个）</option>';
+  const rr=document.getElementById('retroSwapReason');if(rr)rr.value='';
 }
 async function initiateSwap(){
   if(!selectedMember){showToast('请先选择你的姓名');return}
