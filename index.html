@@ -1817,10 +1817,13 @@ function validatePunch(punchData){
   const srv=serverDate();
   const tomorrow=new Date(srv);tomorrow.setDate(tomorrow.getDate()+1);tomorrow.setHours(0,0,0,0);
   if(punchDate>=tomorrow)return false;
-  // Prevent punches for dates more than 8 days in the past (date-only comparison to avoid boundary false positives)
-  const weekAgo=new Date(srv);weekAgo.setDate(weekAgo.getDate()-8);weekAgo.setHours(0,0,0,0);
-  const punchDateOnly=new Date(punchDate);punchDateOnly.setHours(0,0,0,0);
-  if(punchDateOnly<weekAgo)return false;
+  // 8 天以前的实时打卡视为异常（防改表/防注入）；但补卡(makeup=true)是管理员批准的追溯补录，
+  // 天然针对更早的日期，故豁免此过去窗口（服务端仍由其 RLS/补卡 RPC 把关）。
+  if(!punchData.makeup){
+    const weekAgo=new Date(srv);weekAgo.setDate(weekAgo.getDate()-8);weekAgo.setHours(0,0,0,0);
+    const punchDateOnly=new Date(punchDate);punchDateOnly.setHours(0,0,0,0);
+    if(punchDateOnly<weekAgo)return false;
+  }
   return true;
 }
 
@@ -3375,6 +3378,22 @@ async function fbPunch(punchData){
   }
   console.error('[fbPunch] ✗ 函数结束，未成功写入');
   return false;
+}
+// 补卡专用写入（P1）：补卡是管理员批准的追溯补录，可能早于 RLS 日期窗。
+// 优先走服务端 makeup_punch_add RPC（security definer，绕过日期窗并以管理员令牌鉴权）；
+// RPC 未部署或调用失败时降级为普通 fbPunch 写入，保持现状行为不回归。
+async function writeMakeupPunch(rec){
+  try{const dayRows=await queryPunchesByDate(rec.date);if(dayRows.some(r=>fbPunchKey(r)===fbPunchKey(rec)))return true;}catch(e){}
+  if(fbReady){
+    try{
+      const token=localStorage.getItem(CS6_STK)||localStorage.getItem('cs6tk')||'';
+      const expText=localStorage.getItem('cs6exp')||'';
+      const {data,error}=await supa.rpc('makeup_punch_add',{p:_opqSanitize(rec),token,exp_text:expText});
+      if(!error)return true;
+      if(!_isMissingFn(error))console.warn('[writeMakeupPunch] rpc error:',error);
+    }catch(e){console.warn('[writeMakeupPunch] rpc exception:',e)}
+  }
+  return await fbPunch(rec);
 }
 // ====== 离线打卡补同步队列（v2026.08.07，报告 A-3）======
 // 场景：页面加载时无网/Supabase 不可达（fbReady=false），或在线写入重试 3 次仍失败。
@@ -5421,7 +5440,7 @@ async function acceptMakeup(id){
     // 按指纹去重再追加，防止重试审批时本地重复写入（翻倍）
     upd(s=>{const p={...s.punches};if(!p[rec.date])p[rec.date]=[];const has=p[rec.date].some(x=>fbPunchKey(x)===fbPunchKey(rec));if(!has)p[rec.date]=[...p[rec.date],rec];return{...s,punches:p}});
     if(!fbPunches.some(x=>fbPunchKey(x)===fbPunchKey(rec)))fbPunches.push(rec);
-    const ok=await fbPunch(rec);
+    const ok=await writeMakeupPunch(rec);
     if(!ok){syncOk=false;if(!fbReady)queueOfflinePunches([rec]);}
   }
   // 关键修复：在线模式下，仅当所有打卡记录都成功同步到 Supabase 时，才标记补卡为已通过
