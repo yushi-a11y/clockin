@@ -5080,7 +5080,7 @@ function renderSwapView(){
   html+=`<select class="swap-sel" id="retroSwapPartner" onchange="updateRetroSwapForm()"><option value="">选择换班对象</option>`;
   TEAM.filter(m=>+m.id!==+selectedMember.id).forEach(m=>{html+=`<option value="${m.id}">${esc(m.name)} · ${esc(m.dept||'')}</option>`});
   html+=`</select>`;
-  html+=`<select class="swap-sel" id="retroSwapOriginal" onchange="updateRetroSwapForm()"><option value="">你的原班次</option></select>`;
+  html+=`<select class="swap-sel" id="retroSwapOriginal"><option value="">你的原班次</option></select>`;
   html+=`<select class="swap-sel" id="retroSwapNew"><option value="">对方的班次（你将换成这个）</option></select>`;
   html+=`<textarea class="swap-sel" id="retroSwapReason" placeholder="换班原因（如：私下已协商换班，忘记在系统操作）" style="min-height:60px;resize:vertical"></textarea>`;
   html+=`<button class="btn p" style="width:100%;padding:10px" onclick="submitRetroSwap()">提交补录申请</button>`;
