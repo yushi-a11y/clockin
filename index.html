@@ -1847,8 +1847,9 @@ let _securityChecksPassed=false;
 //    双轨兼容：本地模式直接放行；服务端模式尝试验证，RPC 不可达时放行（不阻塞操作）。
 async function ensureAdminToken(){
   if(!isSrvAdminMode()){
-    // 本地降级会话没有服务端 HMAC 令牌，无法通过补卡等服务端鉴权。
-    // 在线时强制重新走服务端登录；离线（fbReady=false）仍放行本地操作。
+    // 本地会话：如果有密码哈希，可以通过 makeup_punch_add_local 审批补卡
+    const pwdHash=localStorage.getItem('ca6pwd_hash');
+    if(pwdHash)return true; // 本地会话有密码哈希，放行
     if(fbReady){showToast('当前为本地会话，请重新登录（服务端验证）后再审批');return false;}
     return true;
   }
@@ -3388,17 +3389,33 @@ async function fbPunch(punchData){
 }
 // 补卡专用写入（P1）：补卡是管理员批准的追溯补录，可能早于 RLS 日期窗。
 // 优先走服务端 makeup_punch_add RPC（security definer，绕过日期窗并以管理员令牌鉴权）；
-// RPC 未部署或调用失败时降级为普通 fbPunch 写入，保持现状行为不回归。
+// 本地会话走 makeup_punch_add_local（用密码哈希鉴权）；
+// 都失败时降级为普通 fbPunch 写入，保持现状行为不回归。
 async function writeMakeupPunch(rec){
   try{const dayRows=await queryPunchesByDate(rec.date);if(dayRows.some(r=>fbPunchKey(r)===fbPunchKey(rec)))return true;}catch(e){}
   if(fbReady){
+    // 路径 1：服务端令牌（admin_token_valid 校验）
     try{
       const token=localStorage.getItem(CS6_STK)||localStorage.getItem('cs6tk')||'';
       const expText=localStorage.getItem('cs6exp')||'';
       const {data,error}=await supa.rpc('makeup_punch_add',{p:_opqSanitize(rec),token,exp_text:expText});
       if(!error)return true;
-      if(!_isMissingFn(error))console.warn('[writeMakeupPunch] rpc error:',error);
-    }catch(e){console.warn('[writeMakeupPunch] rpc exception:',e)}
+      if(!_isMissingFn(error))console.warn('[writeMakeupPunch] makeup_punch_add error:',error);
+    }catch(e){console.warn('[writeMakeupPunch] makeup_punch_add exception:',e)}
+    // 路径 2：本地会话（密码哈希校验）
+    try{
+      const pwdHash=localStorage.getItem('ca6pwd_hash')||'';
+      if(pwdHash){
+        const fetchRes=await fetch(SUPABASE_URL+'/rest/v1/rpc/makeup_punch_add_local',{
+          method:'POST',
+          headers:{'apikey':SUPABASE_KEY,'Authorization':'Bearer '+SUPABASE_KEY,'Content-Type':'application/json'},
+          body:JSON.stringify({p:_opqSanitize(rec),pwd_hash:pwdHash})
+        });
+        if(fetchRes.ok){console.log('[writeMakeupPunch] makeup_punch_add_local success');return true;}
+        const errText=await fetchRes.text();
+        console.warn('[writeMakeupPunch] makeup_punch_add_local failed:',fetchRes.status,errText.slice(0,200));
+      }
+    }catch(e){console.warn('[writeMakeupPunch] makeup_punch_add_local exception:',e)}
   }
   return await fbPunch(rec);
 }
@@ -6892,13 +6909,14 @@ async function doLogin(){
     logEvent('管理员登录','管理员通过服务端验证登录后台');
     return;
   }
-  // ③ 降级：本地密码校验（SQL 未部署 / RPC 不可达）
+  //  降级：本地密码校验（SQL 未部署 / RPC 不可达）
   const ok=await verifyAdminPwd(inputVal);
   if(ok){
     bfResetFails('admin');
     const token=genAdminToken(); // device-bound token
     localStorage.setItem('cs6',String(Date.now()+7*864e5));
     localStorage.setItem('cs6tk',token);
+    localStorage.setItem('ca6pwd_hash',inputHash); // 存储密码哈希，供 makeup_punch_add_local 使用
     localStorage.removeItem(CS6_SRV);localStorage.removeItem('cs6exp');localStorage.removeItem(CS6_STK);
     // 本地登录成功后，尝试获取服务端令牌（用于补卡等需要服务端鉴权的操作）
     console.log('[admin_auth] local login success, attempting to get server token');
