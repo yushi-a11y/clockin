@@ -4864,6 +4864,14 @@ function mergeSwapsFromServer(arr){
 }
 function shiftNameOf(sid){const s=state.shifts.find(x=>Number(x.id)===Number(sid));return s?s.name:('时段'+sid)}
 function memberNameOf(mid){const m=TEAM.find(x=>String(x.id)===String(mid));return m?m.name:('工号'+mid)}
+// 换班/转班记录中显示姓名：优先 TEAM 反查，其次用记录中存储的 name，最后用工号
+function swapMemberName(mid,storedName){
+  const m=TEAM.find(x=>String(x.id)===String(mid));
+  if(m)return m.name;
+  // storedName 可能是真实姓名也可能是 ID，判断一下
+  if(storedName&&isNaN(Number(storedName))&&storedName!=='工号'+mid)return storedName;
+  return'工号'+mid;
+}
 // 清理已结束且超过 60 天的换班记录（双向换班以 give/take 两个日期中较晚者判断）
 function pruneSwaps(){const days=Math.max(7,+selCfg.retainDays||60);const cutoff=ymd(addDays(new Date(),-days));const before=swaps.length;swaps=swaps.filter(s=>{if(s.status==='pending'||s.status==='proxy_pending')return true;const dates=[s.date||''];if(s.exchange&&s.exchange.takeDate)dates.push(s.exchange.takeDate);return dates.some(d=>d>=cutoff)});if(swaps.length!==before)svSwaps()}
 // 我收到的待确认换班数
@@ -5816,8 +5824,8 @@ function renderSwapAdmin(){
       const stTxt={pending:'待审批',approved:'已通过',rejected:'已驳回'}[s.status]||s.status;
       const acts=s.status==='pending'?`<button class="btn-s" style="background:var(--success);color:#fff;border:none" onclick="approveSwapRequest('${s.id}')">通过</button> <button class="btn-s" style="color:var(--danger);border-color:var(--danger)" onclick="rejectSwapRequest('${s.id}')">驳回</button>`:'—';
       const shiftCol=isTransfer?esc(s.original_shift_name):`${esc(s.original_shift_name)} → ${esc(s.new_shift_name)}`;
-      const reqName=memberNameOf(s.requester_mid);
-      const partnerName=memberNameOf(s.partner_mid);
+      const reqName=swapMemberName(s.requester_mid,s.requester_name);
+      const partnerName=swapMemberName(s.partner_mid,s.partner_name);
       h+=`<tr><td>${typeLabel}</td><td class="wk" style="white-space:nowrap">${fmtTs(s.ts)}</td><td>${esc(reqName)}</td><td>${esc(partnerName)}</td><td>${s.date}</td><td>${shiftCol}</td><td style="font-size:11px;color:var(--muted);max-width:180px;text-align:left">${esc(s.reason||'—')}</td><td><span class="swap-st ${s.status}">${stTxt}</span></td><td>${acts}</td></tr>`;
     });
     h+='</tbody></table>';
@@ -5835,8 +5843,8 @@ async function approveSwapRequest(id){
     }catch(e){console.warn('Fetch latest picks before approve:',e)}
   }
   const isTransfer=s.type==='transfer';
-  const reqName=memberNameOf(s.requester_mid);
-  const partnerName=memberNameOf(s.partner_mid);
+  const reqName=swapMemberName(s.requester_mid,s.requester_name);
+  const partnerName=swapMemberName(s.partner_mid,s.partner_name);
   const confirmMsg=isTransfer
     ?`确认批准转班？\n\n${reqName} 在 ${s.date} 的 ${s.original_shift_name} 将转给 ${partnerName}`
     :`确认批准换班？\n\n${reqName} 和 ${partnerName} 在 ${s.date} 的班次将从 ${s.original_shift_name} 改为 ${s.new_shift_name}`;
@@ -5913,12 +5921,12 @@ async function approveSwapRequest(id){
 async function rejectSwapRequest(id){
   const s=swapRequests.find(x=>x.id===id);if(!s||s.status!=='pending')return;
   if(!await ensureAdminToken())return;
-  const reason=prompt(`驳回 ${memberNameOf(s.requester_mid)} 的申请？请填写原因（可选）：`);
+  const reason=prompt(`驳回 ${swapMemberName(s.requester_mid,s.requester_name)} 的申请？请填写原因（可选）：`);
   if(reason===null)return;
   s.status='rejected';s.decidedTs=Date.now();s.decidedBy=adminDisplayName();s.rejectReason=(reason||'').trim();
   svSwapRequests();
   const synced=await syncSwapRequests();
-  logEvent('驳回换班',`管理员驳回 ${memberNameOf(s.requester_mid)} 和 ${memberNameOf(s.partner_mid)} 在 ${s.date} 的申请${reason?' · 原因：'+reason:''}`);
+  logEvent('驳回换班',`管理员驳回 ${swapMemberName(s.requester_mid,s.requester_name)} 和 ${swapMemberName(s.partner_mid,s.partner_name)} 在 ${s.date} 的申请${reason?' · 原因：'+reason:''}`);
   if(!synced){showToast('已驳回（本地），云端同步失败');console.error('[rejectSwapRequest] Sync failed')}
   else{showToast('已驳回')}
   renderSwapAdmin();updateSwapAdminBadge();
