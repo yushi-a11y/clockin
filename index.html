@@ -2674,6 +2674,20 @@ function _setLocDenied(){
 }
 // 预取：员工打卡页渲染时调用；缓存新鲜/正在获取/已知拒绝则直接返回（幂等、低成本）
 async function ensureLocPrefetch(){
+  // 先问 Permissions API（不触发弹窗）：确认当前真实权限状态
+  // 即使用户之前在 app 内拒绝过，也可能已在浏览器设置中重新授权
+  try{
+    if(navigator.permissions&&navigator.permissions.query){
+      const st=await navigator.permissions.query({name:'geolocation'});
+      if(st.state==='granted'){
+        // 用户已授权（可能之前在浏览器设置中重新开启了），清除拒绝状态
+        _locDenied=false;_locDeniedAt=0;localStorage.removeItem('_locDeniedAt');
+      }else if(st.state==='denied'){
+        _setLocDenied();return;
+      }
+      // state==='prompt' 时继续尝试获取
+    }
+  }catch(e){}
   // 拒绝后每天重试一次：如果距上次拒绝已超过 24 小时，清除拒绝状态，允许再次请求
   if(_locDenied&&_locDeniedAt>0){
     if(Date.now()-_locDeniedAt<LOC_RETRY_MS)return;
@@ -2682,19 +2696,20 @@ async function ensureLocPrefetch(){
     localStorage.removeItem('_locDeniedAt');
   }
   if((_locCache&&Date.now()-_locCache.ts<LOC_FRESH_MS)||_locPrefetching)return;
-  // 先问 Permissions API（不触发弹窗）：此前已拒绝则直接标记，不再请求
-  try{
-    if(navigator.permissions&&navigator.permissions.query){
-      const st=await navigator.permissions.query({name:'geolocation'});
-      if(st.state==='denied'){_setLocDenied();return}
-    }
-  }catch(e){}
   _locPrefetching=true;
   try{const r=await _locReadPosition();if(r.loc)_locCache=r.loc;else if(r.err===1)_setLocDenied()}finally{_locPrefetching=false}
 }
 // 打卡附加定位：打卡场景不直接用缓存，强制重新获取（提高反作弊可信度），
 // 并与 2.5s 超时赛跑；返回 {loc,denied,tampered,suspicious}，永不抛错
 async function getPunchLoc(){
+  // 先查 Permissions API：用户可能已在浏览器设置中重新授权
+  try{
+    if(navigator.permissions&&navigator.permissions.query){
+      const st=await navigator.permissions.query({name:'geolocation'});
+      if(st.state==='granted'){_locDenied=false;_locDeniedAt=0;localStorage.removeItem('_locDeniedAt')}
+      else if(st.state==='denied')return{loc:null,denied:true,tampered:false,suspicious:false};
+    }
+  }catch(e){}
   // 拒绝后每天重试一次：如果距上次拒绝已超过 24 小时，清除拒绝状态，允许再次请求
   if(_locDenied&&_locDeniedAt>0){
     if(Date.now()-_locDeniedAt<LOC_RETRY_MS)return{loc:null,denied:true,tampered:false,suspicious:false};
