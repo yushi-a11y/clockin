@@ -6827,15 +6827,22 @@ async function doLogin(){
     console.log('[admin_auth] entering server path, fbReady=',fbReady);
     try{
       // 用 raw fetch 直接调用（supabase-js 在此环境 consistently 返回 404）
+      const fetchUrl=SUPABASE_URL+'/rest/v1/rpc/admin_verify';
+      const fetchHeaders={
+        'apikey':SUPABASE_KEY,
+        'Authorization':'Bearer '+SUPABASE_KEY,
+        'Content-Type':'application/json'
+      };
+      const fetchBody=JSON.stringify({client_hash:inputHash});
+      console.log('[admin_auth] fetch URL:',fetchUrl);
+      console.log('[admin_auth] fetch headers:',fetchHeaders);
+      console.log('[admin_auth] fetch body:',fetchBody);
+      console.log('[admin_auth] SUPABASE_URL:',SUPABASE_URL,'SUPABASE_KEY:',SUPABASE_KEY);
       const fetchRes=await Promise.race([
-        fetch(SUPABASE_URL+'/rest/v1/rpc/admin_verify',{
+        fetch(fetchUrl,{
           method:'POST',
-          headers:{
-            'apikey':SUPABASE_KEY,
-            'Authorization':'Bearer '+SUPABASE_KEY,
-            'Content-Type':'application/json'
-          },
-          body:JSON.stringify({client_hash:inputHash})
+          headers:fetchHeaders,
+          body:fetchBody
         }),
         new Promise((_, reject) => setTimeout(() => reject(new Error('验证超时')), 10000))
       ]);
@@ -6895,15 +6902,22 @@ async function doLogin(){
     localStorage.removeItem(CS6_SRV);localStorage.removeItem('cs6exp');localStorage.removeItem(CS6_STK);
     // 本地登录成功后，尝试获取服务端令牌（用于补卡等需要服务端鉴权的操作）
     console.log('[admin_auth] local login success, attempting to get server token');
+    console.log('[admin_auth] SUPABASE_URL:',SUPABASE_URL,'SUPABASE_KEY:',SUPABASE_KEY);
     try{
-      const fetchRes=await fetch(SUPABASE_URL+'/rest/v1/rpc/admin_verify',{
+      const fetchUrl2=SUPABASE_URL+'/rest/v1/rpc/admin_verify';
+      const fetchHeaders2={
+        'apikey':SUPABASE_KEY,
+        'Authorization':'Bearer '+SUPABASE_KEY,
+        'Content-Type':'application/json'
+      };
+      const fetchBody2=JSON.stringify({client_hash:inputHash});
+      console.log('[admin_auth] fetch2 URL:',fetchUrl2);
+      console.log('[admin_auth] fetch2 headers:',fetchHeaders2);
+      console.log('[admin_auth] fetch2 body:',fetchBody2);
+      const fetchRes=await fetch(fetchUrl2,{
         method:'POST',
-        headers:{
-          'apikey':SUPABASE_KEY,
-          'Authorization':'Bearer '+SUPABASE_KEY,
-          'Content-Type':'application/json'
-        },
-        body:JSON.stringify({client_hash:inputHash})
+        headers:fetchHeaders2,
+        body:fetchBody2
       });
       if(fetchRes.ok){
         const srvResult=await fetchRes.json();
