@@ -5851,30 +5851,33 @@ async function approveSwapRequest(id){
   if(!confirm(confirmMsg))return;
   try{
     const date=s.date;
-    const requesterMid=s.requester_mid;
-    const partnerMid=s.partner_mid;
+    // 工号 → TEAM 成员 ID（picks 的 key 是 TEAM member id，不是工号）
+    const reqMember=TEAM.find(m=>String(m.name)===String(s.requester_mid)||String(m.id)===String(s.requester_mid));
+    const partnerMember=TEAM.find(m=>String(m.name)===String(s.partner_mid)||String(m.id)===String(s.partner_mid));
+    const reqMid=reqMember?reqMember.id:s.requester_mid;
+    const pMid=partnerMember?partnerMember.id:s.partner_mid;
     const newShiftId=s.new_shift_id;
     const originalShiftId=s.original_shift_id;
     if(isTransfer){
       const reqPicks=picks[date]||{};
-      const reqSids=reqPicks[String(requesterMid)]||[];
-      reqPicks[String(requesterMid)]=reqSids.filter(sid=>sid!==originalShiftId);
+      const reqSids=reqPicks[String(reqMid)]||[];
+      reqPicks[String(reqMid)]=reqSids.filter(sid=>sid!==originalShiftId);
       picks[date]=reqPicks;
       const partnerPicks=picks[date]||{};
-      const partnerSids=partnerPicks[String(partnerMid)]||[];
+      const partnerSids=partnerPicks[String(pMid)]||[];
       if(!partnerSids.includes(newShiftId))partnerSids.push(newShiftId);
-      partnerPicks[String(partnerMid)]=partnerSids;
+      partnerPicks[String(pMid)]=partnerSids;
       picks[date]=partnerPicks;
     }else{
       const reqPicks=picks[date]||{};
-      const reqSids=reqPicks[String(requesterMid)]||[];
-      reqPicks[String(requesterMid)]=reqSids.filter(sid=>sid!==originalShiftId);
-      if(!reqPicks[String(requesterMid)].includes(newShiftId))reqPicks[String(requesterMid)].push(newShiftId);
+      const reqSids=reqPicks[String(reqMid)]||[];
+      reqPicks[String(reqMid)]=reqSids.filter(sid=>sid!==originalShiftId);
+      if(!reqPicks[String(reqMid)].includes(newShiftId))reqPicks[String(reqMid)].push(newShiftId);
       picks[date]=reqPicks;
       const partnerPicks=picks[date]||{};
-      const partnerSids=partnerPicks[String(partnerMid)]||[];
-      partnerPicks[String(partnerMid)]=partnerSids.filter(sid=>sid!==newShiftId);
-      if(!partnerPicks[String(partnerMid)].includes(originalShiftId))partnerPicks[String(partnerMid)].push(originalShiftId);
+      const partnerSids=partnerPicks[String(pMid)]||[];
+      partnerPicks[String(pMid)]=partnerSids.filter(sid=>sid!==newShiftId);
+      if(!partnerPicks[String(pMid)].includes(originalShiftId))partnerPicks[String(pMid)].push(originalShiftId);
       picks[date]=partnerPicks;
     }
     sv('cp6',picks);
