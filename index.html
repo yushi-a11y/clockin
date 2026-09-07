@@ -6893,6 +6893,31 @@ async function doLogin(){
     localStorage.setItem('cs6',String(Date.now()+7*864e5));
     localStorage.setItem('cs6tk',token);
     localStorage.removeItem(CS6_SRV);localStorage.removeItem('cs6exp');localStorage.removeItem(CS6_STK);
+    // 本地登录成功后，尝试获取服务端令牌（用于补卡等需要服务端鉴权的操作）
+    console.log('[admin_auth] local login success, attempting to get server token');
+    try{
+      const fetchRes=await fetch(SUPABASE_URL+'/rest/v1/rpc/admin_verify',{
+        method:'POST',
+        headers:{
+          'apikey':SUPABASE_KEY,
+          'Authorization':'Bearer '+SUPABASE_KEY,
+          'Content-Type':'application/json'
+        },
+        body:JSON.stringify({client_hash:inputHash})
+      });
+      if(fetchRes.ok){
+        const srvResult=await fetchRes.json();
+        if(srvResult&&srvResult.ok&&srvResult.token){
+          console.log('[admin_auth] got server token after local login');
+          localStorage.setItem(CS6_SRV,'1');
+          localStorage.setItem('cs6exp',srvResult.exp);
+          localStorage.setItem(CS6_STK,srvResult.token);
+          localStorage.setItem('cs6tk',srvResult.token); // 覆盖本地令牌，使用服务端令牌
+        }
+      }
+    }catch(e){
+      console.warn('[admin_auth] failed to get server token after local login:',e);
+    }
     document.getElementById('adminLink').classList.add('show');
     closeLogin();showToast('登录成功');switchPage('admin');
     logSecurityEvent('admin_login_success','管理员登录成功（本地校验）');
