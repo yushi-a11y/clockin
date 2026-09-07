@@ -6821,9 +6821,10 @@ async function doLogin(){
   const inputHash=await sha256(inputVal);
   if(!inputHash){showToast('哈希计算失败');return}
   let serverOk=false,serverToken='',serverExp='';
-  // ① 尝试服务端 admin_verify RPC（双轨：仅在 fbReady 且未被标记为"不支持"时尝试）
-  if(fbReady&&localStorage.getItem(CS6_SRV_FLAG)!=='0'){
-    console.log('[admin_auth] entering server path, fbReady=',fbReady,'flag=',localStorage.getItem(CS6_SRV_FLAG));
+  // ① 尝试服务端 admin_verify RPC（双轨：fbReady 时始终尝试，不再依赖可能残留的 SRV_FLAG）
+  if(fbReady){
+    localStorage.removeItem(CS6_SRV_FLAG); // 清除旧标记
+    console.log('[admin_auth] entering server path, fbReady=',fbReady);
     try{
       // v2026.09.04: 添加 10s 超时保护，防止登录卡死
       const {data:rpcResult,error:rpcErr}=await Promise.race([
@@ -6894,7 +6895,7 @@ async function doLogin(){
   }
 }
 function closeLogin(){document.getElementById('loginOverlay').classList.remove('show');document.getElementById('loginInput').value=''}
-function adminLogout(){localStorage.removeItem('cs6');localStorage.removeItem('cs6tk');localStorage.removeItem(CS6_SRV);localStorage.removeItem('cs6exp');localStorage.removeItem(CS6_STK);document.getElementById('adminLink').classList.remove('show');switchPage('emp');showToast('已退出')}
+function adminLogout(){localStorage.removeItem('cs6');localStorage.removeItem('cs6tk');localStorage.removeItem(CS6_SRV);localStorage.removeItem('cs6exp');localStorage.removeItem(CS6_STK);localStorage.removeItem(CS6_SRV_FLAG);document.getElementById('adminLink').classList.remove('show');switchPage('emp');showToast('已退出')}
 async function adminClearAll(){
   // Double confirmation: first confirm dialog, then type CLEAR
   if(!confirm('⚠ 危险操作：确定清除全部数据？此操作将清除所有打卡、选班、换班、补卡、成员、时段等数据，不可恢复。'))return;
