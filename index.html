@@ -2925,15 +2925,15 @@ function mergeTeamFromCloud(cloudTeam){
 async function pullPicksSelCfg(force){if(!fbReady)return;try{
   const oldPicksSig=JSON.stringify(picks);
   const oldLocSig=JSON.stringify(locCfg);
-  // [性能] 4 个相互独立的请求改为并行发起
+  // [性能] 并行拉取 picks/selcfg/slotcap/swaps
   const [pcR,scfgR,scR,swcR]=await Promise.all([
-    supa.rpc('picks_snapshot'),
+    supa.from('config').select('*').eq('id','picks').maybeSingle(),
     supa.from('config').select('*').in('id',['selcfg','loccfg']),
     supa.from('config').select('*').eq('id','slotcap').maybeSingle(),
     supa.from('config').select('*').eq('id','swaps').maybeSingle()
   ]);
   const failed=[pcR,scfgR,scR,swcR].find(r=>r?.error);if(failed)throw failed.error;
-  const pcData=safeExtract(pcR.data),cfgRows=Array.isArray(scfgR.data)?scfgR.data:[],scData=safeExtract(scR.data),swcData=safeExtract(swcR.data);
+  const pcData=pcR.data?.data||null,cfgRows=Array.isArray(scfgR.data)?scfgR.data:[],scData=safeExtract(scR.data),swcData=safeExtract(swcR.data);
   const scfgRow=cfgRows.find(r=>r&&r.id==='selcfg')||null;
   const lcfgRow=cfgRows.find(r=>r&&r.id==='loccfg')||null;
 
