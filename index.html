@@ -5930,24 +5930,42 @@ async function approveSwapRequest(id,silent){
       picks[date]=partnerPicks;
     }
     sv('cp6',picks);
-    // 写 picks 到云端（带 HTTP 降级）
+    // 写 picks 到云端（3次重试 + HTTP 降级）
     let picksSynced=false;
     if(fbReady){
-      try{
-        const {error}=await supa.from('config').upsert({id:'picks',data:picks,updated_at:Date.now()},{onConflict:'id'});
-        if(!error)picksSynced=true;
-      }catch(e){}
-      if(!picksSynced){
+      for(let attempt=1;attempt<=3;attempt++){
         try{
-          const res=await fetch(SUPABASE_URL+'/rest/v1/config',{
-            method:'POST',
-            headers:{'apikey':SUPABASE_KEY,'Authorization':'Bearer '+SUPABASE_KEY,'Content-Type':'application/json','Prefer':'return=minimal,resolution=merge-duplicates'},
-            body:JSON.stringify({id:'picks',data:picks,updated_at:Date.now()})
-          });
-          if(res.ok)picksSynced=true;
-        }catch(e){}
+          const {error}=await supa.from('config').upsert({id:'picks',data:picks,updated_at:Date.now()},{onConflict:'id'});
+          if(!error){picksSynced=true;break}
+          console.warn(`[approveSwap] picks supa upsert failed (attempt ${attempt}):`,error.message||error);
+        }catch(e){console.warn(`[approveSwap] picks supa exception (attempt ${attempt}):`,e.message||e)}
+        if(!picksSynced){
+          try{
+            const res=await fetch(SUPABASE_URL+'/rest/v1/config',{
+              method:'POST',
+              headers:{'apikey':SUPABASE_KEY,'Authorization':'Bearer '+SUPABASE_KEY,'Content-Type':'application/json','Prefer':'return=minimal,resolution=merge-duplicates'},
+              body:JSON.stringify({id:'picks',data:picks,updated_at:Date.now()})
+            });
+            if(res.ok){picksSynced=true;break}
+            console.warn(`[approveSwap] picks HTTP write failed (attempt ${attempt}):`,res.status);
+          }catch(e){console.warn(`[approveSwap] picks HTTP exception (attempt ${attempt}):`,e.message||e)}
+        }
+        if(attempt<3)await new Promise(r=>setTimeout(r,1000*attempt));
       }
     }
+    // picks 同步失败 → 回滚本地状态，不标记为已批准
+    if(!picksSynced){
+      // 回滚 picks 到审批前的状态（从云端重新拉取）
+      try{
+        const {data:rollback}=await supa.from('config').select('data').eq('id','picks').maybeSingle();
+        if(rollback?.data&&typeof rollback.data==='object'){picks=rollback.data;sv('cp6',picks)}
+      }catch(e){}
+      showToast(' 班次更新失败：云端同步未成功，审批未生效，请重试');
+      console.error('[approveSwapRequest] Picks sync failed after 3 retries, rolled back');
+      renderSwapAdmin();updateSwapAdminBadge();
+      return;
+    }
+    // picks 同步成功 → 更新审批状态
     s.status='approved';s.decidedTs=Date.now();s.decidedBy=adminDisplayName();
     svSwapRequests();
     const swapSynced=await syncSwapRequests();
@@ -5956,11 +5974,8 @@ async function approveSwapRequest(id,silent){
       ?`管理员批准 ${reqName} 将 ${s.date} 的 ${s.original_shift_name} 转给 ${partnerName}`
       :`管理员批准 ${reqName} 和 ${partnerName} 在 ${s.date} 的换班申请`;
     logEvent(actionLabel,actionDesc);
-    if(!picksSynced){
-      showToast('班次已更新本地，但云端同步失败，员工端可能看不到变化');
-      console.error('[approveSwapRequest] Picks sync failed');
-    }else if(!swapSynced){
-      showToast('班次已更新，但审批记录同步失败');
+    if(!swapSynced){
+      showToast('⚠ 班次已更新，但审批记录同步失败（已重试3次）');
     }else{
       showToast(isTransfer?'转班已批准，班次已转移':'换班已批准，双方选班记录已更新');
     }
