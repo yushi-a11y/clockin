@@ -5810,14 +5810,21 @@ function setSwapFilter(st){swapFilterStatus=st;renderSwapAdmin()}
 function renderSwapAdmin(){
   const el=document.getElementById('swapAdminList');if(!el)return;
   const filtered=swapRequests.filter(s=>swapFilterStatus==='all'||s.status===swapFilterStatus).sort((a,b)=>b.ts-a.ts);
+  const pendingList=filtered.filter(s=>s.status==='pending');
   const pendingN=swapRequests.filter(s=>s.status==='pending').length;
   let h=`<div style="display:flex;gap:6px;margin-bottom:10px;flex-wrap:wrap;align-items:center">`;
   const tabs=[['pending','待审批'],['approved','已通过'],['rejected','已驳回'],['all','全部']];
   tabs.forEach(([k,label])=>{const n=k==='pending'&&pendingN?` <span class="tab-badge" style="background:var(--danger)">${pendingN}</span>`:'';h+=`<button class="btn-s" style="background:${swapFilterStatus===k?'var(--primary-soft)':'var(--surface)'};border:1px solid ${swapFilterStatus===k?'var(--primary)':'var(--border)'};color:${swapFilterStatus===k?'var(--primary)':'var(--muted)'}" onclick="setSwapFilter('${k}')">${label}${n}</button>`});
-  h+=`<button class="btn-s" onclick="renderSwapAdmin()">刷新</button></div>`;
+  h+=`<button class="btn-s" onclick="renderSwapAdmin()">刷新</button>`;
+  // 批量操作按钮
+  if(pendingList.length>1){
+    h+=`<button class="btn-s" style="background:var(--success);color:#fff;border:none;margin-left:auto" onclick="batchApproveSwaps()">✓ 批量通过 (${pendingList.length})</button>`;
+    h+=`<button class="btn-s" style="color:var(--danger);border-color:var(--danger)" onclick="batchRejectSwaps()"> 批量驳回</button>`;
+  }
+  h+=`</div>`;
   if(!filtered.length){h+=`<div style="padding:24px;text-align:center;color:var(--muted);font-size:13px">暂无${swapFilterStatus==='pending'?'待审批的':''}申请</div>`}
   else{
-    h+='<table class="cnt-tbl"><thead><tr><th>类型</th><th>申请时间</th><th>转出方</th><th>接收方</th><th>日期</th><th>班次</th><th>原因</th><th>状态</th><th>操作</th></tr></thead><tbody>';
+    h+='<table class="cnt-tbl"><thead><tr><th style="width:30px"><input type="checkbox" id="swapSelectAll" onchange="toggleSwapSelectAll(this.checked)"'+(pendingList.length===0?' disabled':'')+'></th><th>类型</th><th>申请时间</th><th>转出方</th><th>接收方</th><th>日期</th><th>班次</th><th>原因</th><th>状态</th><th>操作</th></tr></thead><tbody>';
     filtered.forEach(s=>{
       const isTransfer=s.type==='transfer';
       const typeLabel=isTransfer?'<span style="color:var(--success);font-weight:600">转班</span>':'<span style="color:var(--primary);font-weight:600">换班</span>';
@@ -5826,11 +5833,43 @@ function renderSwapAdmin(){
       const shiftCol=isTransfer?esc(s.original_shift_name):`${esc(s.original_shift_name)} → ${esc(s.new_shift_name)}`;
       const reqName=swapMemberName(s.requester_mid,s.requester_name);
       const partnerName=swapMemberName(s.partner_mid,s.partner_name);
-      h+=`<tr><td>${typeLabel}</td><td class="wk" style="white-space:nowrap">${fmtTs(s.ts)}</td><td>${esc(reqName)}</td><td>${esc(partnerName)}</td><td>${s.date}</td><td>${shiftCol}</td><td style="font-size:11px;color:var(--muted);max-width:180px;text-align:left">${esc(s.reason||'—')}</td><td><span class="swap-st ${s.status}">${stTxt}</span></td><td>${acts}</td></tr>`;
+      const chk=s.status==='pending'?`<input type="checkbox" class="swap-chk" data-id="${s.id}">`:'<span style="color:var(--muted-light)">—</span>';
+      h+=`<tr><td>${chk}</td><td>${typeLabel}</td><td class="wk" style="white-space:nowrap">${fmtTs(s.ts)}</td><td>${esc(reqName)}</td><td>${esc(partnerName)}</td><td>${s.date}</td><td>${shiftCol}</td><td style="font-size:11px;color:var(--muted);max-width:180px;text-align:left">${esc(s.reason||'—')}</td><td><span class="swap-st ${s.status}">${stTxt}</span></td><td>${acts}</td></tr>`;
     });
     h+='</tbody></table>';
   }
   el.innerHTML=h;
+}
+// 全选/取消全选换班
+function toggleSwapSelectAll(checked){document.querySelectorAll('.swap-chk').forEach(c=>{c.checked=checked})}
+// 批量通过换班/转班
+async function batchApproveSwaps(){
+  const checks=document.querySelectorAll('.swap-chk:checked');
+  if(!checks.length){showToast('请先勾选要通过的申请');return}
+  if(!await ensureAdminToken())return;
+  const ids=Array.from(checks).map(c=>c.dataset.id);
+  if(!confirm(`确认批量通过 ${ids.length} 条换班/转班申请？`))return;
+  let success=0,fail=0;
+  for(const id of ids){
+    try{await approveSwapRequest(id);success++}catch(e){fail++}
+  }
+  showToast(`批量完成：通过 ${success} 条${fail?' · 失败 '+fail+' 条':''}`);
+}
+// 批量驳回换班/转班
+async function batchRejectSwaps(){
+  const checks=document.querySelectorAll('.swap-chk:checked');
+  if(!checks.length){showToast('请先勾选要驳回的申请');return}
+  if(!await ensureAdminToken())return;
+  const ids=Array.from(checks).map(c=>c.dataset.id);
+  if(!confirm(`确认批量驳回 ${ids.length} 条申请？`))return;
+  let success=0;
+  for(const id of ids){
+    const s=swapRequests.find(x=>x.id===id);
+    if(s&&s.status==='pending'){s.status='rejected';s.decidedTs=Date.now();s.decidedBy=adminDisplayName();success++}
+  }
+  svSwapRequests();await syncSwapRequests();
+  showToast(`已批量驳回 ${success} 条申请`);
+  renderSwapAdmin();updateSwapAdminBadge();
 }
 async function approveSwapRequest(id){
   const s=swapRequests.find(x=>x.id===id);if(!s||s.status!=='pending')return;
