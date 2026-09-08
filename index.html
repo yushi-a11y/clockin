@@ -2545,19 +2545,24 @@ async function syncPicks(){
   try{
     // 冲突检测：如果服务端有更新的 picks，先拉取再推送
     const {data:existing}=await supa.from('config').select('updated_at').eq('id','picks').maybeSingle();
+    let pulledFromServer=false;
     if(existing?.updated_at&&existing.updated_at>picksLocalVer+2000){
       console.info('Server picks newer, pulling first...');
       const {data:pc}=await supa.from('config').select('*').eq('id','picks').maybeSingle();
       if(pc?.data&&typeof pc.data==='object'){
         if(validatePicksStructure(pc.data)){
           picks=normalizePicksData(pc.data);sv('cp6',picks);_invalidateMonthCache();
+          pulledFromServer=true;
         }else{
           logSecurityEvent('malformed_picks','syncPicks rejected malformed server snapshot');
         }
       }
     }
     picksLocalVer=Date.now();
-    await supa.from('config').upsert({id:'picks',data:picks,updated_at:picksLocalVer},{onConflict:'id'});
+    // 刚从服务器拉过就不覆盖（避免用本地旧数据覆盖服务器新数据）
+    if(!pulledFromServer){
+      await supa.from('config').upsert({id:'picks',data:picks,updated_at:picksLocalVer},{onConflict:'id'});
+    }
   }catch(e){console.warn('Picks sync error:',e)}
 }
 async function syncSelCfg(){if(!fbReady)return;try{await supa.from('config').upsert({id:'selcfg',data:selCfg,updated_at:Date.now()},{onConflict:'id'})}catch(e){console.warn('SelCfg sync error:',e)}}
