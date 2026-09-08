@@ -5639,7 +5639,7 @@ async function batchAcceptMakeups(){
   if(!confirm(`确认批量通过 ${ids.length} 条补卡申请？`))return;
   let success=0,fail=0;
   for(const id of ids){
-    try{await acceptMakeup(id);success++}catch(e){fail++}
+    try{await acceptMakeup(id,true);success++}catch(e){fail++}
   }
   showToast(`批量完成：通过 ${success} 条${fail?' · 失败 '+fail+' 条':''}`);
   renderMakeupAdmin();
@@ -5664,10 +5664,12 @@ async function batchRejectMakeups(){
 function toggleMakeupSelectAll(checked){
   document.querySelectorAll('.makeup-chk').forEach(c=>{c.checked=checked});
 }
-async function acceptMakeup(id){
+async function acceptMakeup(id,silent){
   const m=makeups.find(x=>x.id===id);if(!m||m.status!=='pending')return;
   if(!await ensureAdminToken())return;
-  if(!confirm(`批准 ${m.name} 在 ${m.date} ${shiftNameOf(m.sid)} 的${m.t==='s'?'上班':'下班'}补卡（${m.time}）？`))return;
+  if(!silent){
+    if(!confirm(`批准 ${m.name} 在 ${m.date} ${shiftNameOf(m.sid)} 的${m.t==='s'?'上班':'下班'}补卡（${m.time}）？`))return;
+  }
   // 写入 punches：使用实际打卡日历日期（跨午夜班次的下班卡落在次日），并盖上实例身份 sd=选班日期
   const punchDate=m.punchDate||makeupPunchDate(m.date,m.sid,m.t,m.mid);
   const recs=[{sid:m.sid,t:m.t,time:m.time,ts:parseMakeupTs(punchDate,m.time),mid:m.mid,date:punchDate,name:m.name,makeup:true,sd:m.date}];
@@ -5851,9 +5853,10 @@ async function batchApproveSwaps(){
   if(!confirm(`确认批量通过 ${ids.length} 条换班/转班申请？`))return;
   let success=0,fail=0;
   for(const id of ids){
-    try{await approveSwapRequest(id);success++}catch(e){fail++}
+    try{await approveSwapRequest(id,true);success++}catch(e){fail++}
   }
   showToast(`批量完成：通过 ${success} 条${fail?' · 失败 '+fail+' 条':''}`);
+  renderSwapAdmin();updateSwapAdminBadge();
 }
 // 批量驳回换班/转班
 async function batchRejectSwaps(){
@@ -5871,7 +5874,7 @@ async function batchRejectSwaps(){
   showToast(`已批量驳回 ${success} 条申请`);
   renderSwapAdmin();updateSwapAdminBadge();
 }
-async function approveSwapRequest(id){
+async function approveSwapRequest(id,silent){
   const s=swapRequests.find(x=>x.id===id);if(!s||s.status!=='pending')return;
   if(!await ensureAdminToken())return;
   // 审批前先从云端拉最新数据，确保基于最新状态操作
@@ -5884,10 +5887,12 @@ async function approveSwapRequest(id){
   const isTransfer=s.type==='transfer';
   const reqName=swapMemberName(s.requester_mid,s.requester_name);
   const partnerName=swapMemberName(s.partner_mid,s.partner_name);
-  const confirmMsg=isTransfer
-    ?`确认批准转班？\n\n${reqName} 在 ${s.date} 的 ${s.original_shift_name} 将转给 ${partnerName}`
-    :`确认批准换班？\n\n${reqName} 和 ${partnerName} 在 ${s.date} 的班次将从 ${s.original_shift_name} 改为 ${s.new_shift_name}`;
-  if(!confirm(confirmMsg))return;
+  if(!silent){
+    const confirmMsg=isTransfer
+      ?`确认批准转班？\n\n${reqName} 在 ${s.date} 的 ${s.original_shift_name} 将转给 ${partnerName}`
+      :`确认批准换班？\n\n${reqName} 和 ${partnerName} 在 ${s.date} 的班次将从 ${s.original_shift_name} 改为 ${s.new_shift_name}`;
+    if(!confirm(confirmMsg))return;
+  }
   try{
     const date=s.date;
     // 工号 → TEAM 成员 ID（picks 的 key 是 TEAM member id，不是工号）
