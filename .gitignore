@@ -35,6 +35,7 @@ outputs/team-config*.json
 outputs/swap-repair-*.json
 outputs/picks-*.json
 outputs/fix-pending-swap-*-backup.json
+outputs/e2e-verify-backup-*.json
 picks-backup-*.json
 slotcap-backup-*.json
 
