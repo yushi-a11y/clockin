@@ -2443,19 +2443,29 @@ async function composeTransferPick(dateStr,fromMid,toMid,sid,mySeq){
   if(toArr.includes(sid))return{ok:false,reason:'duplicate'};
   if(toArr.length>=MAX_PER_DAY)return{ok:false,reason:'dayfull'};
   const admin=typeof isAdminNow==='function'?isAdminNow():false;
-  // 先给接收方加（服务端校验上限），成功后再从转出方删，任一步失败都不丢班次
-  const addRes=await atomicAddPickCap(dateStr,toMid,sid,admin);
-  if(!addRes||addRes.ok===false)return addRes||{ok:false,reason:'error'};
+  // 转班对时段名额是净零变化：若先给接收方加，服务端 pick_add_cap 会把尚未离场的
+  // 转出方计入人数，导致"含转出方正好满员"的时段被误拒（线上 2026-09-09 sid22 cap5/5 复现）。
+  // 改为先删后加：先腾出一个名额再让服务端名额校验接收方；加失败立即补偿归还转出方。
   const removed=await atomicRemovePick(dateStr,fromMid,sid);
   if(!removed){
-    // 删除失败时必须撤销接收方新增，不能留下双方同时持有同一班次的半完成状态。
-    const retry=await atomicRemovePick(dateStr,fromMid,sid);
-    if(!retry){
-      const rolledBack=await atomicRemovePick(dateStr,toMid,sid);
-      console.warn('composeTransferPick: 转出失败，已尝试回滚接收方',dateStr,fromMid,toMid,sid,rolledBack);
-      await pullPicksSelCfg(true).catch(()=>{});
-      return{ok:false,reason:rolledBack?'error':'rollback_failed'};
-    }
+    // 删除失败：重拉权威数据确认是否其实已应用，避免重复操作或误报
+    await pullPicksSelCfg(true).catch(()=>{});
+    const day2=picks[dateStr]||{};
+    const f2=[...new Set((day2[fromMid]||[]).map(Number).filter(Number.isFinite))];
+    const t2=[...new Set((day2[toMid]||[]).map(Number).filter(Number.isFinite))];
+    if(!f2.includes(sid)&&t2.includes(sid))return{ok:true,alreadyApplied:true};
+    return{ok:false,reason:'not_owner'};
+  }
+  const addRes=await atomicAddPickCap(dateStr,toMid,sid,admin);
+  if(!addRes||addRes.ok===false){
+    // 补偿：优先把班次加回转出方；加回失败则用 pick_set 恢复转出方原班次行，杜绝孤儿班次
+    let backOk=false;
+    const backRes=await atomicAddPickCap(dateStr,fromMid,sid,true);
+    if(backRes&&backRes.ok!==false)backOk=true;
+    if(!backOk)backOk=await atomicSetPick(dateStr,fromMid,fromArr);
+    console.warn('composeTransferPick: 接收方加入失败，已补偿转出方',dateStr,fromMid,toMid,sid,addRes,backOk);
+    await pullPicksSelCfg(true).catch(()=>{});
+    return{ok:false,reason:backOk?((addRes&&addRes.reason)||'error'):'rollback_failed'};
   }
   await pullPicksSelCfg(true).catch(()=>{});
   return{ok:true};
@@ -5371,7 +5381,7 @@ async function acceptSwap(id){
   if(cap>0){let cnt=slotCount(s.date,swapSid,s.fromId);if(cnt>=cap){showToast('该时段已满员，无法接收');return}}
   // 在同一个 Firestore 事务中完成转出和转入，避免任一步失败造成班次丢失。
   const swapResult=await atomicTransferPick(s.date,s.fromId,s.toId,swapSid);
-  if(!swapResult.ok){showToast('换班保存失败，已刷新最新数据，请重试');try{await pullPicksSelCfg()}catch(e){};renderEmp();return}
+  if(!swapResult.ok){showToast({not_owner:'对方班次已变动，该转让不再生效，已刷新最新数据',duplicate:'你已持有该班次，无需重复接收',dayfull:'你当天班次已达上限，无法接收',weekfull:'你本周班次已达上限，无法接收',full:'该时段已满员，无法接收',capfull:'该时段已满员，无法接收',rollback_failed:'换班保存失败且自动恢复未成功，请联系管理员核查',invalid:'换班数据异常，请对方重新发起'}[swapResult.reason]||'换班保存失败，已刷新最新数据，请重试');try{await pullPicksSelCfg()}catch(e){};renderEmp();return}
   s.status='accepted';s.decidedTs=Date.now();svSwaps();await syncSwaps();
   logEvent('接受换班',`${s.toName} 接收了 ${s.fromName} 的 ${s.date} ${shiftNameOf(s.sid)} 班次`);
   // 发送审批结果通知（v2026.08.14.42）
@@ -5454,7 +5464,7 @@ async function acceptExchange(id){
   const capTake=slotCapOf(takeDate,takeSid);
   if(capTake>0){const cnt=slotCount(takeDate,takeSid,selectedMember.id);if(cnt>=capTake){showToast('对方要接收的时段已满员，无法换班');return}}
   const exchangeResult=await atomicExchangePicks(giveDate,giverId,giveSid,takeDate,selectedMember.id,takeSid);
-  if(!exchangeResult.ok){showToast('换班保存失败，已刷新最新数据，请重试');try{await pullPicksSelCfg()}catch(e){};renderEmp();return}
+  if(!exchangeResult.ok){showToast({not_owner:'对方班次已变动，该换班不再生效，已刷新最新数据',duplicate:'目标班次已存在重复持有，已刷新最新数据',dayfull:'某一方当天班次将达上限，无法换班',weekfull:'某一方本周班次将达上限，无法换班',full:'目标时段已满员，无法换班',capfull:'目标时段已满员，无法换班',rollback_failed:'换班保存失败且自动恢复未成功，请联系管理员核查',invalid:'换班数据异常，请对方重新发起'}[exchangeResult.reason]||'换班保存失败，已刷新最新数据，请重试');try{await pullPicksSelCfg()}catch(e){};renderEmp();return}
   s.status='accepted';s.decidedTs=Date.now();svSwaps();await syncSwaps();
   logEvent('接受双向换班',`${selectedMember.name} 接受了与 ${s.fromName} 的双向换班：${giveDate} ${shiftNameOf(giveSid)} ↔ ${takeDate} ${shiftNameOf(takeSid)}`);
   showToast('已接受双向换班，班次已互换');renderEmp();
@@ -8588,7 +8598,7 @@ setMemberPick=function(...args){_origSetMemberPick.apply(this,args);markRenderDi
 
 tick();setInterval(tick,1000);setInterval(renderEmpIfNeeded,3e4);
 // ===== 新版本检测：部署新版后自动提醒用户刷新，避免大家一直跑旧代码 =====
-const APP_VERSION='v2026.09.09.68';
+const APP_VERSION='v2026.09.09.69';
 let _newVerNotified=false;
 async function checkAppVersion(){
   if(_newVerNotified)return;
