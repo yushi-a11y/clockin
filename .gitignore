@@ -31,6 +31,12 @@ index.html.bak.*
 # 团队配置备份（可能含密码哈希，禁止入库）
 outputs/team-config*.json
 
+# 生产排班/换班修复备份与结果（含员工数据或密码哈希，禁止入库）
+outputs/swap-repair-*.json
+outputs/picks-*.json
+picks-backup-*.json
+slotcap-backup-*.json
+
 # 上传与临时资源
 uploads/
 
