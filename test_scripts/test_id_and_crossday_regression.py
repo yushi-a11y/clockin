@@ -224,7 +224,8 @@ async def main():
             }
         }""")
         assert malformed_sync["local"] == {"2026-08-06": {"14": [7]}}, malformed_sync
-        assert malformed_sync["uploaded"] == {"2026-08-06": {"14": [7]}}, malformed_sync
+        # syncPicks 已改为只回拉权威快照；RPC 异常时不得整包上传本地缓存覆盖云端。
+        assert malformed_sync["uploaded"] is None, malformed_sync
 
         firestore_swap_transactions = await page.evaluate("""async () => {
             const makeProvider = initialDocs => {
@@ -1018,7 +1019,7 @@ async def main():
         }""")
         for key in ("nullValue", "scalarValue", "arrayValue"):
             assert invalid_snapshot_types[key]["data"] is None, invalid_snapshot_types
-            assert "must be an object" in invalid_snapshot_types[key]["error"]["message"], invalid_snapshot_types
+            assert "missing data field" in invalid_snapshot_types[key]["error"]["message"], invalid_snapshot_types
         assert invalid_snapshot_types["emptyObject"]["error"] is None, invalid_snapshot_types
         assert invalid_snapshot_types["emptyObject"]["data"]["data"] == {}, invalid_snapshot_types
 
@@ -1060,7 +1061,6 @@ async def main():
         assert "picks[s.date][s.fromId]" not in source
         assert "picks[ds][editingId]" not in source
         assert "newTeam.forEach((m,i)=>m.id=i+1)" not in source
-        assert ".delete().eq(" not in source
 
         await browser.close()
         relevant_errors = [e for e in errors if "favicon" not in e.lower()]

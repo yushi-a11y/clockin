@@ -2448,11 +2448,16 @@ async function composeTransferPick(dateStr,fromMid,toMid,sid,mySeq){
   if(!addRes||addRes.ok===false)return addRes||{ok:false,reason:'error'};
   const removed=await atomicRemovePick(dateStr,fromMid,sid);
   if(!removed){
-    // 删除失败：接收方已拿到班次，转出方仍持有 → 出现重复，补偿性重试一次
+    // 删除失败时必须撤销接收方新增，不能留下双方同时持有同一班次的半完成状态。
     const retry=await atomicRemovePick(dateStr,fromMid,sid);
-    if(!retry){console.warn('composeTransferPick: 转出方删除失败，可能出现重复班次',dateStr,fromMid,sid);return{ok:false,reason:'error'}}
+    if(!retry){
+      const rolledBack=await atomicRemovePick(dateStr,toMid,sid);
+      console.warn('composeTransferPick: 转出失败，已尝试回滚接收方',dateStr,fromMid,toMid,sid,rolledBack);
+      await pullPicksSelCfg(true).catch(()=>{});
+      return{ok:false,reason:rolledBack?'error':'rollback_failed'};
+    }
   }
-  if(picksOptSeq===mySeq){sv('cp6',picks);picksLocalVer=Date.now();_invalidateMonthCache()}
+  await pullPicksSelCfg(true).catch(()=>{});
   return{ok:true};
 }
 async function atomicExchangePicks(giveDate,giverMid,giveSid,takeDate,receiverMid,takeSid){
@@ -2506,19 +2511,29 @@ async function composeExchangePicks(giveDate,giverMid,giveSid,takeDate,receiverM
   giverGive.splice(giverGive.indexOf(giveSid),1);if(!giverTake.includes(takeSid))giverTake.push(takeSid);
   receiverTake.splice(receiverTake.indexOf(takeSid),1);if(!receiverGive.includes(giveSid))receiverGive.push(giveSid);
   if([...cache.values()].some(items=>items.length>MAX_PER_DAY))return{ok:false,reason:'dayfull'};
-  const writes=[];
-  cache.forEach((items,key)=>{const[date,mid]=key.split('\u0000');writes.push({date,mid,arr:[...new Set(items.map(Number).filter(Number.isFinite))].sort((a,b)=>a-b)})});
+  const writes=[],originals=new Map();
+  cache.forEach((items,key)=>{
+    const[date,mid]=key.split('\u0000');
+    originals.set(key,[...new Set((((picks[date]||{})[mid])||[]).map(Number).filter(Number.isFinite))].sort((a,b)=>a-b));
+    writes.push({date,mid,key,arr:[...new Set(items.map(Number).filter(Number.isFinite))].sort((a,b)=>a-b)});
+  });
+  const applied=[];
   try{
     for(const w of writes){
       const ok=await atomicSetPick(w.date,w.mid,w.arr);
       if(!ok)throw new Error('pick_set failed '+w.date+'/'+w.mid);
+      applied.push(w);
     }
   }catch(e){
     console.warn('composeExchangePicks fallback error:',e);
-    try{if(typeof pullPicksSelCfg==='function')await pullPicksSelCfg(true)}catch(_){}
-    return{ok:false,reason:'error'};
+    let rollbackOk=true;
+    for(const w of applied.reverse()){
+      if(!await atomicSetPick(w.date,w.mid,originals.get(w.key)||[]))rollbackOk=false;
+    }
+    await pullPicksSelCfg(true).catch(()=>{});
+    return{ok:false,reason:rollbackOk?'error':'rollback_failed'};
   }
-  if(picksOptSeq===mySeq){_invalidateMonthCache();sv('cp6',picks);picksLocalVer=Date.now();}
+  await pullPicksSelCfg(true).catch(()=>{});
   return{ok:true};
 }
 // 清理超过 60 天的历史 picks，避免无限增长
@@ -2539,31 +2554,50 @@ async function syncToFB(){
   }catch(e){console.warn('Sync error:',e);return false}
 }
 // 单独同步选班数据 / 选班规则（避免每次都推送全部 config）
-let picksLocalVer=0; // 本地 picks 最后写入时间（0=尚未写过，首次拉取直接应用）
-async function syncPicks(){
-  if(!fbReady)return;
+let picksLocalVer=0; // 最近一次应用权威快照的服务端版本/本地时间，仅用于诊断
+// Supabase 已服务端化为独立 picks 表；picks_snapshot 是唯一权威读入口。
+// config.picks 仅是兼容旧客户端的镜像，绝不能再作为新版客户端的权威数据覆盖行级表。
+async function fetchAuthoritativePicksSnapshot(){
+  if(!fbReady)return null;
+  let allowLegacyFallback=false;
   try{
-    // 冲突检测：如果服务端有更新的 picks，先拉取再推送
-    const {data:existing}=await supa.from('config').select('updated_at').eq('id','picks').maybeSingle();
-    let pulledFromServer=false;
-    if(existing?.updated_at&&existing.updated_at>picksLocalVer+2000){
-      console.info('Server picks newer, pulling first...');
-      const {data:pc}=await supa.from('config').select('*').eq('id','picks').maybeSingle();
-      if(pc?.data&&typeof pc.data==='object'){
-        if(validatePicksStructure(pc.data)){
-          picks=normalizePicksData(pc.data);sv('cp6',picks);_invalidateMonthCache();
-          pulledFromServer=true;
-        }else{
-          logSecurityEvent('malformed_picks','syncPicks rejected malformed server snapshot');
-        }
-      }
+    const {data,error}=await supa.rpc('picks_snapshot');
+    if(!error&&data&&typeof data==='object'){
+      const raw=safeExtract(data);
+      if(validatePicksStructure(raw))return{data:normalizePicksData(raw),updated_at:Number(data.updated_at)||Date.now(),source:'picks_snapshot'};
+      logSecurityEvent('malformed_picks','Authoritative picks_snapshot failed structure validation');
+      return null;
     }
-    picksLocalVer=Date.now();
-    // 刚从服务器拉过就不覆盖（避免用本地旧数据覆盖服务器新数据）
-    if(!pulledFromServer){
-      await supa.from('config').upsert({id:'picks',data:picks,updated_at:picksLocalVer},{onConflict:'id'});
+    if(error){
+      if(_isMissingFn(error))allowLegacyFallback=true;
+      else{console.warn('picks_snapshot error:',error);return null}
     }
-  }catch(e){console.warn('Picks sync error:',e)}
+  }catch(e){
+    if(_isMissingFn(e))allowLegacyFallback=true;
+    else{console.warn('picks_snapshot exception:',e);return null}
+  }
+  // 仅在 RPC 确认未部署时读取兼容镜像；网络抖动/服务异常时绝不拿 stale config/picks 覆盖行表状态。
+  if(!allowLegacyFallback)return null;
+  try{
+    const {data:row,error}=await supa.from('config').select('*').eq('id','picks').maybeSingle();
+    if(error)throw error;
+    if(row?.data&&validatePicksStructure(row.data))return{data:normalizePicksData(row.data),updated_at:Number(row.updated_at)||Date.now(),source:'config_fallback'};
+  }catch(e){console.warn('config.picks fallback error:',e)}
+  return null;
+}
+function applyAuthoritativePicksSnapshot(snapshot){
+  if(!snapshot?.data||!validatePicksStructure(snapshot.data))return false;
+  picks=normalizePicksData(snapshot.data);
+  sv('cp6',picks);
+  picksLocalVer=Number(snapshot.updated_at)||Date.now();
+  _invalidateMonthCache();
+  return true;
+}
+// 已废弃的整包推送入口保留为“回拉权威快照”，防止旧调用者把本地陈旧 JSON 覆盖到云端。
+async function syncPicks(){
+  const snapshot=await fetchAuthoritativePicksSnapshot();
+  if(snapshot)applyAuthoritativePicksSnapshot(snapshot);
+  return !!snapshot;
 }
 async function syncSelCfg(){if(!fbReady)return;try{await supa.from('config').upsert({id:'selcfg',data:selCfg,updated_at:Date.now()},{onConflict:'id'})}catch(e){console.warn('SelCfg sync error:',e)}}
 async function syncSlotCap(){if(!fbReady)return;try{await supa.from('config').upsert({id:'slotcap',data:slotCap,updated_at:Date.now()},{onConflict:'id'})}catch(e){console.warn('SlotCap sync error:',e)}}
@@ -2925,27 +2959,24 @@ function mergeTeamFromCloud(cloudTeam){
 async function pullPicksSelCfg(force){if(!fbReady)return;try{
   const oldPicksSig=JSON.stringify(picks);
   const oldLocSig=JSON.stringify(locCfg);
-  // [性能] 并行拉取 picks/selcfg/slotcap/swaps
+  // picks 必须从行级表的权威快照读取；其他小配置仍并行读取 config。
   const [pcR,scfgR,scR,swcR]=await Promise.all([
-    supa.from('config').select('*').eq('id','picks').maybeSingle(),
+    fetchAuthoritativePicksSnapshot(),
     supa.from('config').select('*').in('id',['selcfg','loccfg']),
     supa.from('config').select('*').eq('id','slotcap').maybeSingle(),
     supa.from('config').select('*').eq('id','swaps').maybeSingle()
   ]);
-  const failed=[pcR,scfgR,scR,swcR].find(r=>r?.error);if(failed)throw failed.error;
-  const pcData=pcR.data?.data||null,cfgRows=Array.isArray(scfgR.data)?scfgR.data:[],scData=safeExtract(scR.data),swcData=safeExtract(swcR.data);
+  const failed=[scfgR,scR,swcR].find(r=>r?.error);if(failed)throw failed.error;
+  const pcData=pcR?.data||null,cfgRows=Array.isArray(scfgR.data)?scfgR.data:[],scData=safeExtract(scR.data),swcData=safeExtract(swcR.data);
   const scfgRow=cfgRows.find(r=>r&&r.id==='selcfg')||null;
   const lcfgRow=cfgRows.find(r=>r&&r.id==='loccfg')||null;
 
   if(pcData && typeof pcData==='object'){
-    const freshLocal=!force&&picksLocalVer!==0&&(Date.now()-picksLocalVer<5000);
-    if(!freshLocal){
-      if(!validatePicksStructure(pcData)){
-        logSecurityEvent('malformed_picks','Pulled picks failed structure validation');
-        throw new Error('云端选班快照结构异常');
-      }
-      picks=normalizePicksData(pcData);sv('cp6',picks);picksLocalVer=Date.now();_invalidateMonthCache();
+    if(!validatePicksStructure(pcData)){
+      logSecurityEvent('malformed_picks','Pulled authoritative picks failed structure validation');
+      throw new Error('云端选班快照结构异常');
     }
+    applyAuthoritativePicksSnapshot(pcR);
   }
   const scfgData = safeExtract(scfgRow);
   if(scfgData&&typeof scfgData==='object'){selCfg=Object.assign({},DEF_SELCFG,scfgData);sv('csel6',selCfg)}
@@ -5320,6 +5351,8 @@ async function acceptSwap(id){
   _swapBusy=true;
   try{
   if(s.date<tdStr()){s.status='cancelled';s.decidedTs=Date.now();svSwaps();await syncSwaps();showToast('该班次已过期，换班已作废');renderEmp();return}
+  // 接受前强制读取行级 picks 权威快照，禁止用 config 镜像或本地旧缓存做归属判断。
+  if(fbReady&&!await pullPicksSelCfg(true)){showToast('无法获取最新班次，请检查网络后重试');return}
   // 转出方仍需持有该班次
   const swapSid=Number(s.sid);
   if(!Number.isFinite(swapSid)){showToast('换班班次数据异常，请重新发起');return}
@@ -5396,6 +5429,8 @@ async function acceptExchange(id){
   const giveDate=s.date,giveSid=s.sid,giverId=s.fromId,takeDate=s.exchange.takeDate,takeSid=s.exchange.takeSid;
   const td=tdStr();
   if(giveDate<td||takeDate<td){s.status='cancelled';s.decidedTs=Date.now();svSwaps();await syncSwaps();showToast('请求中包含已过去的班次，换班已作废');renderEmp();return}
+  // 接受前以行级 picks 表为准，防止两套存储分叉时用旧镜像完成半交换。
+  if(fbReady&&!await pullPicksSelCfg(true)){showToast('无法获取最新班次，请检查网络后重试');return}
   const giverGive=(picks[giveDate]&&picks[giveDate][String(giverId)])||[];
   const giverTake=(picks[takeDate]&&picks[takeDate][String(giverId)])||[];
   const receiverGive=(picks[giveDate]&&picks[giveDate][String(selectedMember.id)])||[];
@@ -5752,40 +5787,45 @@ async function rejectMakeup(id){
 function parseMakeupTs(dateStr,timeStr){const[y,mo,d]=dateStr.split('-').map(Number);const[h,mi]=timeStr.split(':').map(Number);return new Date(y,mo-1,d,h,mi).getTime()}
 
 // ===== 后台：换班审批 =====
-let swapRequests=[];
+let swapRequests=ld('csr6',[]);
 let swapFilterStatus='pending';
 function svSwapRequests(){sv('csr6',swapRequests)}
+// 同一申请按 decidedTs 收敛；任何已决定状态都优先于 pending，防止旧设备把审批结果推回待审批。
+function mergeSwapRequestRecords(a,b){
+  const map=new Map(),rank=r=>r&&r.status!=='pending'?1:0;
+  for(const r of [...(Array.isArray(a)?a:[]),...(Array.isArray(b)?b:[])]){
+    if(!r?.id)continue;
+    const cur=map.get(r.id);
+    const curTs=Number(cur?.decidedTs||cur?.ts||0),nextTs=Number(r.decidedTs||r.ts||0);
+    if(!cur||rank(r)>rank(cur)||(rank(r)===rank(cur)&&nextTs>=curTs))map.set(r.id,r);
+  }
+  return[...map.values()];
+}
 async function syncSwapRequests(maxRetries=3){
   if(!fbReady){console.warn('[swapSync] fbReady=false, cannot sync');return false}
   for(let attempt=1;attempt<=maxRetries;attempt++){
     try{
-      // Step 1: 拉云端最新数据
+      // 每次重试都重拉并按决定时间收敛，禁止 stale pending 覆盖 approved/rejected。
       let cloudData=[];
       try{
         const {data:sr}=await supa.from('config').select('data').eq('id','swap_requests').maybeSingle();
         if(sr?.data&&Array.isArray(sr.data))cloudData=sr.data;
       }catch(e){
-        // supa-js 失败，尝试 HTTP 读取
         try{
           const res=await fetch(SUPABASE_URL+'/rest/v1/config?id=eq.swap_requests&select=data',{headers:{'apikey':SUPABASE_KEY,'Authorization':'Bearer '+SUPABASE_KEY}});
           if(res.ok){const rows=await res.json();if(rows.length&&Array.isArray(rows[0].data))cloudData=rows[0].data}
         }catch(e2){}
       }
-      // Step 2: 合并——以本地数据为主，保留云端有但本地没有的记录
-      const localIds=new Set(swapRequests.map(r=>r.id));
-      const merged=[...swapRequests];
-      cloudData.forEach(r=>{if(!localIds.has(r.id))merged.push(r)});
-      // Step 3: 写入合并后的数据
+      const merged=mergeSwapRequestRecords(cloudData,swapRequests);
       const {error}=await supa.from('config').upsert({id:'swap_requests',data:merged,updated_at:Date.now()},{onConflict:'id'});
-      if(!error){swapRequests=merged;sv('csr6',swapRequests);return true}
+      if(!error){swapRequests=merged;svSwapRequests();return true}
       console.warn(`[swapSync] supa upsert failed (attempt ${attempt}):`,error.message||error);
-      // supa-js 失败，尝试 HTTP 写入
       const res=await fetch(SUPABASE_URL+'/rest/v1/config',{
         method:'POST',
         headers:{'apikey':SUPABASE_KEY,'Authorization':'Bearer '+SUPABASE_KEY,'Content-Type':'application/json','Prefer':'return=minimal,resolution=merge-duplicates'},
         body:JSON.stringify({id:'swap_requests',data:merged,updated_at:Date.now()})
       });
-      if(res.ok){swapRequests=merged;sv('csr6',swapRequests);return true}
+      if(res.ok){swapRequests=merged;svSwapRequests();return true}
       console.warn(`[swapSync] HTTP write failed (attempt ${attempt}):`,res.status,res.statusText);
     }catch(e){
       console.warn(`[swapSync] exception (attempt ${attempt}):`,e.message||e);
@@ -5796,22 +5836,22 @@ async function syncSwapRequests(maxRetries=3){
   return false;
 }
 async function fetchSwapRequests(){
-  if(!fbReady)return;
-  // Path 1: supabase-js client
+  if(!fbReady)return false;
+  // 拉取时同样收敛合并，不能用云端陈旧整包直接抹掉本机更新中的决定。
   try{
     const {data:sr}=await supa.from('config').select('*').eq('id','swap_requests').maybeSingle();
-    if(sr?.data&&Array.isArray(sr.data)){swapRequests=sr.data;sv('csr6',swapRequests);return}
+    if(sr?.data&&Array.isArray(sr.data)){swapRequests=mergeSwapRequestRecords(sr.data,swapRequests);svSwapRequests();return true}
   }catch(e){console.warn('Fetch swap requests via supa error:',e)}
-  // Path 2: direct HTTP fallback
   try{
     const res=await fetch(SUPABASE_URL+'/rest/v1/config?id=eq.swap_requests&select=data',{
       headers:{'apikey':SUPABASE_KEY,'Authorization':'Bearer '+SUPABASE_KEY}
     });
     if(res.ok){
       const rows=await res.json();
-      if(rows.length&&rows[0].data&&Array.isArray(rows[0].data)){swapRequests=rows[0].data;sv('csr6',swapRequests)}
+      if(rows.length&&rows[0].data&&Array.isArray(rows[0].data)){swapRequests=mergeSwapRequestRecords(rows[0].data,swapRequests);svSwapRequests();return true}
     }
   }catch(e){console.warn('Fetch swap requests via fetch error:',e)}
+  return false;
 }
 function setSwapFilter(st){swapFilterStatus=st;renderSwapAdmin()}
 function renderSwapAdmin(){
@@ -5858,7 +5898,10 @@ async function batchApproveSwaps(){
   if(!confirm(`确认批量通过 ${ids.length} 条换班/转班申请？`))return;
   let success=0,fail=0;
   for(const id of ids){
-    try{await approveSwapRequest(id,true);success++}catch(e){fail++}
+    try{
+      const result=await approveSwapRequest(id,true);
+      if(result?.ok)success++;else fail++;
+    }catch(e){fail++}
   }
   showToast(`批量完成：通过 ${success} 条${fail?' · 失败 '+fail+' 条':''}`);
   renderSwapAdmin();updateSwapAdminBadge();
@@ -5880,15 +5923,9 @@ async function batchRejectSwaps(){
   renderSwapAdmin();updateSwapAdminBadge();
 }
 async function approveSwapRequest(id,silent){
-  const s=swapRequests.find(x=>x.id===id);if(!s||s.status!=='pending')return;
-  if(!await ensureAdminToken())return;
-  // 审批前先从云端拉最新数据，确保基于最新状态操作
-  if(fbReady){
-    try{
-      const {data:latestPicks}=await supa.from('config').select('data').eq('id','picks').maybeSingle();
-      if(latestPicks?.data&&typeof latestPicks.data==='object'){picks=latestPicks.data;sv('cp6',picks)}
-    }catch(e){console.warn('Fetch latest picks before approve:',e)}
-  }
+  const s=swapRequests.find(x=>x.id===id);
+  if(!s||s.status!=='pending')return{ok:false,reason:'not_pending'};
+  if(!await ensureAdminToken())return{ok:false,reason:'unauthorized'};
   const isTransfer=s.type==='transfer';
   const reqName=swapMemberName(s.requester_mid,s.requester_name);
   const partnerName=swapMemberName(s.partner_mid,s.partner_name);
@@ -5896,76 +5933,47 @@ async function approveSwapRequest(id,silent){
     const confirmMsg=isTransfer
       ?`确认批准转班？\n\n${reqName} 在 ${s.date} 的 ${s.original_shift_name} 将转给 ${partnerName}`
       :`确认批准换班？\n\n${reqName} 和 ${partnerName} 在 ${s.date} 的班次将从 ${s.original_shift_name} 改为 ${s.new_shift_name}`;
-    if(!confirm(confirmMsg))return;
+    if(!confirm(confirmMsg))return{ok:false,reason:'cancelled'};
+  }
+  if(!fbReady){
+    if(!silent)showToast('无法连接云端，审批未生效');
+    return{ok:false,reason:'offline'};
   }
   try{
+    // 审批必须基于 picks 行表权威快照，禁止读取或整包覆盖 config/picks 镜像。
+    if(!await pullPicksSelCfg(true)){
+      if(!silent)showToast('无法获取最新班次，请检查网络后重试');
+      return{ok:false,reason:'refresh_failed'};
+    }
     const date=s.date;
     // 工号 → TEAM 成员 ID（picks 的 key 是 TEAM member id，不是工号）
     const reqMember=TEAM.find(m=>String(m.name)===String(s.requester_mid)||String(m.id)===String(s.requester_mid));
     const partnerMember=TEAM.find(m=>String(m.name)===String(s.partner_mid)||String(m.id)===String(s.partner_mid));
-    const reqMid=reqMember?reqMember.id:s.requester_mid;
-    const pMid=partnerMember?partnerMember.id:s.partner_mid;
-    const newShiftId=s.new_shift_id;
-    const originalShiftId=s.original_shift_id;
-    if(isTransfer){
-      const reqPicks=picks[date]||{};
-      const reqSids=reqPicks[String(reqMid)]||[];
-      reqPicks[String(reqMid)]=reqSids.filter(sid=>sid!==originalShiftId);
-      picks[date]=reqPicks;
-      const partnerPicks=picks[date]||{};
-      const partnerSids=partnerPicks[String(pMid)]||[];
-      if(!partnerSids.includes(newShiftId))partnerSids.push(newShiftId);
-      partnerPicks[String(pMid)]=partnerSids;
-      picks[date]=partnerPicks;
-    }else{
-      const reqPicks=picks[date]||{};
-      const reqSids=reqPicks[String(reqMid)]||[];
-      reqPicks[String(reqMid)]=reqSids.filter(sid=>sid!==originalShiftId);
-      if(!reqPicks[String(reqMid)].includes(newShiftId))reqPicks[String(reqMid)].push(newShiftId);
-      picks[date]=reqPicks;
-      const partnerPicks=picks[date]||{};
-      const partnerSids=partnerPicks[String(pMid)]||[];
-      partnerPicks[String(pMid)]=partnerSids.filter(sid=>sid!==newShiftId);
-      if(!partnerPicks[String(pMid)].includes(originalShiftId))partnerPicks[String(pMid)].push(originalShiftId);
-      picks[date]=partnerPicks;
+    const originalShiftId=Number(s.original_shift_id);
+    const newShiftId=Number(s.new_shift_id);
+    if(!reqMember||!partnerMember||!Number.isFinite(originalShiftId)||!Number.isFinite(newShiftId)){
+      if(!silent)showToast('申请中的成员或班次数据无效，审批未生效');
+      return{ok:false,reason:'invalid_request'};
     }
-    sv('cp6',picks);
-    // 写 picks 到云端（3次重试 + HTTP 降级）
-    let picksSynced=false;
-    if(fbReady){
-      for(let attempt=1;attempt<=3;attempt++){
-        try{
-          const {error}=await supa.from('config').upsert({id:'picks',data:picks,updated_at:Date.now()},{onConflict:'id'});
-          if(!error){picksSynced=true;break}
-          console.warn(`[approveSwap] picks supa upsert failed (attempt ${attempt}):`,error.message||error);
-        }catch(e){console.warn(`[approveSwap] picks supa exception (attempt ${attempt}):`,e.message||e)}
-        if(!picksSynced){
-          try{
-            const res=await fetch(SUPABASE_URL+'/rest/v1/config',{
-              method:'POST',
-              headers:{'apikey':SUPABASE_KEY,'Authorization':'Bearer '+SUPABASE_KEY,'Content-Type':'application/json','Prefer':'return=minimal,resolution=merge-duplicates'},
-              body:JSON.stringify({id:'picks',data:picks,updated_at:Date.now()})
-            });
-            if(res.ok){picksSynced=true;break}
-            console.warn(`[approveSwap] picks HTTP write failed (attempt ${attempt}):`,res.status);
-          }catch(e){console.warn(`[approveSwap] picks HTTP exception (attempt ${attempt}):`,e.message||e)}
-        }
-        if(attempt<3)await new Promise(r=>setTimeout(r,1000*attempt));
-      }
-    }
-    // picks 同步失败 → 回滚本地状态，不标记为已批准
-    if(!picksSynced){
-      // 回滚 picks 到审批前的状态（从云端重新拉取）
-      try{
-        const {data:rollback}=await supa.from('config').select('data').eq('id','picks').maybeSingle();
-        if(rollback?.data&&typeof rollback.data==='object'){picks=rollback.data;sv('cp6',picks)}
-      }catch(e){}
-      showToast(' 班次更新失败：云端同步未成功，审批未生效，请重试');
-      console.error('[approveSwapRequest] Picks sync failed after 3 retries, rolled back');
+    const reqMid=reqMember.id,pMid=partnerMember.id;
+    const applyResult=isTransfer
+      ?await atomicTransferPick(date,reqMid,pMid,originalShiftId)
+      :await atomicExchangePicks(date,reqMid,originalShiftId,date,pMid,newShiftId);
+    if(!applyResult?.ok){
+      await pullPicksSelCfg(true).catch(()=>{});
+      const reasonText={
+        not_owner:'转出方已不再持有该班次',
+        duplicate:'接收方已持有该班次',
+        dayfull:'接收方当天班次已达上限',
+        capfull:'目标班次人数已满',
+        rollback_failed:'班次更新失败且自动回滚未完全成功，请立即核查'
+      }[applyResult?.reason]||'班次更新失败，请刷新后重试';
+      if(!silent)showToast(reasonText);
+      console.error('[approveSwapRequest] authoritative picks update failed',id,applyResult);
       renderSwapAdmin();updateSwapAdminBadge();
-      return;
+      return applyResult||{ok:false,reason:'error'};
     }
-    // picks 同步成功 → 更新审批状态
+    // 权威班次写入成功后再更新审批状态；重复重试会由原子操作识别为 alreadyApplied。
     s.status='approved';s.decidedTs=Date.now();s.decidedBy=adminDisplayName();
     svSwapRequests();
     const swapSynced=await syncSwapRequests();
@@ -5974,15 +5982,16 @@ async function approveSwapRequest(id,silent){
       ?`管理员批准 ${reqName} 将 ${s.date} 的 ${s.original_shift_name} 转给 ${partnerName}`
       :`管理员批准 ${reqName} 和 ${partnerName} 在 ${s.date} 的换班申请`;
     logEvent(actionLabel,actionDesc);
-    if(!swapSynced){
-      showToast('⚠ 班次已更新，但审批记录同步失败（已重试3次）');
-    }else{
-      showToast(isTransfer?'转班已批准，班次已转移':'换班已批准，双方选班记录已更新');
+    if(!silent){
+      if(!swapSynced)showToast('班次已更新，但审批记录同步失败，将继续重试');
+      else showToast(isTransfer?'转班已批准，班次已转移':'换班已批准，双方选班记录已更新');
+      renderSwapAdmin();updateSwapAdminBadge();renderAll();
     }
-    renderSwapAdmin();updateSwapAdminBadge();renderAll();
+    return{ok:true,alreadyApplied:!!applyResult.alreadyApplied,requestSynced:swapSynced};
   }catch(e){
     console.error('Approve swap error:',e);
-    showToast('批准失败：'+e.message);
+    if(!silent)showToast('批准失败：'+e.message);
+    return{ok:false,reason:'exception',error:e};
   }
 }
 async function rejectSwapRequest(id){
@@ -7877,18 +7886,63 @@ function createMemberIdAllocator(team=TEAM){
   const used=new Set((team||[]).map(m=>String(m.id)));let nextId=Date.now();
   return()=>{while(used.has(String(nextId)))nextId++;const id=nextId++;used.add(String(id));return id};
 }
+function swapMemberIdOf(ref){
+  const member=TEAM.find(m=>String(m.id)===String(ref)||String(m.name)===String(ref));
+  return String(member?member.id:ref);
+}
+// 班表导入是基线更新；所有已接受/已批准的换班必须按决定时间重放，避免定时同步恢复原班。
+function applyAcceptedSwapsToImportedDay(dateStr,baseDay){
+  const out={};
+  for(const [mid,sids] of Object.entries(baseDay||{}))out[String(mid)]=[...new Set((sids||[]).map(Number).filter(Number.isFinite))].sort((a,b)=>a-b);
+  const moves=[];
+  const addMove=(at,order,from,to,sid)=>{sid=Number(sid);if(Number.isFinite(sid))moves.push({at:Number(at)||0,order,from:swapMemberIdOf(from),to:swapMemberIdOf(to),sid})};
+  for(const rec of swaps||[]){
+    if(rec?.status!=='accepted')continue;
+    if(rec.date===dateStr)addMove(rec.decidedTs||rec.ts,0,rec.fromId,rec.toId,rec.sid);
+    if(rec.exchange?.takeDate===dateStr)addMove(rec.decidedTs||rec.ts,1,rec.toId,rec.fromId,rec.exchange.takeSid);
+  }
+  for(const rec of swapRequests||[]){
+    if(rec?.status!=='approved'||rec.date!==dateStr)continue;
+    addMove(rec.decidedTs||rec.ts,0,rec.requester_mid,rec.partner_mid,rec.original_shift_id);
+    if(rec.type!=='transfer')addMove(rec.decidedTs||rec.ts,1,rec.partner_mid,rec.requester_mid,rec.new_shift_id);
+  }
+  moves.sort((a,b)=>a.at-b.at||a.order-b.order);
+  for(const move of moves){
+    const fromArr=out[move.from]||[],toArr=out[move.to]||[];
+    out[move.from]=fromArr.filter(sid=>Number(sid)!==move.sid);
+    out[move.to]=[...new Set(toArr.concat(move.sid))].sort((a,b)=>a-b);
+  }
+  return out;
+}
 async function persistImportedDailyPicks(dateStr,members){
+  // 先拉权威现状，保留导入文件未包含的成员，并防止基于旧缓存重建当天数据。
+  if(fbReady&&!await pullPicksSelCfg(true))return false;
+  const originalDay={};
+  for(const [mid,sids] of Object.entries(picks[dateStr]||{}))originalDay[String(mid)]=[...new Set((sids||[]).map(Number).filter(Number.isFinite))].sort((a,b)=>a-b);
   const imported={};
-  (members||[]).forEach(m=>{setMemberPick(dateStr,m.id,m.shiftIds||[]);imported[String(m.id)]=(m.shiftIds||[]).slice()});
-  sv('cp6',picks);picksLocalVer=Date.now();
+  for(const [mid,sids] of Object.entries(originalDay))imported[mid]=sids.slice();
+  (members||[]).forEach(m=>{imported[String(m.id)]=(m.shiftIds||[]).slice()});
+  const effective=applyAcceptedSwapsToImportedDay(dateStr,imported);
+  picks[dateStr]=effective;picksOptSeq++;_invalidateMonthCache();sv('cp6',picks);picksLocalVer=Date.now();
   if(!fbReady)return true;
   try{
-    const {data,error}=await supa.rpc('picks_import_day',{p_date:dateStr,p_members:imported});
+    const {data,error}=await supa.rpc('picks_import_day',{p_date:dateStr,p_members:effective});
     if(_isMissingFn(error)){
-      // Supabase 未部署 picks_import_day → 用 pick_set 逐人落库
-      for(const [mid,sids] of Object.entries(imported)){
-        const ok=await atomicSetPick(dateStr,mid,[...new Set((sids||[]).map(Number).filter(Number.isFinite))].sort((a,b)=>a-b));
-        if(!ok)throw new Error('pick_set failed for member '+mid);
+      // Supabase 未部署 picks_import_day → 逐人写入；任一失败时反向恢复已写成员，避免半天数据。
+      const applied=[];
+      try{
+        for(const [mid,sids] of Object.entries(effective)){
+          const ok=await atomicSetPick(dateStr,mid,[...new Set((sids||[]).map(Number).filter(Number.isFinite))].sort((a,b)=>a-b));
+          if(!ok)throw new Error('pick_set failed for member '+mid);
+          applied.push(mid);
+        }
+      }catch(writeError){
+        let rollbackOk=true;
+        for(const mid of applied.reverse()){
+          if(!await atomicSetPick(dateStr,mid,originalDay[mid]||[]))rollbackOk=false;
+        }
+        if(!rollbackOk)throw new Error('导入失败且自动回滚未完全成功，请立即核查当天排班');
+        throw writeError;
       }
       if(!await pullPicksSelCfg(true))throw new Error('导入后云端校验失败');
       return true;
@@ -8534,7 +8588,7 @@ setMemberPick=function(...args){_origSetMemberPick.apply(this,args);markRenderDi
 
 tick();setInterval(tick,1000);setInterval(renderEmpIfNeeded,3e4);
 // ===== 新版本检测：部署新版后自动提醒用户刷新，避免大家一直跑旧代码 =====
-const APP_VERSION='v2026.08.28.67';
+const APP_VERSION='v2026.09.09.68';
 let _newVerNotified=false;
 async function checkAppVersion(){
   if(_newVerNotified)return;
