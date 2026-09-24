@@ -1126,8 +1126,7 @@ class _FSProvider {
               return { ok: true, data: picks, alreadyExists: true };
             }
 
-            // 日/周硬上限必须在事务内校验，避免并发客户端同时通过本地预检。
-            if (cur.length >= MAX_PER_DAY) return { ok: false, reason: 'dayfull', count: cur.length, max: MAX_PER_DAY };
+            // 周硬上限必须在事务内校验，避免并发客户端同时通过本地预检（选班已取消每日上限）。
             const weekTotal = weekDaysArr(weekStartOf(parseYmd(p_date))).reduce((total, day) => {
               const arr = (picks[ymd(day)] || {})[mid];
               return total + (Array.isArray(arr) ? new Set(arr.map(Number).filter(Number.isFinite)).size : 0);
@@ -1170,7 +1169,6 @@ class _FSProvider {
             if (!fromArr.includes(sid) && toArr.includes(sid)) return { ok: true, data: picks, alreadyApplied: true };
             if (!fromArr.includes(sid)) return { ok: false, reason: 'not_owner' };
             if (toArr.includes(sid)) return { ok: false, reason: 'duplicate' };
-            if (toArr.length >= MAX_PER_DAY) return { ok: false, reason: 'dayfull' };
             const cap = (caps[p_date] && Number(caps[p_date][sid])) || 0;
             if (cap > 0) {
               const count = Object.keys(picks[p_date]).reduce((n, mid) => {
@@ -1232,7 +1230,6 @@ class _FSProvider {
             if (!giverTake.includes(takeSid)) giverTake.push(takeSid);
             receiverTake.splice(receiverTake.indexOf(takeSid), 1);
             if (!receiverGive.includes(giveSid)) receiverGive.push(giveSid);
-            if ([...cache.values()].some(arr => arr.length > MAX_PER_DAY)) return { ok: false, reason: 'dayfull' };
             cache.forEach((arr, key) => {
               const [date, mid] = key.split('\u0000');
               if (!picks[date]) picks[date] = {};
@@ -1991,8 +1988,10 @@ function normalizePicksData(data){
 }
 // selCfg: 选班规则  openDay=开放星期(0周日..6周六) openHour=开放小时 weekStartDay=每周起始 lock=管理员锁定
 const DEF_SELCFG={openDay:5,openHour:14,weekStartDay:6,lock:false,minValid:30,retainDays:60,amShiftId:7,pmShiftId:25};
-const MAX_PER_DAY=7;    // 每人每天最多可选时段数（个人单日时段不超过8个，即≤7）
-const MAX_PER_WEEK=49;  // 每人整周最多可选/计入有效的时段数
+// 选班不再限制每人每天的数量；唯一的数量约束是"整周总时段数不超过 MAX_PER_WEEK"。
+const MAX_PER_WEEK=56;  // 每人整周最多可选/计入有效的时段数
+// 结构性守卫：仅用于识别异常/损坏数据（单个日期班次数远超合理值），并非业务选班上限。
+const MAX_PER_DAY_STRUCT=64;
 let picks=normalizePicksData(ld('cp6',{}));
 let selCfg=Object.assign({},DEF_SELCFG,ld('csel6',{}));
 let slotCap=ld('csc6',{});  // 每天每时段需要人数上限 { 'YYYY-MM-DD':{ sid:n } }，无记录=不限
@@ -2052,13 +2051,13 @@ const FAQ_ENTRIES=[
   {id:'punch-history',category:'punch',title:'可以补打今天之前的卡吗？',keywords:['补卡','昨天','之前','漏打','历史'],answer:'不能直接在打卡页补打历史班次。如果已缺卡，请到「补卡」标签提交补卡申请，管理员审批通过后系统会自动写入一条打卡记录，缺卡状态会变为「已补」。'},
   {id:'pick-open',category:'pick',title:'选班什么时候开放？',keywords:['选班','开放','几点','周五','14:00','开放时间'],answer:'默认每周五 14:00 开放下一周期的选班。管理员可在后台调整「开放星期」和「开放小时」。在开放前只能查看排班表，不能选择或修改。'},
   {id:'pick-lock',category:'pick',title:'选班为什么被锁定/保存后改不了？',keywords:['锁定','保存','改不了','不能修改','冻结'],answer:'原因通常有几种：1）管理员在后台锁定了选班；2）该天已经过去；3）你已经保存过该天的选班，保存后员工端自动锁定，只能换班或让管理员在后台修改。'},
-  {id:'pick-limit',category:'pick',title:'每天/每周最多能选几个班？',keywords:['上限','最多','7','49','每天','每周','限制'],answer:'每人每天最多选 7 个时段，每周（按系统设置的周起始日计算）合计不超过 49 个时段。同一时段每人每天只能占 1 个。14:10 后的补位、换班、捡班同样受此限制。'},
-  {id:'pick-freeze',category:'pick',title:'每周五 14:05 和 14:10 会发生什么？',keywords:['14:05','14:10','冻结','清理','补位'],answer:'每周五 14:05 系统会冻结全表并清理超额班次：如果某天选了超过 7 个班，超额部分会被清除。14:10 之后可以自由补位空余时段，但仍受每天 7 个、每周 49 个限制。'},
+  {id:'pick-limit',category:'pick',title:'每天/每周最多能选几个班？',keywords:['上限','最多','56','每天','每周','限制'],answer:'每人单日选班数量不限，但每周（按系统设置的周起始日计算）合计不超过 56 个时段。同一时段每人每天只能占 1 个。14:10 后的补位、换班、捡班同样受每周 56 个的限制。'},
+  {id:'pick-freeze',category:'pick',title:'每周五 14:05 和 14:10 会发生什么？',keywords:['14:05','14:10','冻结','清理','补位'],answer:'每周五 14:05 系统会冻结全表并清理超额班次：如果某周选了超过 56 个班，超额部分会被清除。14:10 之后可以自由补位空余时段，但仍受每周 56 个的限制。'},
   {id:'pick-full',category:'pick',title:'某个时段点不了/显示已满，为什么？',keywords:['已满','点不了','时段','满员','人数上限'],answer:'管理员可能给该时段设置了人数上限，当已选人数达到上限后，其他员工就无法再选。你可以 14:10 后尝试捡班，或联系管理员调整上限。'},
-  {id:'count-valid',category:'count',title:'「有效合计」是怎么算的？',keywords:['有效合计','怎么算','计算','每日','每周'],answer:'每日最多计 7 个有效班次，每周最多计 49 个有效班次。如果某天超过 7 个，只按 7 个计入；如果某周超过 49 个，只按 49 个计入。标红的单元格表示不足当周最低有效数。'},
+  {id:'count-valid',category:'count',title:'「有效合计」是怎么算的？',keywords:['有效合计','怎么算','计算','每日','每周'],answer:'选班已取消每日上限，单日选多少个都全部计入；每周最多计 56 个有效班次，某周超过 56 个的部分只按 56 个计入。标红的单元格表示不足当周最低有效数。'},
   {id:'count-am-pm',category:'count',title:'什么是早补和夜补？',keywords:['早补','夜补','早晚补','定义'],answer:'早补指选中特定早班时段（默认 07:00-08:00，时段 ID 7）的天数；夜补指选中特定夜班时段（默认次日 01:00-02:00，时段 ID 25）的天数。系统按实际选班数据自动统计，用于月度汇总。'},
   {id:'month-target',category:'month',title:'月度页面的「达标」和「未达标」是什么意思？',keywords:['达标','未达标','月度','周有效','minValid'],answer:'当某周有效班次 ≥ 后台配置的「周最低有效」值（默认 30）时，显示为「达标」；否则显示「未达标」。这是判断本周出勤强度是否达标的依据。'},
-  {id:'swap-how',category:'swap',title:'怎么发起换班？',keywords:['换班','发起','转让','给别人'],answer:'进入「换班」标签，选择日期、要转出的班次、接收人，提交后对方会收到一条待确认请求。对方同意且双方都不超出每天 7 个/每周 49 个限制时，换班生效。'},
+  {id:'swap-how',category:'swap',title:'怎么发起换班？',keywords:['换班','发起','转让','给别人'],answer:'进入「换班」标签，选择日期、要转出的班次、接收人，提交后对方会收到一条待确认请求。对方同意且双方都不超出每周 56 个时段限制时，换班生效。'},
   {id:'swap-expire',category:'swap',title:'换班请求多久不处理会过期？',keywords:['换班','过期','多久','48','小时'],answer:'换班请求 48 小时未处理会自动过期。过期后班次仍归原持有人。'},
   {id:'swap-status',category:'swap',title:'换班有哪些状态？',keywords:['换班状态','pending','accepted','rejected','expired','proxy'],answer:'常见状态：pending（等待确认）、accepted（已同意）、rejected（已拒绝）、cancelled（已取消）、proxy_pending（代提交待本人确认）、expired（超过 48 小时未处理自动过期）、approved（管理员后台批准）。'},
   {id:'makeup-how',category:'makeup',title:'怎么提交补卡？',keywords:['补卡','提交','缺卡','申请'],answer:'在「补卡」页选择缺卡日期、缺卡班次、实际打卡时间并填写原因后提交。只能对已经过去的班次发起补卡。提交后管理员会在「补卡审批」中处理，通过后缺卡状态变为「已补」。'},
@@ -2104,7 +2103,7 @@ async function freshSlotCount(dateStr,sid,exceptMid){
 function curMonthStr(){const d=new Date();return`${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}`}
 // 相对当前月的月份字符串：off=0 当前月, -1 上月, 1 下月
 function monthStrByOffset(off){const d=new Date();d.setDate(1);d.setMonth(d.getMonth()+off);return`${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}`}
-function dayValid(n){return Math.min(n,MAX_PER_DAY)}                 // 每日最多计入 7 个有效
+function dayValid(n){return n}                                         // 选班已取消每日上限，单日全部计入有效；整周封顶在调用处处理
 // 早补=07:00-08:00 时段，夜补=次日01:00-02:00 时段。按月自动统计选中该时段的天数
 // 早补/夜补时段 id 解析（P1）：优先尊重管理员在 selCfg 中配置的 id；若该 id 已失效
 // （如导入重建班次表后消失），按标准时段开始时间（早补 07:00 / 夜补 01:00）在现存班次中
@@ -2129,13 +2128,14 @@ function memberMonthShiftCount(mid,monthStr){
   let am=0,pm=0;const amId=amShiftId(),pmId=pmShiftId();Object.keys(picks).forEach(ds=>{if(ds.slice(0,7)!==monthStr)return;const arr=picks[ds]&&picks[ds][String(mid)];if(!Array.isArray(arr))return;if(arr.includes(amId))am++;if(arr.includes(pmId))pm++});
   const result={am,pm};_mmcCache[key]=result;return result;
 }
-// 某成员整周统计：per=每日原始数, raw=选时合计(原始), valid=有效合计(每日≤7且整周≤49)
+// 某成员整周统计：per=每日原始数, raw=选时合计(原始), valid=有效合计(整周≤56，单日不再封顶)
 function memberWeekStats(m,weekDays){let raw=0,valid=0;const per=[];weekDays.forEach(d=>{const n=memberShifts(m,ymd(d)).length;per.push(n);raw+=n;valid+=dayValid(n)});return{per,raw,valid:Math.min(valid,MAX_PER_WEEK)}}
-// 某成员某月的有效选班合计（每日≤7，跨整月累计）
+// 某成员某月的有效选班合计（单日不封顶，逐周≤56 后跨整月累加；与各周单元格相加保持一致）
 function memberMonthValid(mid,monthStr){
   _checkMonthCache();
   const key=mid+'_'+monthStr;if(_mmvCache[key]!==undefined)return _mmvCache[key];
-  let t=0;Object.keys(picks).forEach(ds=>{if(ds.slice(0,7)!==monthStr)return;const arr=picks[ds]&&picks[ds][String(mid)];if(Array.isArray(arr))t+=dayValid(arr.length)});
+  const m={id:mid};
+  let t=0;monthWeeks(monthStr).forEach(ws=>{t+=memberWeekValidInMonth(m,ws,monthStr)});
   _mmvCache[key]=t;return t;
 }
 // 当月内所有选班周期(周)的起始日，覆盖到本月的每一天
@@ -2149,10 +2149,10 @@ function draftWeekTotalExcept(dateStr){let t=0;pickWeekDaysStrOf(dateStr).forEac
 // 选班规则说明（对应线下 6 条规则）
 const SEL_RULES=[
   '选班 14:00 开放，14:05 冻结全表并清理多余班次，14:10 后可自由补位空余时段。',
-  '一次一行选班：每人每天最多 7 个时段，且整周合计不超过 49 个。',
-  '14:10 后请假 / 捡班 / 换班同样受每天 7、每周 49 限制；每日最多计 7 个有效、每周最多计 49 个有效（见「有效合计」），超出不计入有效。',
+  '一次一行选班：每人整周选班合计不超过 56 个时段（单日数量不限）。',
+  '14:10 后请假 / 捡班 / 换班同样受每周 56 限制；每周最多计 56 个有效（单日不再封顶，见「有效合计」），超出不计入有效。',
   '多占的时段须在 14:05 前放出，未放出会被标红并清除超额部分。',
-  '同一时段每人限占 1 个，个人单日时段不超过 7 个；使用非本人工号或错误工号占位视为无效，将被清除。',
+  '同一时段每人限占 1 个；使用非本人工号或错误工号占位视为无效，将被清除。',
   '本周周一、周二的可选时段数与其他日期不同，选择时请留意。'
 ];
 function rulesBlockHtml(){return`<div class="rules-block"><div class="rt"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width:14px;height:14px"><circle cx="12" cy="12" r="9"/><path d="M12 8v4M12 16h.01"/></svg>选班规则</div><ol>${SEL_RULES.map(r=>`<li>${r}</li>`).join('')}</ol></div>`}
@@ -2214,8 +2214,19 @@ function dayEditable(dateStr){
 function memberShifts(m,dateStr){const p=picks[dateStr],mid=String(m.id);if(p&&p[mid]!==undefined)return p[mid]||[];return[]}
 let picksOptSeq=0; // 乐观写入序号：每次本地改写 picks 自增；服务器返回快照时若序号已变大，说明有更新的本地写入，不用旧快照覆盖（杜绝快速连点时班次"闪掉"）
 function setMemberPick(dateStr,mid,sids){if(!picks[dateStr])picks[dateStr]={};picks[dateStr][String(mid)]=[...new Set((Array.isArray(sids)?sids:[]).map(Number).filter(Number.isFinite))].sort((a,b)=>a-b);picksOptSeq++;_invalidateMonthCache()}
+// 同时兼容旧 RPC 的完整快照与新版紧凑响应。只有没有更新本地操作插队时才落地结果，避免旧回执覆盖新点击。
+function applyPickRpcSuccess(data,mySeq,applyCompact){
+  if(picksOptSeq!==mySeq)return;
+  const candidate=data?.picks||(data?.data&&typeof data.data==='object'?data.data:data);
+  if(candidate&&validatePicksStructure(candidate)){
+    picks=normalizePicksData(candidate);sv('cp6',picks);picksLocalVer=Date.now();picksLastFullSyncAt=Date.now();_invalidateMonthCache();
+    return;
+  }
+  if(typeof applyCompact==='function')applyCompact();
+  sv('cp6',picks);picksLocalVer=Date.now();
+}
 // 并发选班原子写入：调用服务器端 pick_set 函数（行锁排队，杜绝多人同时选班互相覆盖）。
-// 成功后用服务器返回的最新完整数据刷新本地（权威来源）；Supabase 未配置时回退本地写。
+// 兼容旧版完整快照和新版紧凑响应；服务端成功后本地应用确定变更，Realtime 与周期快照负责跨端自愈。
 async function atomicSetPick(dateStr,mid,sids){
   const arr=[...new Set((Array.isArray(sids)?sids:[]).map(Number).filter(Number.isFinite))].sort((a,b)=>a-b);
   if(!fbReady){setMemberPick(dateStr,mid,arr);sv('cp6',picks);picksLocalVer=Date.now();return true}
@@ -2234,7 +2245,7 @@ async function atomicSetPick(dateStr,mid,sids){
         console.warn('pick_set error:',error);
         return false;
       }
-      if(data&&typeof data==='object'&&picksOptSeq===mySeq){picks=normalizePicksData(data);sv('cp6',picks);picksLocalVer=Date.now();_invalidateMonthCache()}
+      applyPickRpcSuccess(data,mySeq,()=>setMemberPick(dateStr,mid,arr));
       return true;
     } catch(e) {
       if (attempt < maxRetries - 1) {
@@ -2278,7 +2289,11 @@ async function atomicAddPick(dateStr,mid,sid){
         console.warn('pick_add error:',error);
         return false;
       }
-      if(data&&typeof data==='object'&&picksOptSeq===mySeq){picks=normalizePicksData(data);sv('cp6',picks);picksLocalVer=Date.now();_invalidateMonthCache()}
+      applyPickRpcSuccess(data,mySeq,()=>{
+        const cur=((picks[dateStr]||{})[String(mid)]||[]).slice();
+        if(!cur.includes(sid))cur.push(sid);
+        setMemberPick(dateStr,mid,cur);
+      });
       return true;
     } catch(e) {
       if (attempt < maxRetries - 1) {
@@ -2317,7 +2332,10 @@ async function atomicRemovePick(dateStr,mid,sid){
         console.warn('pick_remove error:',error);
         return false;
       }
-      if(data&&typeof data==='object'&&picksOptSeq===mySeq){picks=normalizePicksData(data);sv('cp6',picks);picksLocalVer=Date.now();_invalidateMonthCache()}
+      applyPickRpcSuccess(data,mySeq,()=>{
+        const cur=((picks[dateStr]||{})[String(mid)]||[]).filter(x=>Number(x)!==sid);
+        setMemberPick(dateStr,mid,cur);
+      });
       return true;
     } catch(e) {
       if (attempt < maxRetries - 1) {
@@ -2339,13 +2357,12 @@ async function atomicAddPickCap(dateStr,mid,sid,isAdmin){
   if(!isValidDate(dateStr)||!Number.isFinite(sid))return{ok:false,reason:'invalid'};
   if(!fbReady){
     const cur=[...new Set((((picks[dateStr]||{})[mid])||[]).map(Number).filter(Number.isFinite))];
-    const alreadyExists=cur.includes(sid),projectedDay=cur.length+(alreadyExists?0:1);
-    if(projectedDay>MAX_PER_DAY)return{ok:false,reason:'dayfull',count:cur.length,max:MAX_PER_DAY};
+    const alreadyExists=cur.includes(sid);
     const weekTotal=pickWeekDaysStrOf(dateStr).reduce((total,ds)=>{
       const arr=(picks[ds]||{})[mid];
       return total+(Array.isArray(arr)?new Set(arr.map(Number).filter(Number.isFinite)).size:0);
     },0)+(alreadyExists?0:1);
-    if(weekTotal>MAX_PER_WEEK)return{ok:false,reason:'weekfull',count:weekTotal-1,max:MAX_PER_WEEK};
+    if(!isAdmin&&weekTotal>MAX_PER_WEEK)return{ok:false,reason:'weekfull',count:weekTotal-1,max:MAX_PER_WEEK};
     const cap=slotCapOf(dateStr,sid),projectedCount=slotCount(dateStr,sid)+(alreadyExists?0:1);
     if(cap>0&&!isAdmin&&projectedCount>cap)return{ok:false,reason:'full',count:projectedCount-1,cap};
     if(!alreadyExists)cur.push(sid);
@@ -2378,15 +2395,15 @@ async function atomicAddPickCap(dateStr,mid,sid,isAdmin){
             if(chk)return{ok:true};
           }catch(e){}
         }
-        return data; // 服务器明确拒绝（满员/超每日上限）→ 不重试
+        return data; // 服务器明确拒绝（满员/超每周上限）→ 不重试
       }
-      // 修复：pick_add_cap RPC 返回的是对象，可能包含 ok 标识也可能直接是 picks 映射
-      // 与 atomicAddPick 保持一致，兼容两种返回格式
-      const newPicks = data.picks || (data.ok ? data.data : data);
-      if(newPicks && typeof newPicks==='object' && picksOptSeq===mySeq){
-        picks=normalizePicksData(newPicks);sv('cp6',picks);picksLocalVer=Date.now();_invalidateMonthCache();
-      }
-      return{ok:true};
+      // 兼容旧函数返回完整快照和新版紧凑状态；写入成功后本地幂等补齐本次班次。
+      applyPickRpcSuccess(data,mySeq,()=>{
+        const cur=((picks[dateStr]||{})[mid]||[]).slice();
+        if(!cur.includes(sid))cur.push(sid);
+        setMemberPick(dateStr,mid,cur);
+      });
+      return{ok:true,alreadyApplied:!!data?.alreadyApplied};
     }catch(e){
       if (attempt < maxRetries - 1) {
         const delay = Math.floor(Math.random() * 200) + 100 * (attempt + 1);
@@ -2408,7 +2425,6 @@ async function atomicTransferPick(dateStr,fromMid,toMid,sid){
     if(!fromArr.includes(sid)&&toArr.includes(sid))return{ok:true,alreadyApplied:true};
     if(!fromArr.includes(sid))return{ok:false,reason:'not_owner'};
     if(toArr.includes(sid))return{ok:false,reason:'duplicate'};
-    if(toArr.length>=MAX_PER_DAY)return{ok:false,reason:'dayfull'};
     setMemberPick(dateStr,fromMid,fromArr.filter(x=>x!==sid));
     setMemberPick(dateStr,toMid,[...toArr,sid]);
     sv('cp6',picks);picksLocalVer=Date.now();return{ok:true};
@@ -2423,7 +2439,13 @@ async function atomicTransferPick(dateStr,fromMid,toMid,sid){
         return{ok:false,reason:'error'};
       }
       if(!data||data.ok===false)return data||{ok:false,reason:'error'};
-      if(data.data&&picksOptSeq===mySeq){picks=normalizePicksData(data.data);sv('cp6',picks);picksLocalVer=Date.now();_invalidateMonthCache()}
+      applyPickRpcSuccess(data,mySeq,()=>{
+        const fromArr=((picks[dateStr]||{})[fromMid]||[]).filter(x=>Number(x)!==sid);
+        const toArr=((picks[dateStr]||{})[toMid]||[]).slice();
+        if(!toArr.includes(sid))toArr.push(sid);
+        setMemberPick(dateStr,fromMid,fromArr);
+        setMemberPick(dateStr,toMid,toArr);
+      });
       return{ok:true,alreadyApplied:!!data.alreadyApplied};
     }catch(e){
       if(_isMissingFn(e))break;
@@ -2441,7 +2463,6 @@ async function composeTransferPick(dateStr,fromMid,toMid,sid,mySeq){
   if(!fromArr.includes(sid)&&toArr.includes(sid))return{ok:true,alreadyApplied:true};
   if(!fromArr.includes(sid))return{ok:false,reason:'not_owner'};
   if(toArr.includes(sid))return{ok:false,reason:'duplicate'};
-  if(toArr.length>=MAX_PER_DAY)return{ok:false,reason:'dayfull'};
   const admin=typeof isAdminNow==='function'?isAdminNow():false;
   // 转班对时段名额是净零变化：若先给接收方加，服务端 pick_add_cap 会把尚未离场的
   // 转出方计入人数，导致"含转出方正好满员"的时段被误拒（线上 2026-09-09 sid22 cap5/5 复现）。
@@ -2484,7 +2505,6 @@ async function atomicExchangePicks(giveDate,giverMid,giveSid,takeDate,receiverMi
     if(receiverGive.includes(giveSid)||giverTake.includes(takeSid))return{ok:false,reason:'duplicate'};
     giverGive.splice(giverGive.indexOf(giveSid),1);if(!giverTake.includes(takeSid))giverTake.push(takeSid);
     receiverTake.splice(receiverTake.indexOf(takeSid),1);if(!receiverGive.includes(giveSid))receiverGive.push(giveSid);
-    if([...cache.values()].some(items=>items.length>MAX_PER_DAY))return{ok:false,reason:'dayfull'};
     cache.forEach((items,key)=>{const[date,mid]=key.split('\u0000');if(!draft[date])draft[date]={};draft[date][mid]=[...new Set(items)].sort((a,b)=>a-b)});
     picks=draft;picksOptSeq++;_invalidateMonthCache();sv('cp6',picks);picksLocalVer=Date.now();return{ok:true};
   }
@@ -2498,7 +2518,17 @@ async function atomicExchangePicks(giveDate,giverMid,giveSid,takeDate,receiverMi
         return{ok:false,reason:'error'};
       }
       if(!data||data.ok===false)return data||{ok:false,reason:'error'};
-      if(data.data&&picksOptSeq===mySeq){picks=normalizePicksData(data.data);sv('cp6',picks);picksLocalVer=Date.now();_invalidateMonthCache()}
+      applyPickRpcSuccess(data,mySeq,()=>{
+        const local=new Map();
+        const get=(date,mid)=>{const key=date+'\u0000'+mid;if(!local.has(key))local.set(key,((picks[date]||{})[mid]||[]).slice());return local.get(key)};
+        const giverGive=get(giveDate,giverMid),giverTake=get(takeDate,giverMid);
+        const receiverGive=get(giveDate,receiverMid),receiverTake=get(takeDate,receiverMid);
+        const gi=giverGive.indexOf(giveSid);if(gi>=0)giverGive.splice(gi,1);
+        const ri=receiverTake.indexOf(takeSid);if(ri>=0)receiverTake.splice(ri,1);
+        if(!giverTake.includes(takeSid))giverTake.push(takeSid);
+        if(!receiverGive.includes(giveSid))receiverGive.push(giveSid);
+        local.forEach((arr,key)=>{const[date,mid]=key.split('\u0000');setMemberPick(date,mid,arr)});
+      });
       return{ok:true,alreadyApplied:!!data.alreadyApplied};
     }catch(e){
       if(_isMissingFn(e))break;
@@ -2520,7 +2550,6 @@ async function composeExchangePicks(giveDate,giverMid,giveSid,takeDate,receiverM
   if(receiverGive.includes(giveSid)||giverTake.includes(takeSid))return{ok:false,reason:'duplicate'};
   giverGive.splice(giverGive.indexOf(giveSid),1);if(!giverTake.includes(takeSid))giverTake.push(takeSid);
   receiverTake.splice(receiverTake.indexOf(takeSid),1);if(!receiverGive.includes(giveSid))receiverGive.push(giveSid);
-  if([...cache.values()].some(items=>items.length>MAX_PER_DAY))return{ok:false,reason:'dayfull'};
   const writes=[],originals=new Map();
   cache.forEach((items,key)=>{
     const[date,mid]=key.split('\u0000');
@@ -2564,7 +2593,9 @@ async function syncToFB(){
   }catch(e){console.warn('Sync error:',e);return false}
 }
 // 单独同步选班数据 / 选班规则（避免每次都推送全部 config）
-let picksLocalVer=0; // 最近一次应用权威快照的服务端版本/本地时间，仅用于诊断
+let picksLocalVer=0; // 最近一次 picks 变更的服务端版本/本地时间，仅用于诊断
+let picksLastFullSyncAt=0; // 最近一次成功读取权威完整快照的本地时间
+let _picksSnapshotPull=null; // 合并同一时刻的重复全量请求，避免初始化/重连/切页同时下载
 // Supabase 已服务端化为独立 picks 表；picks_snapshot 是唯一权威读入口。
 // config.picks 仅是兼容旧客户端的镜像，绝不能再作为新版客户端的权威数据覆盖行级表。
 async function fetchAuthoritativePicksSnapshot(){
@@ -2600,14 +2631,24 @@ function applyAuthoritativePicksSnapshot(snapshot){
   picks=normalizePicksData(snapshot.data);
   sv('cp6',picks);
   picksLocalVer=Number(snapshot.updated_at)||Date.now();
+  picksLastFullSyncAt=Date.now();
   _invalidateMonthCache();
   return true;
 }
+// 只核对 picks，不连带下载 swaps/makeups/slotcap 等大配置；并合并同时发生的重复请求。
+async function pullPicksSnapshotOnly(){
+  if(!fbReady)return false;
+  if(_picksSnapshotPull)return _picksSnapshotPull;
+  const job=(async()=>{
+    const snapshot=await fetchAuthoritativePicksSnapshot();
+    return snapshot?applyAuthoritativePicksSnapshot(snapshot):false;
+  })();
+  _picksSnapshotPull=job;
+  try{return await job}finally{if(_picksSnapshotPull===job)_picksSnapshotPull=null}
+}
 // 已废弃的整包推送入口保留为“回拉权威快照”，防止旧调用者把本地陈旧 JSON 覆盖到云端。
 async function syncPicks(){
-  const snapshot=await fetchAuthoritativePicksSnapshot();
-  if(snapshot)applyAuthoritativePicksSnapshot(snapshot);
-  return !!snapshot;
+  return await pullPicksSnapshotOnly();
 }
 async function syncSelCfg(){if(!fbReady)return;try{await supa.from('config').upsert({id:'selcfg',data:selCfg,updated_at:Date.now()},{onConflict:'id'})}catch(e){console.warn('SelCfg sync error:',e)}}
 async function syncSlotCap(){if(!fbReady)return;try{await supa.from('config').upsert({id:'slotcap',data:slotCap,updated_at:Date.now()},{onConflict:'id'})}catch(e){console.warn('SlotCap sync error:',e)}}
@@ -2944,7 +2985,7 @@ function validatePicksStructure(data){
     if(!dayData||typeof dayData!=='object'||Array.isArray(dayData))return false;
     for(const mid of Object.keys(dayData)){
       const arr=dayData[mid];
-      if(!Array.isArray(arr)||arr.length>MAX_PER_DAY*2)return false;
+      if(!Array.isArray(arr)||arr.length>MAX_PER_DAY_STRUCT)return false;
       if(arr.some(sid=>!Number.isFinite(Number(sid))))return false;
     }
   }
@@ -2970,24 +3011,19 @@ async function pullPicksSelCfg(force){if(!fbReady)return;try{
   const oldPicksSig=JSON.stringify(picks);
   const oldLocSig=JSON.stringify(locCfg);
   // picks 必须从行级表的权威快照读取；其他小配置仍并行读取 config。
-  const [pcR,scfgR,scR,swcR]=await Promise.all([
-    fetchAuthoritativePicksSnapshot(),
+  // pullPicksSnapshotOnly 会合并初始化、重连和切页同时发起的重复快照请求。
+  const [picksOk,scfgR,scR,swcR]=await Promise.all([
+    pullPicksSnapshotOnly(),
     supa.from('config').select('*').in('id',['selcfg','loccfg']),
     supa.from('config').select('*').eq('id','slotcap').maybeSingle(),
     supa.from('config').select('*').eq('id','swaps').maybeSingle()
   ]);
   const failed=[scfgR,scR,swcR].find(r=>r?.error);if(failed)throw failed.error;
-  const pcData=pcR?.data||null,cfgRows=Array.isArray(scfgR.data)?scfgR.data:[],scData=safeExtract(scR.data),swcData=safeExtract(swcR.data);
+  const cfgRows=Array.isArray(scfgR.data)?scfgR.data:[],scData=safeExtract(scR.data),swcData=safeExtract(swcR.data);
   const scfgRow=cfgRows.find(r=>r&&r.id==='selcfg')||null;
   const lcfgRow=cfgRows.find(r=>r&&r.id==='loccfg')||null;
 
-  if(pcData && typeof pcData==='object'){
-    if(!validatePicksStructure(pcData)){
-      logSecurityEvent('malformed_picks','Pulled authoritative picks failed structure validation');
-      throw new Error('云端选班快照结构异常');
-    }
-    applyAuthoritativePicksSnapshot(pcR);
-  }
+  if(!picksOk)console.warn('权威 picks 快照本轮未更新，保留本地有效数据');
   const scfgData = safeExtract(scfgRow);
   if(scfgData&&typeof scfgData==='object'){selCfg=Object.assign({},DEF_SELCFG,scfgData);sv('csel6',selCfg)}
   const lcfgData = safeExtract(lcfgRow);
@@ -3042,6 +3078,18 @@ async function pullConfigRow(id){
     return true;
   }catch(e){return false}
 }
+// Realtime 健康状态决定兜底频率：连接正常依靠差量事件，任一关键通道断开则恢复快速全量核对。
+const realtimeSyncHealth={claims:false,punches:false,config:false,picks:false};
+let _rescheduleDataPoll=null;
+function isRealtimeSyncHealthy(){return Object.values(realtimeSyncHealth).every(Boolean)}
+function setRealtimeSyncStatus(name,status){
+  const connected=status===undefined||status==='SUBSCRIBED'; // Firestore 兼容层首次回调不带状态
+  const changed=realtimeSyncHealth[name]!==connected;
+  realtimeSyncHealth[name]=connected;
+  if(!changed||!_rescheduleDataPoll)return;
+  if(!connected)_rescheduleDataPoll(1000);
+  else if(isRealtimeSyncHealthy())_rescheduleDataPoll();
+}
 async function initFBListeners(){
   if(!fbReady)return;
   document.getElementById('syncBadge').className='sync-badge on';document.getElementById('syncBadge').innerHTML='<span class="dot"></span>已同步';
@@ -3082,7 +3130,7 @@ async function initFBListeners(){
       renderEmp();checkForceOut();
       if(document.getElementById('pg-admin')?.classList.contains('active')){renderMembers();renderBindingStatus()}
     }catch(e){}
-  }).subscribe();
+  }).subscribe(st=>setRealtimeSyncStatus('claims',st));
   supa.channel('punches-sync').on('postgres_changes',{event:'*',schema:'public',table:'punches'},async(payload)=>{
     try{
       const rows = await queryPunchesByDate(tdStr());
@@ -3096,11 +3144,8 @@ async function initFBListeners(){
       }
       renderAll();
     }catch(e){}
-  }).subscribe();
-  // Realtime 活跃度追踪：收到 config-sync 事件时标记，轮询据此降低频率
-  let rtConfigActive=false,rtLastHit=0;
+  }).subscribe(st=>setRealtimeSyncStatus('punches',st));
   supa.channel('config-sync').on('postgres_changes',{event:'*',schema:'public',table:'config'},async(payload)=>{
-    rtConfigActive=true;rtLastHit=Date.now();
     try{
       const changedId=payload?.new?.id||payload?.old?.id||'';
       // 选择性拉取：根据变更的 config id 只拉需要的行
@@ -3134,12 +3179,12 @@ async function initFBListeners(){
       refreshEmpAfterSync();
       checkForceOut();
     }catch(e){}
-  }).subscribe();
+  }).subscribe(st=>setRealtimeSyncStatus('config',st));
   // 操作日志实时刷新（仅在后台日志面板打开时）
   supa.channel('logs-sync').on('postgres_changes',{event:'INSERT',schema:'public',table:'logs'},()=>{
     if(document.getElementById('ap-logs')?.classList.contains('active'))renderLogs();
   }).subscribe();
-  // picks 表实时同步：增量应用差量（INSERT/DELETE），不再每次事件重拉全量快照（egress 优化）；300ms 防抖合并高频变更
+  // picks 表实时同步：INSERT/DELETE 直接应用差量；只有异常事件才单独核对 picks 快照。
   let _pickSyncTimer=null;const _pickDeltaBuf=[];
   supa.channel('picks-sync').on('postgres_changes',{event:'*',schema:'public',table:'picks'},(payload)=>{
     _pickDeltaBuf.push(payload);
@@ -3148,37 +3193,44 @@ async function initFBListeners(){
       _pickSyncTimer=null;
       const evs=_pickDeltaBuf.splice(0);
       try{
-        if(!applyPicksDelta(evs))await pullPicksSelCfg(true);
+        if(!applyPicksDelta(evs))await pullPicksSnapshotOnly();
         syncSelectedMember();renderAll();refreshEmpAfterSync();
       }catch(e){}
     },300);
   }).subscribe((st)=>{
-    // 通道（重）连成功：全量对齐一次，修复断线期间漏收的选班事件（增量同步的自愈点）
-    if(st==='SUBSCRIBED')pullPicksSelCfg(true);
+    setRealtimeSyncStatus('picks',st);
+    // 通道（重）连成功时单独对齐 picks，修复断线期间漏收事件；不连带下载其他大配置。
+    if(st===undefined||st==='SUBSCRIBED')pullPicksSnapshotOnly();
   });
-  // Polling 兜底轮询（egress 优化）：实时通道已覆盖即时变更，轮询仅作安全网。
-  // - 标签页隐藏时跳过本轮，后台不烧流量
-  // - 实时通道活跃时降频到 5 分钟，不活跃时 30 秒
-  // - 不再拉全量选班快照（picks 由 picks-sync 增量维护），只刷新小体量数据
-  const POLL_INTERVAL=30000;
-  const POLL_INTERVAL_RT=300000;
+  // Polling 仅作 Realtime 的自愈安全网：健康时低频校验，断线时恢复原来的 30 秒全量兜底。
+  const POLL_INTERVAL_FALLBACK=30000;
+  const POLL_INTERVAL_HEALTHY=15*60*1000;
+  const FULL_RECONCILE_INTERVAL=60*60*1000;
   let pollTimer=null;
-  function schedulePoll(){
-    const delay=(rtConfigActive&&Date.now()-rtLastHit<120000)?POLL_INTERVAL_RT:POLL_INTERVAL;
+  function schedulePoll(delayOverride){
+    if(pollTimer){clearTimeout(pollTimer);pollTimer=null}
+    const delay=Number.isFinite(delayOverride)?delayOverride:(isRealtimeSyncHealthy()?POLL_INTERVAL_HEALTHY:POLL_INTERVAL_FALLBACK);
     pollTimer=setTimeout(async()=>{
+      pollTimer=null;
       if(document.hidden){schedulePoll();return;}
       try{
-        const {data:cr}=await supa.from('claims').select('*');
-        claims={};(cr||[]).forEach(r=>{if(!isClaimExpired(r))claims[r.id]=r});
-        const pr = await queryPunchesByDate(tdStr());
+        const [claimR,pr,shiftR,teamR]=await Promise.all([
+          supa.from('claims').select('*'),
+          queryPunchesByDate(tdStr()),
+          supa.from('config').select('*').eq('id','shifts').maybeSingle(),
+          supa.from('config').select('*').eq('id','team').maybeSingle()
+        ]);
+        claims={};(claimR.data||[]).forEach(r=>{if(!isClaimExpired(r))claims[r.id]=r});
         mergeFbPunches(pr||[]);
-        const {data:sc}=await supa.from('config').select('*').eq('id','shifts').maybeSingle();
-        if(sc?.data){state.shifts=normalizeShiftsData(sc.data);sv('cv6',state)}
-        const {data:tc}=await supa.from('config').select('*').eq('id','team').maybeSingle();
-        if(tc?.data)mergeTeamFromCloud(tc.data);
-        // 低频全量对齐（自愈）：修复漏收实时事件造成的本地选班漂移。
-        // 实时活跃时本轮回间隔为 5 分钟，故全量拉取频率仅为原来的 1/10；实时失效时回到 30 秒兜底。
-        await pullPicksSelCfg();
+        if(shiftR.data?.data){state.shifts=normalizeShiftsData(shiftR.data.data);sv('cv6',state)}
+        if(teamR.data?.data)mergeTeamFromCloud(teamR.data.data);
+        // 健康连接每小时全量校验一次；断线时每轮都全量校验，保证最终一致性与故障恢复能力。
+        if(!isRealtimeSyncHealthy()||!picksLastFullSyncAt||Date.now()-picksLastFullSyncAt>=FULL_RECONCILE_INTERVAL){
+          await pullPicksSelCfg();
+        }else{
+          // 强制下线属于安全关键数据，即使 Realtime 健康也随低频安全轮询核对。
+          await syncForceOut();
+        }
         syncSelectedMember();
         renderAll();
         if(document.getElementById('ap-logs')?.classList.contains('active'))renderLogs();
@@ -3188,6 +3240,7 @@ async function initFBListeners(){
       schedulePoll();
     },delay);
   }
+  _rescheduleDataPoll=schedulePoll;
   schedulePoll();
 }
 async function testFBConnection(){
@@ -4585,7 +4638,21 @@ function resolvePunchAction(items,ctxDate,punchesOf,nowDt){
 }
 
 // ===== 员工端：选班 =====
-function setEmpTab(t){empTab=t;if(t==='pick'){pickWeekOffset=0}if(t==='count'){countWeekOffset=0}if(t==='month'){myMonthOffset=0}if(t==='swap'){swapForm={date:'',sid:null,toId:null};proxySwapForm={fromId:null,date:'',sid:null,toId:null}}if(t==='makeup'){makeupForm={date:'',sid:null,pickDate:null,time:'',reason:''}}if(t==='leave'){leaveForm={date:'',reason:''}}if(t==='punch'){punchDateOffset=0}if(t==='help'){helpSearch='';helpCategory='all';helpFeedbackSent=false}if(t==='performance'){perfFilterMonth=''}renderEmp()}
+function setEmpTab(t){
+  empTab=t;
+  if(t==='pick')pickWeekOffset=0;
+  if(t==='count')countWeekOffset=0;
+  if(t==='month')myMonthOffset=0;
+  if(t==='swap'){swapForm={date:'',sid:null,toId:null};proxySwapForm={fromId:null,date:'',sid:null,toId:null}}
+  if(t==='makeup')makeupForm={date:'',sid:null,pickDate:null,time:'',reason:''};
+  if(t==='leave')leaveForm={date:'',reason:''};
+  if(t==='punch')punchDateOffset=0;
+  if(t==='help'){helpSearch='';helpCategory='all';helpFeedbackSent=false}
+  if(t==='performance')perfFilterMonth='';
+  renderEmp();
+  // 只有用户明确进入实时计数页时才核对一次权威 picks；普通 renderAll 不再触发网络请求。
+  if(t==='count')refreshCountPicksView();
+}
 let myMonthOffset=0; // 员工端"月度"标签的月份偏移
 function stepMyMonth(delta){myMonthOffset+=delta;renderMonthStatsView()}
 function resetMyMonth(){myMonthOffset=0;renderMonthStatsView()}
@@ -4644,7 +4711,7 @@ function renderMonthStatsView(){
   html+=`</tbody></table></div>`;
 
   // 说明
-  html+=`<div style="font-size:11px;color:var(--muted-light);margin-top:10px;line-height:1.6">有效合计 = 每日最多计 ${MAX_PER_DAY} 个、每周最多计 ${MAX_PER_WEEK} 个。「达标」按选班规则中的"周最低有效"（当前 ${minReq}）判定。早补 = 选中 ${shiftNameOf(amShiftId())} 的天数，夜补 = 选中 ${shiftNameOf(pmShiftId())} 的天数，由 picks 实时统计。</div>`;
+  html+=`<div style="font-size:11px;color:var(--muted-light);margin-top:10px;line-height:1.6">有效合计 = 单日全部计入、每周最多计 ${MAX_PER_WEEK} 个。「达标」按选班规则中的"周最低有效"（当前 ${minReq}）判定。早补 = 选中 ${shiftNameOf(amShiftId())} 的天数，夜补 = 选中 ${shiftNameOf(pmShiftId())} 的天数，由 picks 实时统计。</div>`;
   document.getElementById('empContent').innerHTML=html;
 }
 // 员工端打卡页日期导航
@@ -4658,7 +4725,7 @@ function pickSel(dateStr){return memberShifts(selectedMember,dateStr).slice()}
 async function reconcilePicks(){
   for(let i=0;i<4;i++){
     if(i>0){await new Promise(r=>setTimeout(r,400*i))}
-    try{if(await pullPicksSelCfg(true))return true}catch(e){}
+    try{if(await pullPicksSnapshotOnly())return true}catch(e){}
   }
   return false;
 }
@@ -4700,10 +4767,8 @@ async function togglePickSlot(dateStr,sid){
     }
 
     // ===== 选班（新增）=====
-    // 每天最多 7 个（硬性上限，管理员同样受限）
-    if(cur.length>=MAX_PER_DAY){showToast(`每天最多选 ${MAX_PER_DAY} 个时段`);return}
-    // 整周最多 49 个（硬性上限，管理员同样受限）
-    if(draftWeekTotalExcept(dateStr)+cur.length>=MAX_PER_WEEK){showToast(`本周最多选 ${MAX_PER_WEEK} 个时段`);return}
+    // 单日数量不限（已取消每日上限）；整周最多 56 个（管理员可超额分配，不受此限）
+    if(!admin&&draftWeekTotalExcept(dateStr)+cur.length>=MAX_PER_WEEK){showToast(`本周最多选 ${MAX_PER_WEEK} 个时段`);return}
     // 乐观更新：点击后立即在界面上显示已选（即时反馈，避免延迟高时"点了没反应/以为没选上"），
     // 并标记本地刚写入，防止在途快照在服务器返回前把它冲掉
     setMemberPick(dateStr,selectedMember.id,[...new Set(cur.concat(sid))]);
@@ -4712,12 +4777,11 @@ async function togglePickSlot(dateStr,sid){
     const res=await atomicAddPickCap(dateStr,selectedMember.id,sid,admin);
     if(res.ok===false){
       if(res.reason==='full'||res.reason==='dayfull'||res.reason==='weekfull'){
-        // 服务器明确拒绝（满员/超日周上限，服务器没存）：回滚乐观更新
+        // 服务器明确拒绝（满员/超每周上限，服务器没存）：回滚乐观更新
         setMemberPick(dateStr,selectedMember.id,((picks[dateStr]||{})[String(selectedMember.id)]||[]).filter(x=>x!==sid));
         sv('cp6',picks);picksLocalVer=Date.now();renderPickView();
         if(res.reason==='full'){showToast(`该时段已满员（${res.count}/${res.cap}），无法选择`)}
-        else if(res.reason==='weekfull'){showToast(`本周最多选 ${res.max||MAX_PER_WEEK} 个时段，无法再选`)}
-        else{showToast(`每天最多选 ${res.max||MAX_PER_DAY} 个时段，当天已有 ${res.count} 个，无法再选`)}
+        else{showToast(`本周最多选 ${res.max||MAX_PER_WEEK} 个时段，无法再选`)}
       }else{
         // 网络错误：保留本地乐观更新，提示用户刷新确认
       // 不调用 reconcilePicks()，避免"刚选上就被旧数据冲掉"
@@ -4750,21 +4814,12 @@ async function savePicks(){
       return;
     }
   }
-  // 2) 员工端：硬性上限校验（每天最多 7 个、每周最多 49 个）
+  // 2) 员工端：硬性上限校验（单日数量不限；每周最多 56 个）
   if(!admin){
-    // 单日校验（草稿每天 ≤ 7）
-    for(const d of dates){
-      const arr=pickDraft[d];
-      if(Array.isArray(arr)&&arr.length>MAX_PER_DAY){
-        const o=parseYmd(d);
-        showToast(`${o.getMonth()+1}/${o.getDate()} 选了 ${arr.length} 个时段，超过每日上限 ${MAX_PER_DAY} 个，请减少后重新保存`);
-        return;
-      }
-    }
-    // 整周校验：把本周所有日期（已保存的 + 草稿里的）汇总，整周 ≤ 49
+    // 整周校验：把本周所有日期（已保存的 + 草稿里的）汇总，整周 ≤ 56
     const ws=weekStartOf(parseYmd(dates[0]));
     const wkDays=weekDaysArr(ws);
-    let wkTotal=0,overDay=null;
+    let wkTotal=0;
     wkDays.forEach(dObj=>{
       const ds=ymd(dObj);
       let cnt=0;
@@ -4774,14 +4829,8 @@ async function savePicks(){
       }
       // 草稿里的(覆盖或新增)
       if(pickDraft[ds]!==undefined)cnt=pickDraft[ds].length;
-      if(cnt>MAX_PER_DAY){overDay=ds}
       wkTotal+=cnt;
     });
-    if(overDay){
-      const o=parseYmd(overDay);
-      showToast(`${o.getMonth()+1}/${o.getDate()} 超过每日上限 ${MAX_PER_DAY} 个`);
-      return;
-    }
     if(wkTotal>MAX_PER_WEEK){
       showToast(`本周共 ${wkTotal} 个时段，超过每周上限 ${MAX_PER_WEEK} 个，请减少后重新保存`);
       return;
@@ -4862,23 +4911,25 @@ function renderPickView(){
 // ===== 员工端：选班情况实时计数表（只读，伴随实际选班实时更新）=====
 let _countPicksSig='';
 function setCountWeek(off){countWeekOffset=off;renderCountView()}
-async function renderCountView(){
-  // 进入计数表时强制拉取最新选班快照，避免本地/localStorage 缓存为空导致全 0
-  if(fbReady){
-    try{
-      const fresh=await pullPicksSelCfg(true);
-      if(fresh){
-        const sig=JSON.stringify(picks);
-        if(sig!==_countPicksSig){_countPicksSig=sig;renderCountView();return;}
-      }
-    }catch(e){}
-  }
+async function refreshCountPicksView(){
+  if(!fbReady)return;
+  // 初始化或 15 秒内刚完成过全量核对时复用本地权威状态，避免切页连点重复下载。
+  if(picksLastFullSyncAt&&Date.now()-picksLastFullSyncAt<15000)return;
+  try{
+    if(await pullPicksSnapshotOnly()){
+      _countPicksSig=JSON.stringify(picks);
+      if(empTab==='count')renderCountView();
+    }
+  }catch(e){}
+}
+function renderCountView(){
+  // 这里只渲染内存状态；显式进入页签时由 refreshCountPicksView 单独核对权威 picks。
   const curWs=weekStartOf(new Date()),ws=addDays(curWs,countWeekOffset*7),days=weekDaysArr(ws);
   let html=rulesBlockHtml();
   html+=`<div class="week-switch"><button class="${countWeekOffset===0?'active':''}" onclick="setCountWeek(0)">本周</button><button class="${countWeekOffset===1?'active':''}" onclick="setCountWeek(1)">下周</button></div>`;
   html+=`<div class="cnt-title">选班情况实时计数表<span class="live"><span class="dot"></span>实时</span></div>`;
   html+=`<div class="sel-grid-wrap">${buildCountTable(days,false)}</div>`;
-  html+=`<div style="font-size:11px;color:var(--muted-light);margin-top:8px;line-height:1.6">此表为全员公开只读视图，随大家实际选班自动更新。「有效合计」= 每日最多计 7、整周最多计 49；「结果」= 本周有效合计达到 ${+selCfg.minValid||0} 视为正常，否则不足；整行为 0 标红。</div>`;
+  html+=`<div style="font-size:11px;color:var(--muted-light);margin-top:8px;line-height:1.6">此表为全员公开只读视图，随大家实际选班自动更新。「有效合计」= 单日全部计入、整周最多计 ${MAX_PER_WEEK}；「结果」= 本周有效合计达到 ${+selCfg.minValid||0} 视为正常，否则不足；整行为 0 标红。</div>`;
   document.getElementById('empContent').innerHTML=html;
 }
 
@@ -5371,8 +5422,7 @@ async function acceptSwap(id){
   // 接收方约束校验
   const toArr=(picks[s.date]&&picks[s.date][String(s.toId)])||[];
   if(toArr.includes(swapSid)){showToast('你当天已选该时段，无法接收');return}
-  if(toArr.length>=MAX_PER_DAY){showToast(`你当天班次已达到 ${MAX_PER_DAY} 个，无法再接收`);return}
-  // 整周 49 上限
+  // 整周 56 上限（单日数量不限）
   const wkDays=weekDaysArr(weekStartOf(parseYmd(s.date)));
   let wkTotal=0;wkDays.forEach(d=>{const a=(picks[ymd(d)]&&picks[ymd(d)][String(s.toId)])||[];wkTotal+=a.length});
   if(wkTotal>=MAX_PER_WEEK){showToast(`你本周已选满 ${MAX_PER_WEEK} 个时段，无法接收`);return}
@@ -5449,9 +5499,6 @@ async function acceptExchange(id){
   if(!receiverTake.includes(takeSid)){s.status='cancelled';s.decidedTs=Date.now();svSwaps();await syncSwaps();showToast('你已不再持有要换出的班次，换班作废');renderEmp();return}
   if(receiverGive.includes(giveSid)){showToast('你在给出日期已有该时段，无法重复接收');return}
   if(giverTake.includes(takeSid)){showToast('对方在接收日期已有该时段，无法重复接收');return}
-  const sameDt=giveDate===takeDate;
-  if(!sameDt&&receiverGive.length>=MAX_PER_DAY){showToast(`你给出日期已满 ${MAX_PER_DAY} 个时段，无法接收新班次`);return}
-  if(!sameDt&&giverTake.length>=MAX_PER_DAY){showToast(`对方接收日期已满 ${MAX_PER_DAY} 个时段，无法完成换班`);return}
   const giveWeekStart=weekStartOf(parseYmd(giveDate)),takeWeekStart=weekStartOf(parseYmd(takeDate));
   const giveWeekStr=ymd(giveWeekStart),takeWeekStr=ymd(takeWeekStart);
   function countWeek(mid,startDate){let total=0;weekDaysArr(startDate).forEach(d=>{const a=(picks[ymd(d)]&&picks[ymd(d)][String(mid)])||[];total+=a.length});return total}
@@ -7017,7 +7064,7 @@ function renderSelection(){
       h+=`</div>`;
       const wdays=weekDaysArr(mw[countDetailWeekIdx]||weekStartOf(new Date()));
       h+=`<div class="sel-grid-wrap">${buildCountTable(wdays,false,monthStr)}</div>`;
-      h+=`<div style="font-size:11px;color:var(--muted-light);margin-top:8px;line-height:1.6">分表为所选周期的每日明细。「有效合计」每日最多计 7、整周最多计 49；「结果」按“周最低有效”(当前 ${minV})判定；「${mNum}月早补/夜补/合计」为${mNum}月累计(与总表一致)，随实际选班实时更新。</div>`;
+      h+=`<div style="font-size:11px;color:var(--muted-light);margin-top:8px;line-height:1.6">分表为所选周期的每日明细。「有效合计」单日全部计入、整周最多计 56；「结果」按“周最低有效”(当前 ${minV})判定；「${mNum}月早补/夜补/合计」为${mNum}月累计(与总表一致)，随实际选班实时更新。</div>`;
     }
     document.getElementById('selGridWrap').innerHTML=h;
     return;
@@ -7118,7 +7165,7 @@ async function bulkClearByDateMember(){
 async function saveCellEditor(){
   if(!adminEditCell)return;
   const sids=[];document.querySelectorAll('#cellEditorBox .shift-chk.on').forEach(el=>sids.push(+el.dataset.sid));
-  if(sids.length>MAX_PER_DAY){showToast(`每天最多 ${MAX_PER_DAY} 个时段，当前勾了 ${sids.length} 个，请减少后再保存`);return}
+  // 管理员后台改选班可超额分配：不受员工"每周 56 / 单日"选班次数限制，服务器 pick_set 亦不设数量上限。
   const okCell=await atomicSetPick(adminEditCell.date,adminEditCell.mid,sids);
   if(!okCell){showToast('保存失败，已刷新最新数据，请重试');try{await pullPicksSelCfg()}catch(e){}}
   logEvent('后台改选班',`管理员将 ${memberNameOf(adminEditCell.mid)} 在 ${adminEditCell.date} 的班次改为 ${sids.map(shiftNameOf).join('、')||'空'}`);
@@ -8598,7 +8645,7 @@ setMemberPick=function(...args){_origSetMemberPick.apply(this,args);markRenderDi
 
 tick();setInterval(tick,1000);setInterval(renderEmpIfNeeded,3e4);
 // ===== 新版本检测：部署新版后自动提醒用户刷新，避免大家一直跑旧代码 =====
-const APP_VERSION='v2026.09.09.69';
+const APP_VERSION='v2026.09.24.71';
 let _newVerNotified=false;
 async function checkAppVersion(){
   if(_newVerNotified)return;
@@ -8638,8 +8685,17 @@ function showVersionBanner(latest){
 checkAppVersion();
 setInterval(checkAppVersion,60000);
 document.addEventListener('visibilitychange',()=>{if(!document.hidden)checkAppVersion()});
-// 切回可见时全量对齐选班：修复后台期间漏收的实时事件（增量同步的自愈点）
-document.addEventListener('visibilitychange',()=>{if(!document.hidden&&fbReady)pullPicksSelCfg(true)});
+// 短暂切换应用时 Realtime 仍会接收差量，不重复下载整包；后台较久或通道异常时全量自愈。
+let _pageHiddenAt=document.hidden?Date.now():0;
+document.addEventListener('visibilitychange',()=>{
+  if(document.hidden){_pageHiddenAt=Date.now();return}
+  if(!fbReady)return;
+  const hiddenFor=_pageHiddenAt?Date.now()-_pageHiddenAt:0;
+  _pageHiddenAt=0;
+  if(!isRealtimeSyncHealthy()||hiddenFor>=60000||!picksLastFullSyncAt||Date.now()-picksLastFullSyncAt>=60*60*1000){
+    pullPicksSelCfg(true);
+  }
+});
 // Check every 60s if we've crossed the 7AM boundary — auto-reset bindings
 let lastResetDay='';
 (function checkReset(){

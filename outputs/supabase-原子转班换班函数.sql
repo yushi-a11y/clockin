@@ -20,8 +20,9 @@
 --    —— 与前端 Firestore 适配器 pick_transfer/pick_exchange 的判定完全一致。
 --
 --  返回（与前端契约一致）：
---    成功     → {"ok":true, "alreadyApplied":<bool>, "data":<最新整块 picks>}
---    失败     → {"ok":false, "reason":"invalid|not_owner|duplicate|dayfull|full|weekfull", ...}
+--    成功     → {"ok":true, "alreadyApplied":<bool>}（不再回传完整 picks，降低 Egress）
+--    失败     → {"ok":false, "reason":"invalid|not_owner|duplicate|full|weekfull", ...}（已取消每日上限，不再返回 dayfull）
+--    写入结果由当前客户端本地幂等应用，并由 picks Realtime 差量及周期性权威快照自愈。
 --    前端 atomicTransferPick/atomicExchangePicks 会优先调用本函数；
 --    只有函数不存在时才回退到组合降级。部署本函数后【无需改前端】。
 --
@@ -66,7 +67,7 @@ BEGIN
 
   -- 幂等：转出方已无、接收方已有 → 视为此前已应用（重复点击/回执丢失安全）
   IF (NOT v_from_holds) AND v_to_holds THEN
-    RETURN jsonb_build_object('ok', true, 'alreadyApplied', true, 'data', (public.picks_snapshot()) -> 'data');
+    RETURN jsonb_build_object('ok', true, 'alreadyApplied', true);
   END IF;
   IF NOT v_from_holds THEN
     RETURN jsonb_build_object('ok', false, 'reason', 'not_owner');
@@ -75,11 +76,7 @@ BEGIN
     RETURN jsonb_build_object('ok', false, 'reason', 'duplicate');
   END IF;
 
-  -- 接收方每日上限（净 +1，硬上限 7，与前端 MAX_PER_DAY 一致）
-  SELECT COUNT(*)::int INTO v_cnt FROM public.picks WHERE date = p_date AND mid = p_to_mid;
-  IF v_cnt >= 7 THEN
-    RETURN jsonb_build_object('ok', false, 'reason', 'dayfull', 'count', v_cnt, 'max', 7);
-  END IF;
+  -- 选班已取消每日上限（单日数量不限），此处不再做接收方 dayfull 校验。
 
   -- 时段名额：净零 —— 排除转出方后计数，仍 ≥ 上限才是真超员
   BEGIN
@@ -95,7 +92,7 @@ BEGIN
     END IF;
   END IF;
 
-  -- 每周上限：接收方本周（含新转入的 1 个）> 49 则拒绝；weekStartDay 读 config.selcfg
+  -- 每周上限：接收方本周（含新转入的 1 个）> 56 则拒绝；weekStartDay 读 config.selcfg
   BEGIN
     SELECT COALESCE((data ->> 'weekStartDay')::int, 6) INTO v_w FROM config WHERE id = 'selcfg';
   EXCEPTION WHEN OTHERS THEN v_w := 6;
@@ -108,8 +105,8 @@ BEGIN
     WHERE mid = p_to_mid
       AND date >= to_char(v_ws, 'YYYY-MM-DD')
       AND date <= to_char(v_ws + 6, 'YYYY-MM-DD');
-  IF v_cnt + 1 > 49 THEN
-    RETURN jsonb_build_object('ok', false, 'reason', 'weekfull', 'count', v_cnt, 'max', 49);
+  IF v_cnt + 1 > 56 THEN
+    RETURN jsonb_build_object('ok', false, 'reason', 'weekfull', 'count', v_cnt, 'max', 56);
   END IF;
 
   -- 应用（同一事务，原子）：转出方删、接收方加
@@ -118,13 +115,8 @@ BEGIN
     ON CONFLICT (date, mid, sid) DO NOTHING;
   DELETE FROM public.picks WHERE date < to_char(CURRENT_DATE - INTERVAL '60 days', 'YYYY-MM-DD');
 
-  -- 兼容镜像：刷新 config 里旧的整块 picks（与过渡触发器等价、幂等；保证未升级客户端读旧块也正确）
-  INSERT INTO config(id, data, updated_at)
-    VALUES ('picks', (public.picks_snapshot()) -> 'data', (EXTRACT(epoch FROM now()) * 1000)::bigint)
-    ON CONFLICT (id) DO UPDATE
-      SET data = EXCLUDED.data, updated_at = EXCLUDED.updated_at;
-
-  RETURN jsonb_build_object('ok', true, 'alreadyApplied', false, 'data', (public.picks_snapshot()) -> 'data');
+  -- 不再刷新 config.picks 兼容大对象；picks 行表是唯一权威源，Realtime 会广播本次两行差量。
+  RETURN jsonb_build_object('ok', true, 'alreadyApplied', false);
 END; $$;
 
 
@@ -179,7 +171,7 @@ BEGIN
 
   -- 幂等：已完成互换
   IF (NOT v_giver_gives) AND v_giver_take AND v_receiver_give AND (NOT v_receiver_takes) THEN
-    RETURN jsonb_build_object('ok', true, 'alreadyApplied', true, 'data', (public.picks_snapshot()) -> 'data');
+    RETURN jsonb_build_object('ok', true, 'alreadyApplied', true);
   END IF;
   IF (NOT v_giver_gives) OR (NOT v_receiver_takes) THEN
     RETURN jsonb_build_object('ok', false, 'reason', 'not_owner');
@@ -202,11 +194,7 @@ BEGIN
     IF v_cnt >= v_take_cap THEN RETURN jsonb_build_object('ok', false, 'reason', 'full', 'count', v_cnt, 'cap', v_take_cap); END IF;
   END IF;
 
-  -- 每日上限：接收方在 give_date 净 +1；转出方在 take_date 净 +1
-  SELECT COUNT(*)::int INTO v_cnt FROM public.picks WHERE date = p_give_date AND mid = p_receiver_mid;
-  IF v_cnt >= 7 THEN RETURN jsonb_build_object('ok', false, 'reason', 'dayfull', 'count', v_cnt, 'max', 7); END IF;
-  SELECT COUNT(*)::int INTO v_cnt FROM public.picks WHERE date = p_take_date AND mid = p_giver_mid;
-  IF v_cnt >= 7 THEN RETURN jsonb_build_object('ok', false, 'reason', 'dayfull', 'count', v_cnt, 'max', 7); END IF;
+  -- 选班已取消每日上限（单日数量不限），不再做 dayfull 校验。
 
   -- 每周上限：对 giver/receiver × week(give_date)/week(take_date) 计算投影（含本次增减）
   BEGIN SELECT COALESCE((data ->> 'weekStartDay')::int, 6) INTO v_w FROM config WHERE id = 'selcfg'; EXCEPTION WHEN OTHERS THEN v_w := 6; END;
@@ -218,25 +206,25 @@ BEGIN
   SELECT COUNT(*)::int INTO v_proj FROM public.picks WHERE mid = p_giver_mid AND date >= to_char(v_ws1,'YYYY-MM-DD') AND date <= to_char(v_ws1+6,'YYYY-MM-DD');
   v_proj := v_proj - (CASE WHEN p_give_date::date BETWEEN v_ws1 AND v_ws1+6 THEN 1 ELSE 0 END)
                    + (CASE WHEN p_take_date::date BETWEEN v_ws1 AND v_ws1+6 THEN 1 ELSE 0 END);
-  IF v_proj > 49 THEN RETURN jsonb_build_object('ok', false, 'reason', 'weekfull', 'count', v_proj, 'max', 49); END IF;
+  IF v_proj > 56 THEN RETURN jsonb_build_object('ok', false, 'reason', 'weekfull', 'count', v_proj, 'max', 56); END IF;
 
   -- giver @ week(take_date)
   SELECT COUNT(*)::int INTO v_proj FROM public.picks WHERE mid = p_giver_mid AND date >= to_char(v_ws2,'YYYY-MM-DD') AND date <= to_char(v_ws2+6,'YYYY-MM-DD');
   v_proj := v_proj - (CASE WHEN p_give_date::date BETWEEN v_ws2 AND v_ws2+6 THEN 1 ELSE 0 END)
                    + (CASE WHEN p_take_date::date BETWEEN v_ws2 AND v_ws2+6 THEN 1 ELSE 0 END);
-  IF v_proj > 49 THEN RETURN jsonb_build_object('ok', false, 'reason', 'weekfull', 'count', v_proj, 'max', 49); END IF;
+  IF v_proj > 56 THEN RETURN jsonb_build_object('ok', false, 'reason', 'weekfull', 'count', v_proj, 'max', 56); END IF;
 
   -- receiver @ week(give_date)
   SELECT COUNT(*)::int INTO v_proj FROM public.picks WHERE mid = p_receiver_mid AND date >= to_char(v_ws1,'YYYY-MM-DD') AND date <= to_char(v_ws1+6,'YYYY-MM-DD');
   v_proj := v_proj + (CASE WHEN p_give_date::date BETWEEN v_ws1 AND v_ws1+6 THEN 1 ELSE 0 END)
                    - (CASE WHEN p_take_date::date BETWEEN v_ws1 AND v_ws1+6 THEN 1 ELSE 0 END);
-  IF v_proj > 49 THEN RETURN jsonb_build_object('ok', false, 'reason', 'weekfull', 'count', v_proj, 'max', 49); END IF;
+  IF v_proj > 56 THEN RETURN jsonb_build_object('ok', false, 'reason', 'weekfull', 'count', v_proj, 'max', 56); END IF;
 
   -- receiver @ week(take_date)
   SELECT COUNT(*)::int INTO v_proj FROM public.picks WHERE mid = p_receiver_mid AND date >= to_char(v_ws2,'YYYY-MM-DD') AND date <= to_char(v_ws2+6,'YYYY-MM-DD');
   v_proj := v_proj + (CASE WHEN p_give_date::date BETWEEN v_ws2 AND v_ws2+6 THEN 1 ELSE 0 END)
                    - (CASE WHEN p_take_date::date BETWEEN v_ws2 AND v_ws2+6 THEN 1 ELSE 0 END);
-  IF v_proj > 49 THEN RETURN jsonb_build_object('ok', false, 'reason', 'weekfull', 'count', v_proj, 'max', 49); END IF;
+  IF v_proj > 56 THEN RETURN jsonb_build_object('ok', false, 'reason', 'weekfull', 'count', v_proj, 'max', 56); END IF;
 
   -- 应用（同一事务，原子）
   DELETE FROM public.picks WHERE date = p_give_date AND mid = p_giver_mid    AND sid = p_give_sid;
@@ -247,13 +235,8 @@ BEGIN
     ON CONFLICT (date, mid, sid) DO NOTHING;
   DELETE FROM public.picks WHERE date < to_char(CURRENT_DATE - INTERVAL '60 days', 'YYYY-MM-DD');
 
-  -- 兼容镜像刷新（幂等）
-  INSERT INTO config(id, data, updated_at)
-    VALUES ('picks', (public.picks_snapshot()) -> 'data', (EXTRACT(epoch FROM now()) * 1000)::bigint)
-    ON CONFLICT (id) DO UPDATE
-      SET data = EXCLUDED.data, updated_at = EXCLUDED.updated_at;
-
-  RETURN jsonb_build_object('ok', true, 'alreadyApplied', false, 'data', (public.picks_snapshot()) -> 'data');
+  -- 不再刷新 config.picks 兼容大对象；picks 行表是唯一权威源，Realtime 会广播本次四行差量。
+  RETURN jsonb_build_object('ok', true, 'alreadyApplied', false);
 END; $$;
 
 
