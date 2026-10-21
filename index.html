@@ -698,7 +698,7 @@ window.onunhandledrejection=function(e){
 (function(){
   var ua=navigator.userAgent||'';
   var isMobile=/Android|iPhone|iPad|iPod|Mobile|Silk|Kindle|BlackBerry|Opera Mini|IEMobile|WPDesktop/i.test(ua);
-  var isTouchSmall=('ontouchstart' in window)&&Math.min(screen.width,screen.height)<1024;
+  var isTouchSmall=('ontouchstart' in window)&&screen.width<768;
   if(isMobile||isTouchSmall){
     var el=document.getElementById('mobileBlock');
     if(el)el.style.display='flex';
