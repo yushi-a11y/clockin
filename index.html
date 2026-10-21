@@ -695,7 +695,15 @@ window.onunhandledrejection=function(e){
   }
 };
 // ====== 移动端拦截（UA 检测，覆盖横屏平板等超过 768px 的设备）======
+// 如果在 iframe 中加载（如 Chrome 扩展弹窗），跳过移动端检测——扩展自身已处理移动端隐藏
 (function(){
+  if(window.self!==window.top){
+    // iframe 环境：强制隐藏移动端拦截层（内联样式优先级高于 CSS !important）
+    document.documentElement.style.setProperty('--iframe-mode','1');
+    var _mb=document.getElementById('mobileBlock');
+    if(_mb)_mb.style.cssText='display:none!important';
+    return;
+  }
   var ua=navigator.userAgent||'';
   var isMobile=/Android|iPhone|iPad|iPod|Mobile|Silk|Kindle|BlackBerry|Opera Mini|IEMobile|WPDesktop/i.test(ua);
   var isTouchSmall=('ontouchstart' in window)&&screen.width<768;
