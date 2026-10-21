@@ -3,14 +3,15 @@
 <head>
   <meta charset="UTF-8"/>
   <meta name="viewport" content="width=device-width,initial-scale=1"/>
-  <meta http-equiv="Content-Security-Policy" content="default-src 'self' https://txtduqfhugjupxdoxdvp.supabase.co https://cdn.jsdelivr.net https://cdnjs.cloudflare.com https://fonts.googleapis.com https://fonts.gstatic.com https://firestore.googleapis.com https://clockin-b691a.firebaseio.com; script-src 'self' 'unsafe-inline' 'unsafe-eval' https://cdn.jsdelivr.net https://cdnjs.cloudflare.com https://www.gstatic.com https://restapi.amap.com blob:; worker-src blob:; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; connect-src 'self' https://txtduqfhugjupxdoxdvp.supabase.co wss://txtduqfhugjupxdoxdvp.supabase.co https://cdn.jsdelivr.net https://restapi.amap.com https://firestore.googleapis.com wss://clockin-b691a.firebaseio.com https://clockin-b691a.firebaseio.com; img-src 'self' data: blob:; frame-ancestors 'none'"/>
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self' https://txtduqfhugjupxdoxdvp.supabase.co https://cdn.jsdelivr.net https://unpkg.com https://cdnjs.cloudflare.com https://fonts.googleapis.com https://fonts.gstatic.com https://firestore.googleapis.com https://clockin-b691a.firebaseio.com; script-src 'self' 'unsafe-inline' 'unsafe-eval' https://cdn.jsdelivr.net https://unpkg.com https://cdnjs.cloudflare.com https://www.gstatic.com https://restapi.amap.com blob:; worker-src blob:; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; connect-src 'self' https://txtduqfhugjupxdoxdvp.supabase.co wss://txtduqfhugjupxdoxdvp.supabase.co https://cdn.jsdelivr.net https://unpkg.com https://restapi.amap.com https://firestore.googleapis.com wss://clockin-b691a.firebaseio.com https://clockin-b691a.firebaseio.com; img-src 'self' data: blob:; frame-ancestors 'none'"/>
   <title>ClockIn 考勤打卡</title>
   <!-- v2026.09.05 移除 Google Fonts 阻塞资源：fonts.googleapis.com 属 Google，国内网络被墙，
        作为 render-blocking <link> 会让每次打开页面卡数秒。body/mono 字体在 CSS 中已配置系统字体回退
        （-apple-system / Segoe UI / SF Mono / sans-serif），移除后视觉差异极小、加载显著变快。 -->
   <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
-  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+  <!-- v2026.10.13: Supabase SDK 异步加载 + unpkg 备用；数据同步不依赖 SDK，改用 fetch 直接调用 REST API -->
+  <script async src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2" onerror="var s=document.createElement('script');s.src='https://unpkg.com/@supabase/supabase-js@2';s.async=true;document.head.appendChild(s);"></script>
   <!-- v2026.09.05 移除阻塞式 Firebase SDK：www.gstatic.com 属 Google，国内被墙，作为阻塞式脚本标签
        会拖慢首屏（即便 supabase 模式根本不用 Firebase）。现改为仅当 DB_PROVIDER 为 firestore
        时由 loadFirebaseSDK() 懒加载；supabase 模式永不请求 gstatic。 -->
@@ -284,6 +285,67 @@
     .help-unresolved{margin-top:18px;text-align:center;font-size:12px;color:var(--muted)}
     .help-link-btn{margin-left:6px;padding:0;border:none;background:none;color:var(--primary);font-size:12px;font-weight:500;cursor:pointer}
     .help-link-btn:hover{text-decoration:underline}
+    /* ===== Feedback & Diagnosis Panel ===== */
+    .fb-btn{display:inline-flex;align-items:center;gap:4px;padding:4px 10px;border:1px solid var(--border);border-radius:var(--radius);background:var(--surface);color:var(--muted);font-size:12px;cursor:pointer;margin-left:6px;transition:all .15s}
+    .fb-btn:hover{border-color:var(--primary);color:var(--primary);background:var(--primary-soft)}
+    .fb-btn svg{width:14px;height:14px}
+    .fb-panel{position:fixed;top:56px;right:24px;width:380px;max-height:80vh;background:var(--card);border:1px solid var(--border);border-radius:calc(var(--radius)*1.5);box-shadow:0 8px 32px rgba(0,0,0,.12);z-index:1000;display:flex;flex-direction:column;overflow:hidden}
+    .fb-panel-header{display:flex;align-items:center;justify-content:space-between;padding:14px 16px;border-bottom:1px solid var(--border-light)}
+    .fb-panel-title{font-size:14px;font-weight:600;color:var(--fg)}
+    .fb-panel-close{background:none;border:none;cursor:pointer;color:var(--muted);padding:2px;border-radius:4px}
+    .fb-panel-close:hover{background:var(--surface);color:var(--fg)}
+    .fb-my-feedback-btn{padding:4px 10px;border:1px solid var(--border);border-radius:6px;background:var(--surface);color:var(--muted);font-size:11px;cursor:pointer;display:flex;align-items:center;gap:4px}
+    .fb-my-feedback-btn:hover{border-color:var(--primary);color:var(--primary);background:var(--primary-soft)}
+    .fb-panel-body{padding:16px;overflow-y:auto;flex:1}
+    .fb-status-list{display:flex;flex-direction:column;gap:8px;margin-bottom:16px}
+    .fb-status-item{display:flex;align-items:center;gap:10px;padding:10px 12px;border-radius:var(--radius);border:1px solid var(--border-light);background:var(--surface);font-size:12px;transition:all .2s}
+    .fb-status-item.ok{border-color:color-mix(in srgb,var(--success) 40%,transparent)}
+    .fb-status-item.warn{border-color:color-mix(in srgb,var(--warning,#f59e0b) 50%,transparent);background:color-mix(in srgb,var(--warning,#f59e0b) 6%,var(--surface))}
+    .fb-status-item.error{border-color:color-mix(in srgb,var(--danger) 40%,transparent);background:color-mix(in srgb,var(--danger) 6%,var(--surface))}
+    .fb-status-item.fixing{border-color:color-mix(in srgb,var(--primary) 40%,transparent);background:color-mix(in srgb,var(--primary) 6%,var(--surface))}
+    .fb-status-icon{width:20px;height:20px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:11px;flex-shrink:0}
+    .fb-status-item.ok .fb-status-icon{background:color-mix(in srgb,var(--success) 15%,transparent);color:var(--success)}
+    .fb-status-item.warn .fb-status-icon{background:color-mix(in srgb,var(--warning,#f59e0b) 15%,transparent);color:var(--warning,#f59e0b)}
+    .fb-status-item.error .fb-status-icon{background:color-mix(in srgb,var(--danger) 15%,transparent);color:var(--danger)}
+    .fb-status-item.fixing .fb-status-icon{background:color-mix(in srgb,var(--primary) 15%,transparent);color:var(--primary);animation:fb-pulse 1s infinite}
+    @keyframes fb-pulse{0%,100%{opacity:1}50%{opacity:.4}}
+    .fb-status-label{flex:1;font-weight:500;color:var(--fg)}
+    .fb-status-detail{font-size:11px;color:var(--muted);margin-top:2px}
+    .fb-status-action{font-size:11px;color:var(--primary);font-weight:500}
+    .fb-fix-btn{padding:4px 10px;border:1px solid var(--primary);border-radius:6px;background:var(--primary-soft);color:var(--primary);font-size:11px;font-weight:500;cursor:pointer;white-space:nowrap}
+    .fb-fix-btn:hover{background:var(--primary);color:#fff}
+    .fb-fix-btn:disabled{opacity:.5;cursor:not-allowed}
+    .fb-summary{padding:12px;border-radius:var(--radius);background:var(--surface);border:1px solid var(--border-light);margin-bottom:16px;font-size:12px;line-height:1.6}
+    .fb-summary-title{font-weight:600;margin-bottom:4px}
+    .fb-summary.ok{border-left:3px solid var(--success)}
+    .fb-summary.warn{border-left:3px solid var(--warning,#f59e0b)}
+    .fb-summary.error{border-left:3px solid var(--danger)}
+    .fb-fix-report{padding:12px;border-radius:var(--radius);background:var(--primary-soft);border:1px solid var(--primary);margin-bottom:16px;font-size:12px}
+    .fb-fix-report-title{font-weight:600;margin-bottom:8px;color:var(--primary)}
+    .fb-fix-action-item{padding:6px 0;border-bottom:1px solid var(--border-light)}
+    .fb-fix-action-item:last-child{border-bottom:none}
+    .fb-desc-area{width:100%;min-height:60px;padding:8px 10px;border:1px solid var(--border);border-radius:var(--radius);background:var(--surface);color:var(--fg);font-size:12px;font-family:inherit;resize:vertical;box-sizing:border-box}
+    .fb-desc-area:focus{outline:none;border-color:var(--primary)}
+    .fb-desc-area::placeholder{color:var(--muted-light)}
+    .fb-submit-row{display:flex;justify-content:flex-end;gap:8px;margin-top:10px}
+    .fb-submit-btn{padding:6px 14px;border:none;border-radius:var(--radius);background:var(--primary);color:#fff;font-size:12px;font-weight:500;cursor:pointer}
+    .fb-submit-btn:hover{background:var(--primary-hover)}
+    .fb-submit-btn:disabled{opacity:.5;cursor:not-allowed}
+    .fb-cancel-btn{padding:6px 14px;border:1px solid var(--border);border-radius:var(--radius);background:var(--surface);color:var(--muted);font-size:12px;cursor:pointer}
+    .fb-cancel-btn:hover{border-color:var(--muted)}
+    .fb-loading{display:flex;align-items:center;justify-content:center;padding:24px;color:var(--muted);font-size:13px;gap:8px}
+    .fb-loading-dot{width:6px;height:6px;border-radius:50%;background:var(--primary);animation:fb-bounce .6s infinite alternate}
+    .fb-loading-dot:nth-child(2){animation-delay:.2s}
+    .fb-loading-dot:nth-child(3){animation-delay:.4s}
+    @keyframes fb-bounce{to{transform:translateY(-6px);opacity:.4}}
+    /* Admin feedback history */
+    .fb-history-filters{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:12px}
+    .fb-history-filter{padding:4px 10px;border:1px solid var(--border);border-radius:6px;background:var(--surface);color:var(--muted);font-size:12px;cursor:pointer}
+    .fb-history-filter.active{border-color:var(--primary);color:var(--primary);background:var(--primary-soft)}
+    .fb-history-row{cursor:pointer;transition:background .1s}
+    .fb-history-row:hover{background:var(--primary-soft)}
+    .fb-history-detail{padding:12px;background:var(--surface);border-radius:var(--radius);margin:8px 0;font-size:12px;line-height:1.6;border:1px solid var(--border-light)}
+    .fb-history-detail pre{background:var(--card);padding:8px;border-radius:4px;overflow-x:auto;font-size:11px;margin:4px 0}
   </style>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
 </head>
@@ -292,8 +354,18 @@
 
 <nav class="nav">
   <div class="nav-brand" onclick="brandClick()"><div class="logo"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="9"/><polyline points="12 9 12 12 14.5 14.5"/></svg></div>Clock<em>In</em><span class="sync-badge off" id="syncBadge"><span class="dot"></span>离线</span></div>
-  <div class="nav-right"><div class="nav-user"><div class="av" id="navAv">?</div><span id="navName">未选择</span></div><span id="networkStatus" class="sync-badge on" title="网络状态"><span class="dot"></span>在线</span><button class="nav-btn" id="adminLink" onclick="switchPage('admin')">管理后台</button><button class="nav-btn show" id="empLink" onclick="switchPage('emp')">打卡</button></div>
+  <div class="nav-right"><div class="nav-user"><div class="av" id="navAv">?</div><span id="navName">未选择</span></div><span id="networkStatus" class="sync-badge on" title="网络状态"><span class="dot"></span>在线</span><button class="nav-btn" id="forceSyncBtn" onclick="forceSyncFromSupabase()" style="display:none;background:#ea580c;color:#fff" title="不依赖SDK，直接fetch拉取服务器数据">强制同步</button><button class="fb-btn" id="feedbackBtn" onclick="openFeedbackPanel()" title="问题诊断与反馈"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>反馈</button><button class="nav-btn" id="adminLink" onclick="switchPage('admin')">管理后台</button><button class="nav-btn show" id="empLink" onclick="switchPage('emp')">打卡</button></div>
 </nav>
+<div class="fb-panel" id="fbPanel" style="display:none">
+  <div class="fb-panel-header">
+    <span class="fb-panel-title">问题诊断</span>
+    <div style="display:flex;gap:8px;align-items:center">
+      <button class="fb-my-feedback-btn" onclick="showMyFeedback()" title="查看我的反馈记录">📋 我的反馈</button>
+      <button class="fb-panel-close" onclick="closeFeedbackPanel()"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>
+    </div>
+  </div>
+  <div class="fb-panel-body" id="fbPanelBody"></div>
+</div>
 
 <div class="login-overlay" id="loginOverlay"><div class="login-box"><div class="lock"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg></div><h3>管理员登录</h3><div class="sub">请输入管理密码</div><input type="password" class="login-input" id="loginInput" placeholder="密码" onkeydown="if(event.key==='Enter')doLogin()"/><button class="login-btn" onclick="doLogin()">登 录</button><button class="login-cancel" onclick="closeLogin()">取消</button></div></div>
 <div class="toast" id="toast"></div>
@@ -363,6 +435,7 @@
     <ul class="sb-nav">
       <li><a onclick="switchPanel('import',this)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>导入班次表</a></li>
       <li><a onclick="switchPanel('logs',this)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M12 8v4l3 2"/><circle cx="12" cy="12" r="9"/></svg>操作日志</a></li>
+      <li><a onclick="switchPanel('feedback',this)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/><line x1="9" y1="10" x2="15" y2="10"/></svg>反馈记录<span id="feedbackAdminBadge" class="tab-badge" style="display:none"></span></a></li>
       <li><a onclick="exportReport()"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>导出报表</a></li>
       <li><a onclick="switchPanel('backup',this)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>数据备份</a></li>
       <li><a onclick="adminClearAll()" style="color:var(--danger)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>清除全部数据</a></li>
@@ -566,6 +639,21 @@
           <div class="import-preview" id="backupPreviewTable"></div>
         </div>
       </div>
+    </div>
+    <div class="panel" id="ap-feedback">
+      <div class="ph"><h1 class="pt">反馈记录</h1><div class="ha"><button class="btn-s" onclick="renderFeedbackAdmin()">刷新</button></div></div>
+      <div class="chart-card" style="margin-bottom:16px;border-left:3px solid var(--primary)">
+        <div style="font-size:13px;font-weight:700;margin-bottom:6px">问题诊断与修复历史</div>
+        <div style="font-size:12px;color:var(--muted);line-height:1.6">记录所有员工反馈的诊断结果、自动修复动作及手动提交的反馈描述。可用于回溯问题模式、追踪修复效果、发现潜在回归。</div>
+      </div>
+      <div class="fb-history-filters" id="fbHistoryFilters">
+        <button class="fb-history-filter active" data-filter="all" onclick="filterFeedbackHistory('all',this)">全部</button>
+        <button class="fb-history-filter" data-filter="error" onclick="filterFeedbackHistory('error',this)">异常</button>
+        <button class="fb-history-filter" data-filter="warn" onclick="filterFeedbackHistory('warn',this)">警告</button>
+        <button class="fb-history-filter" data-filter="ok" onclick="filterFeedbackHistory('ok',this)">正常</button>
+        <button class="fb-history-filter" data-filter="feedback" onclick="filterFeedbackHistory('feedback',this)">有反馈</button>
+      </div>
+      <div id="feedbackAdminList"></div>
     </div>
   </main>
 </div></div>
@@ -1380,14 +1468,153 @@ let _fsConnectionTested = false;
 let _fsConnectionOk = false;
 
 // Supabase provider 初始化（当前 active 后端）。失败返回 false，fbReady 保持 false → 单机版。
+// v2026.10.13: 加入重试机制（最多 3 次）和可见错误提示
+let _supaInitAttempts = 0;
 function initSupabaseProvider(){
+  _supaInitAttempts++;
   try{
-    if(!window.supabase){console.warn('supabase-js 未加载（CDN 不可达？）');return false;}
+    if(!window.supabase){
+      console.warn(`[initSupabase #${_supaInitAttempts}] supabase-js 未加载（CDN 不可达？）`);
+      if(_supaInitAttempts < 3){
+        console.log(`将在 ${_supaInitAttempts * 1000}ms 后重试...`);
+        setTimeout(initSupabaseProvider, _supaInitAttempts * 1000);
+        return false;
+      }
+      // 3 次都失败，显示可见错误
+      _showConnectionError('Supabase SDK 加载失败（CDN 不可达）');
+      return false;
+    }
     const client = window.supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
     supa = new _SupabaseProvider(client);
     fbReady = true;
+    console.log(`✅ Supabase 连接成功（第 ${_supaInitAttempts} 次尝试）`);
     return true;
-  }catch(e){ console.warn('Supabase init failed:', e); return false; }
+  }catch(e){
+    console.warn(`[initSupabase #${_supaInitAttempts}] Supabase init failed:`, e);
+    if(_supaInitAttempts < 3){
+      setTimeout(initSupabaseProvider, _supaInitAttempts * 1000);
+      return false;
+    }
+    _showConnectionError('Supabase 初始化失败: ' + e.message);
+    return false;
+  }
+}
+function _showConnectionError(msg){
+  console.error('🔴 连接错误:', msg);
+  var badge = document.getElementById('syncBadge');
+  if(badge){
+    badge.innerHTML = '<span class="dot" style="background:#dc2626"></span><span style="color:#dc2626" title="'+msg+'">连接失败</span>';
+    badge.title = msg + '（按 F12 查看详情）';
+  }
+  // 显示强制同步按钮
+  var btn = document.getElementById('forceSyncBtn');
+  if(btn) btn.style.display = 'inline-block';
+}
+// v2026.10.13: 直接 fetch 同步（不依赖 Supabase SDK），SDK 加载失败时也能拉数据
+async function forceSyncFromSupabase(){
+  console.log('[forceSync] 开始从 Supabase 直接拉取...');
+  try{
+    // v2026.10.14: 改用 picks_snapshot RPC（权威数据源），不再读取已废弃且数据陈旧的 config.picks
+    let rpcData=null, rpcUpdatedAt=0;
+    try{
+      console.log('[forceSync] 尝试 picks_snapshot RPC...');
+      const r = await fetch(`${SUPABASE_URL}/rest/v1/rpc/picks_snapshot`, {
+        method: 'POST',
+        headers: { apikey: SUPABASE_KEY, Authorization: `Bearer ${SUPABASE_KEY}`, 'Content-Type': 'application/json' },
+        body: '{}'
+      });
+      console.log('[forceSync] RPC HTTP status:', r.status);
+      if(r.ok){
+        const rpcResult = await r.json();
+        console.log('[forceSync] RPC response keys:', Object.keys(rpcResult));
+        const raw = safeExtract(rpcResult);
+        console.log('[forceSync] Extracted data type:', typeof raw, 'keys:', raw ? Object.keys(raw).length : 0);
+        if(raw && typeof raw === 'object' && validatePicksStructure(raw)){
+          rpcData = normalizePicksData(raw);
+          rpcUpdatedAt = Number(rpcResult?.updated_at) || Date.now();
+          console.log('[forceSync] ✅ picks_snapshot RPC 拉取成功，数据点:', Object.keys(rpcData).length, '个日期');
+        } else {
+          console.warn('[forceSync] RPC 数据校验失败，raw=', raw ? 'object with ' + Object.keys(raw).length + ' keys' : raw);
+        }
+      } else {
+        console.warn('[forceSync] picks_snapshot RPC HTTP '+r.status+'，尝试回退到 picks 行表');
+      }
+    }catch(rpcErr){
+      console.warn('[forceSync] picks_snapshot RPC 异常:', rpcErr.message, '，尝试回退到 picks 行表');
+    }
+    // 回退方案：直接从 picks 行表重建数据（同样权威，不经过 config.picks）
+    if(!rpcData){
+      console.log('[forceSync] 回退到 picks 行表...');
+      const r2 = await fetch(`${SUPABASE_URL}/rest/v1/picks?select=date,mid,sid`, {
+        headers: { apikey: SUPABASE_KEY, Authorization: `Bearer ${SUPABASE_KEY}` }
+      });
+      console.log('[forceSync] picks 行表 HTTP status:', r2.status);
+      if(!r2.ok) throw new Error('picks 行表 HTTP '+r2.status);
+      const rows = await r2.json();
+      console.log('[forceSync] picks 行表返回', rows.length, '行');
+      const rebuilt = {};
+      if(Array.isArray(rows)){
+        rows.forEach(row=>{
+          const d = row.date, m = String(row.mid);
+          if(!d || !m) return;
+          if(!rebuilt[d]) rebuilt[d] = {};
+          if(!rebuilt[d][m]) rebuilt[d][m] = [];
+          if(!rebuilt[d][m].includes(row.sid)) rebuilt[d][m].push(row.sid);
+        });
+      }
+      console.log('[forceSync] 重建数据:', Object.keys(rebuilt).length, '个日期');
+      if(validatePicksStructure(rebuilt)){
+        rpcData = normalizePicksData(rebuilt);
+        rpcUpdatedAt = Date.now();
+        console.log('[forceSync] ✅ picks 行表回退拉取成功');
+      } else {
+        throw new Error('picks 行表数据校验失败');
+      }
+    }
+    console.log('[forceSync] 更新本地 picks 状态...');
+    picks = rpcData;
+    sv('cp6', picks);
+    picksLocalVer = rpcUpdatedAt || Date.now();
+    picksLastFullSyncAt = Date.now();
+    _invalidateMonthCache();
+    // 也拉取 team 数据
+    try{
+      console.log('[forceSync] 拉取 team 数据...');
+      const r2 = await fetch(`${SUPABASE_URL}/rest/v1/config?id=eq.team&select=data`, {
+        headers: { apikey: SUPABASE_KEY, Authorization: `Bearer ${SUPABASE_KEY}` }
+      });
+      if(r2.ok){
+        const rows2 = await r2.json();
+        if(rows2[0]?.data){ TEAM = rows2[0].data; sv('ct6', TEAM); console.log('[forceSync] team 拉取成功，', TEAM.length, '人'); }
+      }
+    }catch(e){ console.warn('[forceSync] team 拉取失败:', e.message); }
+    // 标记为已连接（跳过 SDK）
+    fbReady = true;
+    console.log('[forceSync] fbReady 已设为 true');
+    // TEAM 已替换为云端版本（id 可能不同），必须重新映射 selectedMember，
+    // 否则 memberShifts() 会用旧 id 去查新 picks，导致班次显示错误或为空
+    syncSelectedMember();
+    // 如果 selectedMember 为空但本地有绑定，尝试用新 TEAM 重新恢复
+    if(!selectedMember){
+      const _bid=localStorage.getItem('cb6');
+      if(_bid&&localStorage.getItem('cb6auth')==='1'&&!isLocalBindExpired()){
+        const _m=TEAM.find(x=>x.id===+_bid);
+        if(_m){selectedMember=_m;startReminderTimer();}
+      }
+    }
+    console.log('[forceSync] 更新同步状态徽章...');
+    document.getElementById('syncBadge').className='sync-badge on';
+    document.getElementById('syncBadge').innerHTML='<span class="dot"></span>已同步(fetch)';
+    console.log('[forceSync] ✅ 同步成功，开始渲染...');
+    renderAll();
+    showToast('已从服务器同步最新数据');
+    console.log('[forceSync] ✅ 完成');
+    return true;
+  }catch(e){
+    console.error('[forceSync] ❌ 失败:', e.message, e.stack);
+    showToast('同步失败: '+e.message);
+    return false;
+  }
 }
 // 懒加载 Firebase SDK：仅 firestore 模式需要。gstatic 在国内被墙，故不再放阻塞式 <script>。
 // 加载失败（被墙）时 resolve(false)，调用方回退 Supabase，保证应用始终可用。
@@ -1439,7 +1666,34 @@ function loadFirebaseSDK(){
       }
     });
   } else {
-    initSupabaseProvider();
+    // v2026.10.13: 始终先用 fetch 拉最新数据（不依赖 SDK），保证班次数据正确
+    (async function initSupabaseMode(){
+      console.log('[init] 先用 fetch 拉取最新数据...');
+      const syncOk = await forceSyncFromSupabase();
+      if(syncOk){
+        fbReady = true;
+        console.log('[init] ✅ fetch 同步成功，数据已更新');
+        // 然后尝试初始化 SDK（用于实时监听等功能）
+        // 等 SDK 异步加载完成后重试（用独立标记，因为 fbReady 已被 fetch 设为 true）
+        var _sdkInited = false;
+        var sdkCheck = setInterval(function(){
+          if(window.supabase && !_sdkInited){
+            _sdkInited = true;
+            clearInterval(sdkCheck);
+            initSupabaseProvider();
+            if(supa){
+              console.log('[init] ✅ SDK 也加载成功，启用实时功能');
+              initSupabaseTables().then(()=>{initFBListeners();syncServerTime(true);setTimeout(()=>{flushOfflinePunches(true);syncHistoricalPunches()},2000)});
+            }
+          }
+        }, 1000);
+        // 5 秒后停止检查（SDK 可能永远加载不了）
+        setTimeout(()=>clearInterval(sdkCheck), 5000);
+      } else {
+        console.warn('[init] fetch 同步也失败了，显示错误');
+        _showConnectionError('无法连接 Supabase（fetch 也失败）');
+      }
+    })();
   }
 })();
 
@@ -2225,10 +2479,54 @@ function applyPickRpcSuccess(data,mySeq,applyCompact){
   if(typeof applyCompact==='function')applyCompact();
   sv('cp6',picks);picksLocalVer=Date.now();
 }
+// ===== 前端安全防护：检测异常重复选班模式 =====
+// 检测单日写入是否与前后数天完全相同（疑似脚本批量复制）
+// 返回 { suspicious: bool, matchDays: string[], reason: string }
+function detectDuplicatePickPattern(dateStr, mid, sids) {
+  const arr = [...new Set((Array.isArray(sids) ? sids : []).map(Number).filter(Number.isFinite))].sort((a, b) => a - b);
+  if (arr.length < 5) return { suspicious: false, matchDays: [], reason: '' };
+  const sorted = arr.join(',');
+  const matchDays = [];
+  for (let offset = -5; offset <= 5; offset++) {
+    if (offset === 0) continue;
+    const d = new Date(dateStr + 'T00:00:00');
+    d.setDate(d.getDate() + offset);
+    const ds = d.toISOString().slice(0, 10);
+    const existing = ((picks[ds] || {})[String(mid)] || []).slice().sort((a, b) => a - b);
+    if (existing.length >= 5 && existing.join(',') === sorted) matchDays.push(ds);
+  }
+  if (matchDays.length >= 3) {
+    return { suspicious: true, matchDays, reason: `与 ${matchDays.length} 天选班完全相同（${matchDays.join(', ')}），疑似批量复制` };
+  }
+  return { suspicious: false, matchDays: [], reason: '' };
+}
+// 检测批量写入中多天是否有完全相同的选班（savePicks 场景）
+function detectBatchDuplicatePattern(dates, mid, pickDraft) {
+  const groups = {};
+  for (const d of dates) {
+    const draft = pickDraft[d];
+    if (!draft || !Array.isArray(draft)) continue;
+    const key = [...new Set(draft.map(Number).filter(Number.isFinite))].sort((a, b) => a - b).join(',');
+    if (key.split(',').length < 5) continue;
+    if (!groups[key]) groups[key] = [];
+    groups[key].push(d);
+  }
+  for (const [key, ds] of Object.entries(groups)) {
+    if (ds.length >= 5) {
+      return { suspicious: true, days: ds, reason: `${ds.length} 天选班完全相同（${ds.join(', ')}），疑似批量复制` };
+    }
+  }
+  return { suspicious: false, days: [], reason: '' };
+}
+// 管理员已确认重复模式的临时标记，atomicSetPick 检查后自动清除
+let _confirmed=false;
 // 并发选班原子写入：调用服务器端 pick_set 函数（行锁排队，杜绝多人同时选班互相覆盖）。
 // 兼容旧版完整快照和新版紧凑响应；服务端成功后本地应用确定变更，Realtime 与周期快照负责跨端自愈。
 async function atomicSetPick(dateStr,mid,sids){
   const arr=[...new Set((Array.isArray(sids)?sids:[]).map(Number).filter(Number.isFinite))].sort((a,b)=>a-b);
+  // 前端安全防护：检测异常重复模式（与前后5天内≥3天完全相同 → 阻断写入 + 记录安全事件）
+  // 管理员交互式确认场景（saveCellEditor）在调用前已做 confirm 弹窗，此处 _confirmed 跳过二次阻断
+  if(arr.length>=5&&!_confirmed){const dup=detectDuplicatePickPattern(dateStr,mid,arr);if(dup.suspicious){logSecurityEvent('pick_duplicate_blocked',dup.reason+' | date='+dateStr+' mid='+mid);console.error('[安全防护] 已阻断:',dup.reason,'| date='+dateStr,'mid='+mid);showToast('⚠️ 选班异常：与前后多天完全相同，已阻断。如确需请联系管理员确认');return false}}
   if(!fbReady){setMemberPick(dateStr,mid,arr);sv('cp6',picks);picksLocalVer=Date.now();return true}
   const mySeq=picksOptSeq;
   // v2026.09.04: 增加重试次数到 5 次，并加入随机抖动，应对 15 人并发选班的高争用场景
@@ -3063,6 +3361,56 @@ function applyPicksDelta(evs){
   if(changed){sv('cp6',picks);picksLocalVer=Date.now();_invalidateMonthCache();}
   return true;
 }
+// [完整性校验] 后台比对本地 picks 状态 vs picks_snapshot RPC（权威数据源），发现不一致时自动拉取权威快照修复。
+// 由轮询定时器周期性调用（每 30 分钟一次），仅在页面可见且数据库已就绪时执行。
+// v2026.10.14: 不再读取已废弃且数据陈旧的 config.picks，改用 picks_snapshot RPC 作为唯一权威。
+let _lastIntegrityAuditAt=0;
+const INTEGRITY_AUDIT_INTERVAL=30*60*1000; // 30 分钟一次
+async function auditPicksIntegrity(){
+  if(!fbReady||document.hidden)return;
+  if(Date.now()-_lastIntegrityAuditAt<INTEGRITY_AUDIT_INTERVAL)return;
+  _lastIntegrityAuditAt=Date.now();
+  try{
+    // 直接拉取权威快照
+    const snapshot=await fetchAuthoritativePicksSnapshot();
+    if(!snapshot||!snapshot.data)return; // 拉取失败则跳过本轮
+    // 取本周日期范围做抽样比对
+    const ws=weekStartOf(new Date());
+    const dates=[];
+    for(let i=0;i<7;i++){const d=addDays(ws,i);dates.push(ymd(d))}
+    const mismatches=[];
+    for(const date of dates){
+      for(const member of TEAM){
+        const mid=String(member.id);
+        const localSids=((picks[date]||{})[mid]||[]).slice().sort((a,b)=>a-b);
+        const remoteSids=((snapshot.data[date]||{})[mid]||[]).map(Number).sort((a,b)=>a-b);
+        if(JSON.stringify(localSids)!==JSON.stringify(remoteSids)){
+          mismatches.push({date,mid,name:member.name,localSids,remoteSids});
+        }
+      }
+    }
+    if(mismatches.length>0){
+      console.error('[完整性校验] ❌ 发现',mismatches.length,'条本地与权威数据不一致:');
+      mismatches.forEach(m=>console.error(`  ${m.date} ${m.name}(mid=${m.mid}): 本地=${JSON.stringify(m.localSids)} 权威=${JSON.stringify(m.remoteSids)}`));
+      logSecurityEvent('picks_integrity_fail',`发现 ${mismatches.length} 条本地 picks 与权威不一致: ${mismatches.slice(0,3).map(m=>m.date+'/'+m.name).join(', ')}${mismatches.length>3?'...':''}`);
+      // 自动修复：以权威快照为准，更新本地状态
+      const repairOk=applyAuthoritativePicksSnapshot(snapshot);
+      if(repairOk){
+        console.log(`[完整性校验] ✅ 已用权威快照修复本地数据`);
+        logSecurityEvent('picks_integrity_repair',`已用权威快照修复本地数据`);
+        if(isAdminNow()){
+          showToast(`⚠️ 数据完整性校验发现 ${mismatches.length} 条异常，已从服务器同步最新数据`);
+        }
+        renderAll();
+      }else{
+        console.error('[完整性校验] 修复失败：权威快照应用失败');
+        logSecurityEvent('picks_integrity_repair_fail',`权威快照应用失败`);
+      }
+    }
+  }catch(e){
+    console.warn('[完整性校验] 执行异常:',e.message);
+  }
+}
 // [egress 优化] 按 id 选择性拉取单个 config 行并更新本地状态，替代整包 pullPicksSelCfg。
 async function pullConfigRow(id){
   try{
@@ -3236,6 +3584,8 @@ async function initFBListeners(){
         if(document.getElementById('ap-logs')?.classList.contains('active'))renderLogs();
         refreshEmpAfterSync();
         checkForceOut();
+        // [完整性校验] 每 30 分钟后台比对本地 picks vs 权威快照，发现不一致自动从服务器同步最新数据
+        auditPicksIntegrity();
       }catch(e){}
       schedulePoll();
     },delay);
@@ -4166,7 +4516,7 @@ async function changeOwnPwd(){
 }
 
 function switchPage(p){document.querySelectorAll('.page').forEach(x=>x.classList.remove('active'));document.getElementById('pg-'+p).classList.add('active');document.getElementById('empLink').classList.toggle('active',p==='emp');document.getElementById('adminLink').classList.toggle('active',p==='admin');renderAll()}
-async function switchPanel(p,el){document.querySelectorAll('.ma .panel').forEach(x=>x.classList.remove('active'));document.querySelectorAll('.sb-nav a').forEach(a=>a.classList.remove('active'));document.getElementById('ap-'+p).classList.add('active');if(el)el.classList.add('active');if(p==='overview')renderAdmin();if(p==='selection')renderSelection();if(p==='logs')renderLogs();if(p==='makeup'){renderMakeupAdmin();updateMakeupAdminBadge()}if(p==='swap'){await fetchSwapRequests();renderSwapAdmin();updateSwapAdminBadge()}if(p==='leave'){renderLeaveAdmin();updateLeaveAdminBadge()}if(p==='performance')renderPerformanceAdmin();if(p==='backup')renderBackupPanel()}
+async function switchPanel(p,el){document.querySelectorAll('.ma .panel').forEach(x=>x.classList.remove('active'));document.querySelectorAll('.sb-nav a').forEach(a=>a.classList.remove('active'));document.getElementById('ap-'+p).classList.add('active');if(el)el.classList.add('active');if(p==='overview')renderAdmin();if(p==='selection')renderSelection();if(p==='logs')renderLogs();if(p==='makeup'){renderMakeupAdmin();updateMakeupAdminBadge()}if(p==='swap'){await fetchSwapRequests();renderSwapAdmin();updateSwapAdminBadge()}if(p==='leave'){renderLeaveAdmin();updateLeaveAdminBadge()}if(p==='performance')renderPerformanceAdmin();if(p==='backup')renderBackupPanel();if(p==='feedback'){renderFeedbackAdmin();updateFeedbackAdminBadge()}}
 function updateMakeupAdminBadge(){
   const n=pendingMakeupCount();
   const navBadge=document.getElementById('makeupAdminBadge');
@@ -4833,6 +5183,15 @@ async function savePicks(){
     });
     if(wkTotal>MAX_PER_WEEK){
       showToast(`本周共 ${wkTotal} 个时段，超过每周上限 ${MAX_PER_WEEK} 个，请减少后重新保存`);
+      return;
+    }
+  }
+  // 2.5) 安全防护：检测批量写入中多天完全相同的异常模式（疑似脚本批量复制）
+  if(dates.length>=5){
+    const batchDup=detectBatchDuplicatePattern(dates,selectedMember.id,pickDraft);
+    if(batchDup.suspicious){
+      showToast(`⚠️ 安全拦截：${batchDup.reason}，如确需此操作请联系管理员`);
+      console.error('[安全防护] savePicks 被拦截:',batchDup.reason);
       return;
     }
   }
@@ -7165,14 +7524,31 @@ async function bulkClearByDateMember(){
 async function saveCellEditor(){
   if(!adminEditCell)return;
   const sids=[];document.querySelectorAll('#cellEditorBox .shift-chk.on').forEach(el=>sids.push(+el.dataset.sid));
+  // [安全防护] 管理员改选班也检测重复模式：同班次出现在前后5天内≥3天完全相同，弹窗确认防止误操作批量复制
+  if(sids.length>=5){
+    const dup=detectDuplicatePickPattern(adminEditCell.date,adminEditCell.mid,sids);
+    if(dup.suspicious){
+      const member=TEAM.find(x=>x.id===adminEditCell.mid);
+      const name=member?member.name:`mid=${adminEditCell.mid}`;
+      if(!confirm(`⚠️ 安全提醒\n\n「${name}」在 ${dup.matchDays.length} 天 (${dup.matchDays.join(', ')}) 的选班与此完全相同。\n\n如确需批量相同排班请点"确定"，否则点"取消"检查后重试。`)){
+        return;
+      }
+    }
+  }
   // 管理员后台改选班可超额分配：不受员工"每周 56 / 单日"选班次数限制，服务器 pick_set 亦不设数量上限。
-  const okCell=await atomicSetPick(adminEditCell.date,adminEditCell.mid,sids);
-  if(!okCell){showToast('保存失败，已刷新最新数据，请重试');try{await pullPicksSelCfg()}catch(e){}}
-  logEvent('后台改选班',`管理员将 ${memberNameOf(adminEditCell.mid)} 在 ${adminEditCell.date} 的班次改为 ${sids.map(shiftNameOf).join('、')||'空'}`);
-  closeCellEditor();renderSelection();
-  // 主动刷一次员工视图（同一台设备同时登录管理员+员工的场景）
-  refreshEmpAfterSync();
-  showToast('已保存');
+  // 管理员已确认重复模式，设置 _confirmed 标记让 atomicSetPick 跳过二次阻断
+  _confirmed=true;
+  try{
+    const okCell=await atomicSetPick(adminEditCell.date,adminEditCell.mid,sids);
+    if(!okCell){showToast('保存失败，已刷新最新数据，请重试');try{await pullPicksSelCfg()}catch(e){}}
+    logEvent('后台改选班',`管理员将 ${memberNameOf(adminEditCell.mid)} 在 ${adminEditCell.date} 的班次改为 ${sids.map(shiftNameOf).join('、')||'空'}`);
+    closeCellEditor();renderSelection();
+    // 主动刷一次员工视图（同一台设备同时登录管理员+员工的场景）
+    refreshEmpAfterSync();
+    showToast('已保存');
+  }finally{
+    _confirmed=false;
+  }
 }
 
 // ===== BINDING MANAGEMENT =====
@@ -7986,7 +8362,9 @@ async function persistImportedDailyPicks(dateStr,members){
     const {data,error}=await supa.rpc('picks_import_day',{p_date:dateStr,p_members:effective});
     if(_isMissingFn(error)){
       // Supabase 未部署 picks_import_day → 逐人写入；任一失败时反向恢复已写成员，避免半天数据。
+      // 导入属于管理员显式操作，设置 _confirmed 跳过 atomicSetPick 的重复模式阻断
       const applied=[];
+      _confirmed=true;
       try{
         for(const [mid,sids] of Object.entries(effective)){
           const ok=await atomicSetPick(dateStr,mid,[...new Set((sids||[]).map(Number).filter(Number.isFinite))].sort((a,b)=>a-b));
@@ -8000,7 +8378,7 @@ async function persistImportedDailyPicks(dateStr,members){
         }
         if(!rollbackOk)throw new Error('导入失败且自动回滚未完全成功，请立即核查当天排班');
         throw writeError;
-      }
+      }finally{_confirmed=false}
       if(!await pullPicksSelCfg(true))throw new Error('导入后云端校验失败');
       return true;
     }
@@ -8755,7 +9133,860 @@ async function syncHistoricalPunches() {
   }
 }
 
-chkSess();initSupabaseTables().then(()=>{initFBListeners();syncServerTime(true);setTimeout(()=>{flushOfflinePunches(true);syncHistoricalPunches()},2000)});initOfflinePunchSync();renderAll();
+// ====== 问题反馈与自动修复系统 ======
+let _fbPanelOpen=false;
+let _fbDiagnosisCache=null;
+let _fbHistoryData=[];
+let _fbHistoryFilter='all';
+let _fbAutoFixActions=[]; // 记录本次会话的自动修复动作
+
+function openFeedbackPanel(){
+  const panel=document.getElementById('fbPanel');
+  if(!panel)return;
+  panel.style.display='flex';
+  _fbPanelOpen=true;
+  _fbAutoFixActions=[]; // 重置自动修复记录
+  runDiagnosis();
+}
+
+function closeFeedbackPanel(){
+  const panel=document.getElementById('fbPanel');
+  if(!panel)return;
+  panel.style.display='none';
+  _fbPanelOpen=false;
+}
+
+function showMyFeedback(){
+  const body=document.getElementById('fbPanelBody');
+  if(!body)return;
+  const accountId=selectedMember?selectedMember.id:null;
+  const accountName=selectedMember?selectedMember.name:'未登录';
+  
+  // 从 localStorage 读取当前员工的反馈记录
+  let records=[];
+  try{
+    const localArr=JSON.parse(localStorage.getItem('fb_feedback_cache')||'[]');
+    records=localArr.filter(r=>r.account_id===accountId||(!accountId&&r.account==='未登录'));
+  }catch(e){
+    console.warn('[showMyFeedback] 读取本地记录失败:',e.message);
+  }
+  
+  // 按时间倒序排列
+  records.sort((a,b)=>(b.ts||0)-(a.ts||0));
+  
+  let h='<div style="padding:0 0 12px 0;display:flex;align-items:center;gap:8px;border-bottom:1px solid var(--border-light);margin-bottom:16px">';
+  h+='<button onclick="runDiagnosis()" style="background:none;border:1px solid var(--border);border-radius:6px;padding:4px 10px;font-size:12px;cursor:pointer;color:var(--muted);display:flex;align-items:center;gap:4px">← 返回诊断</button>';
+  h+='<div style="flex:1;font-size:14px;font-weight:600;color:var(--fg)">我的反馈记录</div>';
+  h+='<div style="font-size:11px;color:var(--muted)">'+accountName+' · '+records.length+' 条记录</div>';
+  h+='</div>';
+  
+  if(records.length===0){
+    h+='<div style="padding:40px 20px;text-align:center;color:var(--muted);font-size:13px">';
+    h+='<div style="font-size:32px;margin-bottom:12px">📋</div>';
+    h+='<div>暂无反馈记录</div>';
+    h+='<div style="font-size:11px;margin-top:6px">当你提交反馈或系统自动修复时，记录会显示在这里</div>';
+    h+='</div>';
+  }else{
+    h+='<div style="display:flex;flex-direction:column;gap:12px">';
+    records.forEach(r=>{
+      const time=new Date(r.ts);
+      const timeStr=`${time.getFullYear()}-${String(time.getMonth()+1).padStart(2,'0')}-${String(time.getDate()).padStart(2,'0')} ${String(time.getHours()).padStart(2,'0')}:${String(time.getMinutes()).padStart(2,'0')}`;
+      
+      // 判断记录类型和状态
+      let typeIcon='💬';
+      let typeLabel='反馈';
+      let statusColor='var(--muted)';
+      let statusText='已记录';
+      
+      if(r.type==='autofix'){
+        typeIcon='🔧';
+        typeLabel='自动修复';
+        if(r.after_status==='ok'){
+          statusColor='var(--success)';
+          statusText='✓ 已修复';
+        }else{
+          statusColor='var(--danger)';
+          statusText='✕ 修复失败';
+        }
+      }else if(r.type==='feedback'){
+        typeIcon='💬';
+        typeLabel='用户反馈';
+        if(r.has_errors){
+          statusColor='var(--danger)';
+          statusText='含异常';
+        }else if(r.has_warnings){
+          statusColor='var(--warning,#f59e0b)';
+          statusText='含警告';
+        }else{
+          statusColor='var(--success)';
+          statusText='正常';
+        }
+      }
+      
+      h+='<div style="border:1px solid var(--border-light);border-radius:var(--radius);padding:12px;background:var(--surface)">';
+      
+      // 头部：类型 + 时间 + 状态
+      h+='<div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">';
+      h+='<span style="font-size:14px">'+typeIcon+'</span>';
+      h+='<span style="font-size:12px;font-weight:600;color:var(--fg)">'+typeLabel+'</span>';
+      h+='<span style="font-size:11px;color:var(--muted);flex:1">'+timeStr+'</span>';
+      h+='<span style="font-size:11px;color:'+statusColor+';font-weight:600">'+statusText+'</span>';
+      h+='</div>';
+      
+      // 描述内容
+      if(r.description){
+        h+='<div style="font-size:12px;color:var(--fg);padding:8px;background:var(--bg);border-radius:6px;margin-bottom:8px;line-height:1.5">'+esc(r.description)+'</div>';
+      }
+      
+      // 自动修复动作详情
+      if(r.auto_fix_actions){
+        try{
+          const actions=JSON.parse(r.auto_fix_actions);
+          if(actions.length>0){
+            const successCount=actions.filter(a=>a.success).length;
+            const failCount=actions.length-successCount;
+            h+='<div style="padding:8px;background:var(--primary-soft);border-radius:6px;margin-bottom:8px;border:1px solid var(--primary)">';
+            h+='<div style="font-size:11px;font-weight:600;color:var(--primary);margin-bottom:6px">🔧 自动修复 ('+actions.length+' 项)</div>';
+            actions.forEach(action=>{
+              const icon=action.success?'✓':'✕';
+              const color=action.success?'var(--success)':'var(--danger)';
+              const actionTime=new Date(action.ts);
+              const actionTimeStr=`${String(actionTime.getHours()).padStart(2,'0')}:${String(actionTime.getMinutes()).padStart(2,'0')}:${String(actionTime.getSeconds()).padStart(2,'0')}`;
+              h+='<div style="display:flex;align-items:center;gap:6px;padding:4px 0;font-size:11px">';
+              h+='<span style="color:'+color+';font-weight:700">'+icon+'</span>';
+              h+='<span style="flex:1;color:var(--fg)">'+esc(action.label)+'</span>';
+              h+='<span style="color:var(--muted)">'+actionTimeStr+'</span>';
+              h+='</div>';
+              if(action.detail){
+                h+='<div style="font-size:10px;color:var(--muted);padding-left:18px;margin-bottom:4px">'+esc(action.detail)+'</div>';
+              }
+            });
+            h+='<div style="font-size:10px;color:var(--muted);margin-top:6px;padding-top:6px;border-top:1px solid var(--border-light)">';
+            if(successCount>0)h+='<span style="color:var(--success)">✓ '+successCount+' 项成功</span>';
+            if(failCount>0)h+=(successCount>0?' · ':'')+'<span style="color:var(--danger)">✕ '+failCount+' 项失败</span>';
+            h+='</div>';
+            h+='</div>';
+          }
+        }catch(e){}
+      }
+      
+      // 诊断结果摘要
+      if(r.diagnosis){
+        try{
+          const diagnosis=JSON.parse(r.diagnosis);
+          if(Array.isArray(diagnosis)&&diagnosis.length>0){
+            const errorCount=diagnosis.filter(d=>d.status==='error').length;
+            const warnCount=diagnosis.filter(d=>d.status==='warn').length;
+            const okCount=diagnosis.filter(d=>d.status==='ok').length;
+            h+='<div style="font-size:10px;color:var(--muted);padding:6px 0;border-top:1px solid var(--border-light)">';
+            h+='诊断：';
+            if(errorCount>0)h+='<span style="color:var(--danger)">'+errorCount+' 项异常</span> ';
+            if(warnCount>0)h+='<span style="color:var(--warning,#f59e0b)">'+warnCount+' 项警告</span> ';
+            if(okCount>0)h+='<span style="color:var(--success)">'+okCount+' 项正常</span>';
+            h+='</div>';
+          }
+        }catch(e){}
+      }
+      
+      h+='</div>';
+    });
+    h+='</div>';
+  }
+  
+  body.innerHTML=h;
+}
+
+async function runDiagnosis(){
+  const body=document.getElementById('fbPanelBody');
+  if(!body)return;
+  body.innerHTML='<div class="fb-loading"><div class="fb-loading-dot"></div><div class="fb-loading-dot"></div><div class="fb-loading-dot"></div><span>正在诊断…</span></div>';
+  try{
+    const results=await diagnoseAll();
+    _fbDiagnosisCache=results;
+    
+    // 自动修复所有可修复项
+    const fixableItems=results.filter(r=>r.fixable&&r.status!=='ok');
+    if(fixableItems.length>0){
+      body.innerHTML='<div class="fb-loading"><div class="fb-loading-dot"></div><div class="fb-loading-dot"></div><div class="fb-loading-dot"></div><span>发现 '+fixableItems.length+' 项问题，正在自动修复…</span></div>';
+      for(const item of fixableItems){
+        const startTime=Date.now();
+        const result=await autoFix(item);
+        const duration=Date.now()-startTime;
+        // 记录修复动作
+        _fbAutoFixActions.push({
+          ts:startTime,
+          key:item.key,
+          label:item.label,
+          before_status:item.status,
+          after_status:result.success?'ok':'error',
+          detail:result.message,
+          duration:duration,
+          success:result.success
+        });
+        // 更新诊断结果中的状态
+        const cached=_fbDiagnosisCache.find(r=>r.key===item.key);
+        if(cached){
+          cached.status=result.success?'ok':'error';
+          cached.detail=result.message;
+          cached.fixable=false; // 已尝试修复，不再显示修复按钮
+        }
+        // 记录到历史
+        await recordFeedbackEvent({
+          type:'autofix',
+          key:item.key,
+          label:item.label,
+          before_status:item.status,
+          after_status:result.success?'ok':'error',
+          detail:result.message,
+          description:''
+        });
+      }
+    }
+    
+    renderDiagnosisPanel(_fbDiagnosisCache);
+  }catch(e){
+    console.error('[diagnoseAll] error:',e);
+    body.innerHTML='<div style="padding:24px;text-align:center;color:var(--danger);font-size:13px">诊断过程出现异常：'+esc(e.message)+'</div>';
+  }
+}
+
+async function diagnoseAll(){
+  const results=[];
+  // 1. Supabase 连接状态
+  const supaCheck={key:'supa',label:'Supabase 连接',status:'ok',detail:'',fixable:false};
+  if(typeof supa==='undefined'||!supa){
+    supaCheck.status='error';supaCheck.detail='Supabase 客户端未初始化';supaCheck.fixable=false;
+  }else if(!fbReady){
+    supaCheck.status='error';supaCheck.detail='数据同步未完成，部分功能可能不可用';supaCheck.fixable=true;supaCheck.fixLabel='重新同步';
+  }else{
+    supaCheck.detail='已连接，数据已同步';
+  }
+  results.push(supaCheck);
+
+  // 2. 班次数据完整性
+  const picksCheck={key:'picks',label:'班次数据',status:'ok',detail:'',fixable:false};
+  try{
+    if(typeof picks==='undefined'||!picks){
+      picksCheck.status='error';picksCheck.detail='班次数据对象不存在';picksCheck.fixable=true;picksCheck.fixLabel='重新加载';
+    }else{
+      const pickKeys=Object.keys(picks);
+      if(!pickKeys.length){
+        picksCheck.status='warn';picksCheck.detail='班次数据为空，可能未导入班表';picksCheck.fixable=false;
+      }else{
+        let emptyDays=0;
+        pickKeys.forEach(d=>{if(!picks[d]||!Object.keys(picks[d]).length)emptyDays++});
+        if(emptyDays>pickKeys.length*0.5){
+          picksCheck.status='warn';picksCheck.detail=`${emptyDays}/${pickKeys.length} 天无班次数据`;picksCheck.fixable=true;picksCheck.fixLabel='重新同步';
+        }else{
+          picksCheck.detail=`${pickKeys.length} 天数据，${emptyDays} 天为空`;
+        }
+      }
+    }
+  }catch(e){
+    picksCheck.status='error';picksCheck.detail='检查失败：'+e.message;picksCheck.fixable=false;
+  }
+  results.push(picksCheck);
+
+  // 3. 当前员工选班记录
+  const myPicksCheck={key:'mypicks',label:'我的选班记录',status:'ok',detail:'',fixable:false};
+  try{
+    if(!selectedMember){
+      myPicksCheck.status='warn';myPicksCheck.detail='未选择员工账号';myPicksCheck.fixable=false;
+    }else{
+      const mid=selectedMember.id;
+      let count=0;
+      if(typeof picks!=='undefined'&&picks){
+        Object.keys(picks).forEach(d=>{
+          if(picks[d]&&picks[d][mid])count++;
+        });
+      }
+      if(!count){
+        myPicksCheck.status='warn';myPicksCheck.detail='当前无选班记录';myPicksCheck.fixable=false;
+      }else{
+        myPicksCheck.detail=`已选 ${count} 个班次`;
+      }
+    }
+  }catch(e){
+    myPicksCheck.status='error';myPicksCheck.detail='检查失败：'+e.message;myPicksCheck.fixable=false;
+  }
+  results.push(myPicksCheck);
+
+  // 4. 网络连通性
+  const netCheck={key:'network',label:'网络连通性',status:'ok',detail:'',fixable:false};
+  try{
+    const ctrl=new AbortController();
+    const tid=setTimeout(()=>ctrl.abort(),5000);
+    await fetch(SUPABASE_URL+'/rest/v1/',{method:'HEAD',signal:ctrl.signal});
+    clearTimeout(tid);
+    netCheck.detail='Supabase API 可达';
+  }catch(e){
+    netCheck.status='error';netCheck.detail='无法连接 Supabase API';netCheck.fixable=true;netCheck.fixLabel='重试连接';
+  }
+  results.push(netCheck);
+
+  // 5. 本地存储状态
+  const storageCheck={key:'storage',label:'本地存储',status:'ok',detail:'',fixable:false};
+  try{
+    const testKey='__fb_storage_test__';
+    localStorage.setItem(testKey,'1');
+    localStorage.removeItem(testKey);
+    const usedBytes=new Blob(Object.values(localStorage)).size;
+    storageCheck.detail=`已用 ${(usedBytes/1024).toFixed(1)} KB`;
+    if(usedBytes>4*1024*1024){
+      storageCheck.status='warn';storageCheck.detail='存储空间接近上限（>4MB）';storageCheck.fixable=true;storageCheck.fixLabel='清理缓存';
+    }
+  }catch(e){
+    storageCheck.status='error';storageCheck.detail='本地存储不可用';storageCheck.fixable=false;
+  }
+  results.push(storageCheck);
+
+  // 6. 数据同步时间
+  const syncCheck={key:'sync',label:'数据同步时效',status:'ok',detail:'',fixable:false};
+  try{
+    const lastSync=localStorage.getItem('fb_last_sync');
+    if(!lastSync){
+      syncCheck.status='warn';syncCheck.detail='无同步记录';syncCheck.fixable=true;syncCheck.fixLabel='立即同步';
+    }else{
+      const age=Date.now()-parseInt(lastSync,10);
+      const mins=Math.floor(age/60000);
+      if(mins<1)syncCheck.detail='刚刚同步';
+      else if(mins<60)syncCheck.detail=`${mins} 分钟前同步`;
+      else if(mins<1440)syncCheck.detail=`${Math.floor(mins/60)} 小时前同步`;
+      else syncCheck.detail=`${Math.floor(mins/1440)} 天前同步`;
+      if(age>3600000){
+        syncCheck.status='warn';syncCheck.detail+='，建议刷新';syncCheck.fixable=true;syncCheck.fixLabel='立即同步';
+      }
+    }
+  }catch(e){
+    syncCheck.status='error';syncCheck.detail='检查失败';syncCheck.fixable=false;
+  }
+  results.push(syncCheck);
+
+  return results;
+}
+
+async function autoFix(item){
+  const key=item.key;
+  try{
+    if(key==='supa'){
+      // 重新同步
+      if(typeof forceSyncFromSupabase==='function'){
+        await forceSyncFromSupabase();
+        return{success:true,message:'已重新同步数据'};
+      }
+      return{success:false,message:'同步函数不可用'};
+    }else if(key==='picks'){
+      // 重新加载班次数据
+      if(typeof forceSyncFromSupabase==='function'){
+        await forceSyncFromSupabase();
+        return{success:true,message:'已重新加载班次数据'};
+      }
+      return{success:false,message:'同步函数不可用'};
+    }else if(key==='network'){
+      // 测试连接
+      try{
+        const ctrl=new AbortController();
+        const tid=setTimeout(()=>ctrl.abort(),5000);
+        await fetch(SUPABASE_URL+'/rest/v1/',{method:'HEAD',signal:ctrl.signal});
+        clearTimeout(tid);
+        return{success:true,message:'网络连接已恢复'};
+      }catch(e){
+        return{success:false,message:'网络仍不可用，请检查网络连接'};
+      }
+    }else if(key==='storage'){
+      // 清理缓存
+      const keysToKeep=['fb_admin','fb_member','fb_team_pw'];
+      const allKeys=Object.keys(localStorage);
+      let cleaned=0;
+      allKeys.forEach(k=>{
+        if(!keysToKeep.includes(k)&&k.startsWith('fb_')){
+          localStorage.removeItem(k);cleaned++;
+        }
+      });
+      return{success:true,message:`已清理 ${cleaned} 项缓存数据`};
+    }else if(key==='sync'){
+      // 立即同步
+      if(typeof forceSyncFromSupabase==='function'){
+        await forceSyncFromSupabase();
+        return{success:true,message:'同步完成'};
+      }
+      return{success:false,message:'同步函数不可用'};
+    }
+    return{success:false,message:'未知的修复项'};
+  }catch(e){
+    return{success:false,message:'修复失败：'+e.message};
+  }
+}
+
+function renderDiagnosisPanel(results){
+  const body=document.getElementById('fbPanelBody');
+  if(!body)return;
+  const errorCount=results.filter(r=>r.status==='error').length;
+  const warnCount=results.filter(r=>r.status==='warn').length;
+  const okCount=results.filter(r=>r.status==='ok').length;
+
+  let summaryClass='ok';
+  let summaryText='所有检查项均正常';
+  if(errorCount>0){
+    summaryClass='error';summaryText=`发现 ${errorCount} 项异常，${warnCount>0?warnCount+' 项警告，':''}${okCount} 项正常`;
+  }else if(warnCount>0){
+    summaryClass='warn';summaryText=`发现 ${warnCount} 项警告，${okCount} 项正常`;
+  }
+
+  let h='<div class="fb-summary '+summaryClass+'"><div class="fb-summary-title">诊断结果</div>'+summaryText+'</div>';
+  
+  // 显示自动修复动作报告
+  if(_fbAutoFixActions.length>0){
+    const successCount=_fbAutoFixActions.filter(a=>a.success).length;
+    const failCount=_fbAutoFixActions.length-successCount;
+    h+='<div class="fb-fix-report">';
+    h+='<div class="fb-fix-report-title">🔧 已执行的自动修复</div>';
+    h+='<div style="font-size:11px;color:var(--muted);margin-bottom:8px">';
+    if(successCount>0)h+='<span style="color:var(--success)">✓ '+successCount+' 项成功</span>';
+    if(failCount>0)h+=(successCount>0?' · ':'')+'<span style="color:var(--danger)">✕ '+failCount+' 项失败</span>';
+    h+='</div>';
+    _fbAutoFixActions.forEach((action,idx)=>{
+      const icon=action.success?'✓':'✕';
+      const color=action.success?'var(--success)':'var(--danger)';
+      const time=new Date(action.ts);
+      const timeStr=`${String(time.getHours()).padStart(2,'0')}:${String(time.getMinutes()).padStart(2,'0')}:${String(time.getSeconds()).padStart(2,'0')}`;
+      h+='<div class="fb-fix-action-item">';
+      h+='<div style="display:flex;align-items:center;gap:6px">';
+      h+='<span style="color:'+color+';font-weight:700">'+icon+'</span>';
+      h+='<span style="flex:1;font-size:12px">'+esc(action.label)+'</span>';
+      h+='<span style="font-size:10px;color:var(--muted)">'+timeStr+'</span>';
+      h+='</div>';
+      h+='<div style="font-size:11px;color:var(--muted);margin-top:2px;padding-left:18px">'+esc(action.detail)+'</div>';
+      h+='</div>';
+    });
+    h+='</div>';
+  }
+
+  h+='<div class="fb-status-list">';
+  results.forEach(r=>{
+    const iconMap={ok:'✓',warn:'!',error:'✕',fixing:'…'};
+    const statusHtml=r.status==='ok'
+      ?'<span style="font-size:11px;color:var(--success)">正常</span>'
+      :(r.status==='error'?'<span style="font-size:11px;color:var(--danger)">异常</span>':'<span style="font-size:11px;color:var(--warning,#f59e0b)">警告</span>');
+    h+='<div class="fb-status-item '+r.status+'">'
+      +'<div class="fb-status-icon">'+iconMap[r.status]+'</div>'
+      +'<div style="flex:1"><div class="fb-status-label">'+esc(r.label)+'</div>'
+      +(r.detail?'<div class="fb-status-detail">'+esc(r.detail)+'</div>':'')
+      +'</div>'
+      +statusHtml
+      +'</div>';
+  });
+  h+='</div>';
+
+  // 反馈描述区域
+  h+='<div style="margin-top:16px;padding-top:16px;border-top:1px solid var(--border-light)">';
+  h+='<div style="font-size:12px;font-weight:600;margin-bottom:8px;color:var(--fg)">补充描述（可选）</div>';
+  h+='<textarea class="fb-desc-area" id="fbDescInput" placeholder="如果自动诊断未能解决你的问题，请在这里描述你遇到的问题…"></textarea>';
+  h+='<div class="fb-submit-row">';
+  h+='<button class="fb-cancel-btn" onclick="closeFeedbackPanel()">关闭</button>';
+  h+='<button class="fb-submit-btn" onclick="handleFeedbackSubmit()">提交反馈</button>';
+  h+='</div></div>';
+
+  body.innerHTML=h;
+}
+
+async function handleAutoFix(key){
+  const item=_fbDiagnosisCache?_fbDiagnosisCache.find(r=>r.key===key):null;
+  if(!item)return;
+  // 更新 UI 状态为 fixing
+  const items=document.querySelectorAll('.fb-status-item');
+  items.forEach(el=>{
+    if(el.querySelector('.fb-status-label')&&el.querySelector('.fb-status-label').textContent===item.label){
+      el.classList.remove('error','warn','ok');
+      el.classList.add('fixing');
+      const icon=el.querySelector('.fb-status-icon');
+      if(icon)icon.textContent='…';
+      const btn=el.querySelector('.fb-fix-btn');
+      if(btn){btn.disabled=true;btn.textContent='修复中…'}
+    }
+  });
+  const startTime=Date.now();
+  const result=await autoFix(item);
+  const duration=Date.now()-startTime;
+  // 记录修复动作
+  _fbAutoFixActions.push({
+    ts:startTime,
+    key:key,
+    label:item.label,
+    before_status:item.status,
+    after_status:result.success?'ok':'error',
+    detail:result.message,
+    duration:duration,
+    success:result.success
+  });
+  // 记录到历史
+  await recordFeedbackEvent({
+    type:'autofix',
+    key:key,
+    label:item.label,
+    before_status:item.status,
+    after_status:result.success?'ok':'error',
+    detail:result.message,
+    description:''
+  });
+  showToast(result.success?'修复成功：'+result.message:'修复失败：'+result.message);
+  // 重新诊断
+  setTimeout(()=>runDiagnosis(),500);
+}
+
+async function handleFeedbackSubmit(){
+  const descEl=document.getElementById('fbDescInput');
+  const desc=descEl?descEl.value.trim():'';
+  if(!desc&&!_fbDiagnosisCache){
+    showToast('请先等待诊断完成或填写问题描述');return;
+  }
+  const diagnosis=_fbDiagnosisCache?_fbDiagnosisCache.map(r=>({key:r.key,label:r.label,status:r.status,detail:r.detail})):[];
+  const submitTs=Date.now();
+  await recordFeedbackEvent({
+    type:'feedback',
+    description:desc,
+    diagnosis:diagnosis,
+    auto_fix_actions:_fbAutoFixActions.length?_fbAutoFixActions:null,
+    has_errors:diagnosis.some(d=>d.status==='error'),
+    has_warnings:diagnosis.some(d=>d.status==='warn')
+  });
+  // 不关闭面板，展示提交结果页面
+  renderFeedbackResult({
+    ts:submitTs,
+    description:desc,
+    diagnosis:diagnosis,
+    autoFixActions:[..._fbAutoFixActions],
+    hasErrors:diagnosis.some(d=>d.status==='error'),
+    hasWarnings:diagnosis.some(d=>d.status==='warn')
+  });
+}
+
+function renderFeedbackResult(data){
+  const body=document.getElementById('fbPanelBody');
+  if(!body)return;
+  const time=new Date(data.ts);
+  const timeStr=`${time.getFullYear()}-${String(time.getMonth()+1).padStart(2,'0')}-${String(time.getDate()).padStart(2,'0')} ${String(time.getHours()).padStart(2,'0')}:${String(time.getMinutes()).padStart(2,'0')}:${String(time.getSeconds()).padStart(2,'0')}`;
+  
+  // 判断整体状态
+  let resultIcon='✅';
+  let resultTitle='反馈已提交';
+  let resultDesc='系统已收到你的反馈，以下是本次诊断和修复的完整记录。';
+  if(data.hasErrors){
+    resultIcon='⚠️';
+    resultTitle='反馈已提交（存在异常项）';
+    resultDesc='系统已记录你的反馈。以下异常项已尝试自动修复，未修复的项已上报管理员。';
+  }else if(data.hasWarnings){
+    resultIcon='📋';
+    resultTitle='反馈已提交（存在警告项）';
+    resultDesc='系统已记录你的反馈。以下是本次诊断和自动修复的完整记录。';
+  }
+  
+  let h='<div style="padding:0 0 16px 0">';
+  
+  // 顶部结果卡片
+  h+='<div style="text-align:center;padding:20px 16px;border-radius:var(--radius);background:var(--primary-soft);border:1px solid var(--primary);margin-bottom:16px">';
+  h+='<div style="font-size:36px;margin-bottom:8px">'+resultIcon+'</div>';
+  h+='<div style="font-size:15px;font-weight:700;color:var(--fg);margin-bottom:4px">'+resultTitle+'</div>';
+  h+='<div style="font-size:12px;color:var(--muted);line-height:1.5">'+resultDesc+'</div>';
+  h+='<div style="font-size:11px;color:var(--muted);margin-top:8px">提交时间：'+timeStr+'</div>';
+  h+='</div>';
+  
+  // 自动修复摘要
+  if(data.autoFixActions&&data.autoFixActions.length>0){
+    const successCount=data.autoFixActions.filter(a=>a.success).length;
+    const failCount=data.autoFixActions.length-successCount;
+    h+='<div style="margin-bottom:16px">';
+    h+='<div style="font-size:13px;font-weight:600;color:var(--fg);margin-bottom:8px;display:flex;align-items:center;gap:6px">';
+    h+='<span></span><span>自动修复结果</span>';
+    h+='<span style="font-size:11px;font-weight:400;color:var(--muted)">（'+data.autoFixActions.length+' 项）</span>';
+    h+='</div>';
+    h+='<div style="display:flex;gap:8px;margin-bottom:10px">';
+    if(successCount>0){
+      h+='<div style="flex:1;padding:8px 10px;border-radius:6px;background:color-mix(in srgb,var(--success) 8%,var(--surface));border:1px solid color-mix(in srgb,var(--success) 30%,transparent);font-size:12px;color:var(--success);font-weight:600;text-align:center">✓ '+successCount+' 项已修复</div>';
+    }
+    if(failCount>0){
+      h+='<div style="flex:1;padding:8px 10px;border-radius:6px;background:color-mix(in srgb,var(--danger) 8%,var(--surface));border:1px solid color-mix(in srgb,var(--danger) 30%,transparent);font-size:12px;color:var(--danger);font-weight:600;text-align:center">✕ '+failCount+' 项未修复</div>';
+    }
+    h+='</div>';
+    data.autoFixActions.forEach(action=>{
+      const icon=action.success?'✓':'✕';
+      const color=action.success?'var(--success)':'var(--danger)';
+      const bgColor=action.success?'color-mix(in srgb,var(--success) 6%,var(--surface))':'color-mix(in srgb,var(--danger) 6%,var(--surface))';
+      const borderColor=action.success?'color-mix(in srgb,var(--success) 25%,transparent)':'color-mix(in srgb,var(--danger) 25%,transparent)';
+      h+='<div style="padding:8px 10px;border-radius:6px;background:'+bgColor+';border:1px solid '+borderColor+';margin-bottom:6px">';
+      h+='<div style="display:flex;align-items:center;gap:6px">';
+      h+='<span style="color:'+color+';font-weight:700;font-size:13px">'+icon+'</span>';
+      h+='<span style="flex:1;font-size:12px;color:var(--fg);font-weight:500">'+esc(action.label)+'</span>';
+      h+='<span style="font-size:11px;color:'+color+';font-weight:600">'+(action.success?'已修复':'未修复')+'</span>';
+      h+='</div>';
+      if(action.detail){
+        h+='<div style="font-size:11px;color:var(--muted);margin-top:4px;padding-left:20px">'+esc(action.detail)+'</div>';
+      }
+      h+='</div>';
+    });
+    h+='</div>';
+  }else{
+    h+='<div style="margin-bottom:16px;padding:12px;border-radius:6px;background:var(--surface);border:1px solid var(--border-light);text-align:center">';
+    h+='<div style="font-size:12px;color:var(--muted)">本次诊断未发现需要自动修复的问题</div>';
+    h+='</div>';
+  }
+  
+  // 诊断状态摘要
+  if(data.diagnosis&&data.diagnosis.length>0){
+    const errorCount=data.diagnosis.filter(d=>d.status==='error').length;
+    const warnCount=data.diagnosis.filter(d=>d.status==='warn').length;
+    const okCount=data.diagnosis.filter(d=>d.status==='ok').length;
+    h+='<div style="margin-bottom:16px">';
+    h+='<div style="font-size:13px;font-weight:600;color:var(--fg);margin-bottom:8px;display:flex;align-items:center;gap:6px">';
+    h+='<span>📊</span><span>诊断状态</span>';
+    h+='</div>';
+    h+='<div style="display:flex;gap:8px;margin-bottom:10px">';
+    if(errorCount>0)h+='<div style="flex:1;padding:8px;border-radius:6px;background:color-mix(in srgb,var(--danger) 8%,var(--surface));border:1px solid color-mix(in srgb,var(--danger) 30%,transparent);font-size:12px;color:var(--danger);font-weight:600;text-align:center">'+errorCount+' 项异常</div>';
+    if(warnCount>0)h+='<div style="flex:1;padding:8px;border-radius:6px;background:color-mix(in srgb,var(--warning,#f59e0b) 8%,var(--surface));border:1px solid color-mix(in srgb,var(--warning,#f59e0b) 30%,transparent);font-size:12px;color:var(--warning,#f59e0b);font-weight:600;text-align:center">'+warnCount+' 项警告</div>';
+    if(okCount>0)h+='<div style="flex:1;padding:8px;border-radius:6px;background:color-mix(in srgb,var(--success) 8%,var(--surface));border:1px solid color-mix(in srgb,var(--success) 30%,transparent);font-size:12px;color:var(--success);font-weight:600;text-align:center">'+okCount+' 项正常</div>';
+    h+='</div>';
+    data.diagnosis.forEach(d=>{
+      const iconMap={ok:'✓',warn:'!',error:'✕'};
+      const colorMap={ok:'var(--success)',warn:'var(--warning,#f59e0b)',error:'var(--danger)'};
+      const labelMap={ok:'正常',warn:'警告',error:'异常'};
+      h+='<div style="display:flex;align-items:center;gap:8px;padding:6px 0;border-bottom:1px solid var(--border-light)">';
+      h+='<span style="color:'+colorMap[d.status]+';font-weight:700;font-size:13px">'+iconMap[d.status]+'</span>';
+      h+='<span style="flex:1;font-size:12px;color:var(--fg)">'+esc(d.label)+'</span>';
+      h+='<span style="font-size:11px;color:'+colorMap[d.status]+'">'+labelMap[d.status]+'</span>';
+      h+='</div>';
+      if(d.detail){
+        h+='<div style="font-size:11px;color:var(--muted);padding-left:22px;margin-bottom:4px">'+esc(d.detail)+'</div>';
+      }
+    });
+    h+='</div>';
+  }
+  
+  // 用户描述
+  if(data.description){
+    h+='<div style="margin-bottom:16px">';
+    h+='<div style="font-size:13px;font-weight:600;color:var(--fg);margin-bottom:8px;display:flex;align-items:center;gap:6px">';
+    h+='<span>💬</span><span>你的描述</span>';
+    h+='</div>';
+    h+='<div style="padding:10px 12px;border-radius:6px;background:var(--bg);border:1px solid var(--border-light);font-size:12px;color:var(--fg);line-height:1.6">'+esc(data.description)+'</div>';
+    h+='</div>';
+  }
+  
+  // 底部操作
+  h+='<div style="padding-top:12px;border-top:1px solid var(--border-light);display:flex;flex-direction:column;gap:8px">';
+  h+='<div style="font-size:11px;color:var(--muted);text-align:center">管理员可在后台查看此反馈记录</div>';
+  h+='<div style="display:flex;gap:8px">';
+  h+='<button onclick="showMyFeedback()" style="flex:1;padding:10px;border:1px solid var(--border);border-radius:8px;background:var(--surface);color:var(--fg);font-size:13px;cursor:pointer;font-weight:500"> 查看我的反馈历史</button>';
+  h+='<button onclick="closeFeedbackPanel()" style="flex:1;padding:10px;border:none;border-radius:8px;background:var(--primary);color:#fff;font-size:13px;cursor:pointer;font-weight:600">关闭</button>';
+  h+='</div>';
+  h+='</div>';
+  
+  h+='</div>';
+  body.innerHTML=h;
+}
+
+async function recordFeedbackEvent(data){
+  const record={
+    ts:Date.now(),
+    account:selectedMember?selectedMember.name:'未登录',
+    account_id:selectedMember?selectedMember.id:null,
+    type:data.type||'feedback',
+    key:data.key||null,
+    label:data.label||null,
+    before_status:data.before_status||null,
+    after_status:data.after_status||null,
+    detail:data.detail||null,
+    description:data.description||'',
+    diagnosis:data.diagnosis?JSON.stringify(data.diagnosis):null,
+    auto_fix_actions:data.auto_fix_actions?JSON.stringify(data.auto_fix_actions):null,
+    has_errors:data.has_errors||false,
+    has_warnings:data.has_warnings||false,
+    ua:navigator.userAgent,
+    url:location.href
+  };
+  // 始终先存 localStorage 作为可靠备份
+  const localArr=JSON.parse(localStorage.getItem('fb_feedback_cache')||'[]');
+  localArr.push(record);
+  localStorage.setItem('fb_feedback_cache',JSON.stringify(localArr));
+  // 尝试写入 Supabase（异步，不阻塞）
+  if(fbReady&&typeof supa!=='undefined'&&supa){
+    // 尝试 feedback 表
+    supa.from('feedback').insert(record).then(()=>{
+      console.log('[feedback] 已写入 feedback 表');
+    }).catch(e=>{
+      console.warn('[feedback] feedback 表写入失败:',e.message);
+      // 尝试 config 表
+      supa.from('config').select('data').eq('id','feedback_cache').single().then(({data:existing})=>{
+        const arr=existing&&existing.data?existing.data:[];
+        arr.push(record);
+        return supa.from('config').upsert({id:'feedback_cache',data:arr,updated_at:Date.now()},{onConflict:'id'});
+      }).then(()=>{
+        console.log('[feedback] 已写入 config 表');
+      }).catch(e2=>{
+        console.warn('[feedback] config 表写入也失败:',e2.message);
+      });
+    });
+  }
+  logEvent('问题反馈',data.type==='autofix'?`自动修复 ${data.label}: ${data.detail}`:`用户反馈: ${(data.description||'').slice(0,50)}`);
+}
+
+async function renderFeedbackAdmin(){
+  const listEl=document.getElementById('feedbackAdminList');
+  if(!listEl)return;
+  listEl.innerHTML='<div class="fb-loading"><div class="fb-loading-dot"></div><div class="fb-loading-dot"></div><div class="fb-loading-dot"></div><span>加载中…</span></div>';
+  let records=[];
+  // 从 Supabase feedback 表读取
+  if(fbReady&&typeof supa!=='undefined'&&supa){
+    try{
+      const {data}=await supa.from('feedback').select('*').order('ts',{ascending:false}).limit(500);
+      if(Array.isArray(data))records=data;
+    }catch(e){
+      console.warn('[feedback] 读取feedback表失败，尝试config fallback:',e.message);
+      // fallback: 从 config 表读
+      try{
+        const {data:cfg}=await supa.from('config').select('data').eq('id','feedback_cache').single();
+        if(cfg&&Array.isArray(cfg.data))records=cfg.data.slice().reverse();
+      }catch(e2){
+        console.warn('[feedback] config fallback也失败:',e2.message);
+      }
+    }
+  }
+  // 补充 localStorage 中的记录
+  const localArr=JSON.parse(localStorage.getItem('fb_feedback_cache')||'[]');
+  if(localArr.length){
+    const tsSet=new Set(records.map(r=>r.ts));
+    localArr.forEach(r=>{if(!tsSet.has(r.ts))records.push(r)});
+    records.sort((a,b)=>(b.ts||0)-(a.ts||0));
+  }
+  _fbHistoryData=records;
+  renderFeedbackHistoryList();
+}
+
+function renderFeedbackHistoryList(){
+  const listEl=document.getElementById('feedbackAdminList');
+  if(!listEl)return;
+  let records=_fbHistoryData;
+  // 应用筛选
+  if(_fbHistoryFilter==='error')records=records.filter(r=>r.before_status==='error'||r.after_status==='error'||r.has_errors);
+  else if(_fbHistoryFilter==='warn')records=records.filter(r=>r.before_status==='warn'||r.has_warnings);
+  else if(_fbHistoryFilter==='ok')records=records.filter(r=>r.after_status==='ok'&&!r.has_errors);
+  else if(_fbHistoryFilter==='feedback')records=records.filter(r=>r.type==='feedback'&&r.description);
+
+  if(!records.length){
+    listEl.innerHTML='<div style="padding:24px;text-align:center;color:var(--muted);font-size:13px">暂无反馈记录</div>';
+    return;
+  }
+  document.getElementById('feedbackAdminList').innerHTML='<div style="font-size:12px;color:var(--muted);margin-bottom:8px">共 '+records.length+' 条记录</div>'+buildFeedbackTable(records);
+}
+
+function buildFeedbackTable(records){
+  let h='<table class="cnt-tbl"><thead><tr><th style="min-width:120px">时间</th><th>账号</th><th>类型</th><th>状态</th><th style="text-align:left">详情</th></tr></thead><tbody>';
+  records.forEach((r,i)=>{
+    const d=new Date(+r.ts||0);
+    const t=`${d.getMonth()+1}/${d.getDate()} ${String(d.getHours()).padStart(2,'0')}:${String(d.getMinutes()).padStart(2,'0')}:${String(d.getSeconds()).padStart(2,'0')}`;
+    const typeLabel=r.type==='autofix'?'自动修复':'用户反馈';
+    const statusIcon=r.has_errors?'<span style="color:var(--danger)">✕</span>':(r.has_warnings?'<span style="color:var(--warning,#f59e0b)">!</span>':'<span style="color:var(--success)">✓</span>');
+    const brief=r.type==='autofix'?(r.label+': '+(r.detail||'')):(r.description||'(无描述)').slice(0,60);
+    h+='<tr class="fb-history-row" onclick="toggleFeedbackDetail('+i+')">';
+    h+='<td class="wk" style="white-space:nowrap">'+t+'</td>';
+    h+='<td>'+esc(r.account||'—')+'</td>';
+    h+='<td>'+typeLabel+'</td>';
+    h+='<td style="text-align:center">'+statusIcon+'</td>';
+    h+='<td style="text-align:left;font-size:11px;color:var(--muted)">'+esc(brief)+'</td>';
+    h+='</tr>';
+    h+='<tr id="fbDetail'+i+'" class="log-detail-row" style="display:none"><td colspan="5"><div class="fb-history-detail">';
+    if(r.type==='autofix'){
+      h+='<div><b>修复项：</b>'+esc(r.label||r.key||'—')+'</div>';
+      h+='<div><b>修复前：</b>'+(r.before_status||'—')+' → <b>修复后：</b>'+(r.after_status||'—')+'</div>';
+      h+='<div><b>结果：</b>'+esc(r.detail||'—')+'</div>';
+    }else{
+      h+='<div><b>问题描述：</b>'+esc(r.description||'(无)')+'</div>';
+      
+      // 显示自动修复动作
+      if(r.auto_fix_actions){
+        try{
+          const actions=JSON.parse(r.auto_fix_actions);
+          if(actions.length>0){
+            const successCount=actions.filter(a=>a.success).length;
+            const failCount=actions.length-successCount;
+            h+='<div style="margin-top:12px;padding-top:12px;border-top:1px solid var(--border-light)">';
+            h+='<div style="font-weight:600;margin-bottom:8px;color:var(--primary)">🔧 自动修复动作 ('+actions.length+' 项)</div>';
+            h+='<div style="font-size:11px;color:var(--muted);margin-bottom:8px">';
+            if(successCount>0)h+='<span style="color:var(--success)">✓ '+successCount+' 项成功</span>';
+            if(failCount>0)h+=(successCount>0?' · ':'')+'<span style="color:var(--danger)">✕ '+failCount+' 项失败</span>';
+            h+='</div>';
+            actions.forEach(action=>{
+              const icon=action.success?'✓':'✕';
+              const color=action.success?'var(--success)':'var(--danger)';
+              const time=new Date(action.ts);
+              const timeStr=`${String(time.getHours()).padStart(2,'0')}:${String(time.getMinutes()).padStart(2,'0')}:${String(time.getSeconds()).padStart(2,'0')}`;
+              h+='<div style="padding:6px 0;border-bottom:1px solid var(--border-light)">';
+              h+='<div style="display:flex;align-items:center;gap:6px">';
+              h+='<span style="color:'+color+';font-weight:700">'+icon+'</span>';
+              h+='<span style="flex:1;font-size:12px">'+esc(action.label)+'</span>';
+              h+='<span style="font-size:10px;color:var(--muted)">'+timeStr+'</span>';
+              h+='</div>';
+              h+='<div style="font-size:11px;color:var(--muted);margin-top:2px;padding-left:18px">'+esc(action.detail)+'</div>';
+              h+='</div>';
+            });
+            h+='</div>';
+          }
+        }catch(e){
+          // 解析失败，忽略
+        }
+      }
+      
+      if(r.diagnosis){
+        try{
+          const diag=JSON.parse(r.diagnosis);
+          h+='<div style="margin-top:8px"><b>诊断结果：</b></div>';
+          h+='<pre>'+esc(JSON.stringify(diag,null,2))+'</pre>';
+        }catch(e){
+          h+='<div><b>诊断数据：</b>'+esc(r.diagnosis)+'</div>';
+        }
+      }
+    }
+    h+='<div style="margin-top:6px;font-size:10px;color:var(--muted-light)"><b>UA：</b>'+esc(r.ua||'—')+'</div>';
+    h+='</div></td></tr>';
+  });
+  h+='</tbody></table>';
+  return h;
+}
+
+function toggleFeedbackDetail(i){
+  const el=document.getElementById('fbDetail'+i);
+  if(!el)return;
+  el.style.display=el.style.display==='none'?'':'none';
+}
+
+function filterFeedbackHistory(filter,btn){
+  _fbHistoryFilter=filter;
+  document.querySelectorAll('.fb-history-filter').forEach(b=>b.classList.remove('active'));
+  if(btn)btn.classList.add('active');
+  renderFeedbackHistoryList();
+}
+
+function updateFeedbackAdminBadge(){
+  if(!fbReady)return;
+  // 检查最近24小时内的异常反馈数量
+  const cutoff=Date.now()-86400000;
+  let recentErrors=0;
+  if(_fbHistoryData.length){
+    _fbHistoryData.forEach(r=>{
+      if(r.ts>=cutoff&&(r.has_errors||r.has_warnings))recentErrors++;
+    });
+  }
+  const badge=document.getElementById('feedbackAdminBadge');
+  if(badge){
+    if(recentErrors>0){
+      badge.textContent=recentErrors;
+      badge.style.display='inline-block';
+    }else{
+      badge.style.display='none';
+    }
+  }
+}
+
+chkSess();initOfflinePunchSync();renderAll();
 // Supabase write diagnostic test (silent)
 (async function testWrite(){
   if(!fbReady)return;
@@ -8764,7 +9995,6 @@ chkSess();initSupabaseTables().then(()=>{initFBListeners();syncServerTime(true);
     await Promise.race([supa.from('config').delete().eq('id','_diag'),new Promise((_,r)=>setTimeout(()=>r(new Error('超时')),3000))]);
   }catch(e){console.warn('Supabase写入不可用:',e.message)}
 })();
-if(!fbReady)document.getElementById('syncBadge').innerHTML='<span class="dot"></span>单机版';
 </script>
 </body>
 </html>
