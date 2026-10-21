@@ -3071,20 +3071,25 @@ function _setLocDenied(){
 }
 // 预取：员工打卡页渲染时调用；缓存新鲜/正在获取/已知拒绝则直接返回（幂等、低成本）
 async function ensureLocPrefetch(){
-  // 先问 Permissions API（不触发弹窗）：确认当前真实权限状态
-  // 即使用户之前在 app 内拒绝过，也可能已在浏览器设置中重新授权
-  try{
-    if(navigator.permissions&&navigator.permissions.query){
-      const st=await navigator.permissions.query({name:'geolocation'});
-      if(st.state==='granted'){
-        // 用户已授权（可能之前在浏览器设置中重新开启了），清除拒绝状态
-        _locDenied=false;_locDeniedAt=0;localStorage.removeItem('_locDeniedAt');
-      }else if(st.state==='denied'){
-        _setLocDenied();return;
+  // iframe 环境（Chrome 扩展弹窗）：跨域 iframe 中 Permissions API 可能误报 denied，
+  // 跳过权限检查直接尝试获取定位；失败时也不显示红色警告（浏览器限制而非用户拒绝）
+  const isIframe=window.self!==window.top;
+  if(!isIframe){
+    // 先问 Permissions API（不触发弹窗）：确认当前真实权限状态
+    // 即使用户之前在 app 内拒绝过，也可能已在浏览器设置中重新授权
+    try{
+      if(navigator.permissions&&navigator.permissions.query){
+        const st=await navigator.permissions.query({name:'geolocation'});
+        if(st.state==='granted'){
+          // 用户已授权（可能之前在浏览器设置中重新开启了），清除拒绝状态
+          _locDenied=false;_locDeniedAt=0;localStorage.removeItem('_locDeniedAt');
+        }else if(st.state==='denied'){
+          _setLocDenied();return;
+        }
+        // state==='prompt' 时继续尝试获取
       }
-      // state==='prompt' 时继续尝试获取
-    }
-  }catch(e){}
+    }catch(e){}
+  }
   // 拒绝后每天重试一次：如果距上次拒绝已超过 24 小时，清除拒绝状态，允许再次请求
   if(_locDenied&&_locDeniedAt>0){
     if(Date.now()-_locDeniedAt<LOC_RETRY_MS)return;
@@ -3094,19 +3099,24 @@ async function ensureLocPrefetch(){
   }
   if((_locCache&&Date.now()-_locCache.ts<LOC_FRESH_MS)||_locPrefetching)return;
   _locPrefetching=true;
-  try{const r=await _locReadPosition();if(r.loc)_locCache=r.loc;else if(r.err===1)_setLocDenied()}finally{_locPrefetching=false}
+  try{const r=await _locReadPosition();if(r.loc)_locCache=r.loc;else if(r.err===1&&!isIframe)_setLocDenied()}finally{_locPrefetching=false}
 }
 // 打卡附加定位：打卡场景不直接用缓存，强制重新获取（提高反作弊可信度），
 // 并与 2.5s 超时赛跑；返回 {loc,denied,tampered,suspicious}，永不抛错
 async function getPunchLoc(){
-  // 先查 Permissions API：用户可能已在浏览器设置中重新授权
-  try{
-    if(navigator.permissions&&navigator.permissions.query){
-      const st=await navigator.permissions.query({name:'geolocation'});
-      if(st.state==='granted'){_locDenied=false;_locDeniedAt=0;localStorage.removeItem('_locDeniedAt')}
-      else if(st.state==='denied')return{loc:null,denied:true,tampered:false,suspicious:false};
-    }
-  }catch(e){}
+  // iframe 环境（Chrome 扩展弹窗）：跨域 iframe 中 Permissions API 可能误报 denied，
+  // 跳过权限检查直接尝试获取定位；失败时也不标记为拒绝（浏览器限制而非用户拒绝）
+  const isIframe=window.self!==window.top;
+  if(!isIframe){
+    // 先查 Permissions API：用户可能已在浏览器设置中重新授权
+    try{
+      if(navigator.permissions&&navigator.permissions.query){
+        const st=await navigator.permissions.query({name:'geolocation'});
+        if(st.state==='granted'){_locDenied=false;_locDeniedAt=0;localStorage.removeItem('_locDeniedAt')}
+        else if(st.state==='denied')return{loc:null,denied:true,tampered:false,suspicious:false};
+      }
+    }catch(e){}
+  }
   // 拒绝后每天重试一次：如果距上次拒绝已超过 24 小时，清除拒绝状态，允许再次请求
   if(_locDenied&&_locDeniedAt>0){
     if(Date.now()-_locDeniedAt<LOC_RETRY_MS)return{loc:null,denied:true,tampered:false,suspicious:false};
@@ -3116,8 +3126,8 @@ async function getPunchLoc(){
   }
   const r=await Promise.race([_locReadPosition(),new Promise(res=>setTimeout(()=>res({err:3}),2500))]);
   if(r.loc){_locCache=r.loc;return{loc:r.loc,denied:false,tampered:false,suspicious:false}}
-  if(r.err===1)_setLocDenied();
-  return{loc:null,denied:r.err===1,tampered:r.err===4,suspicious:r.err===5||r.err===6};
+  if(r.err===1&&!isIframe)_setLocDenied();
+  return{loc:null,denied:r.err===1&&!isIframe,tampered:r.err===4,suspicious:r.err===5||r.err===6};
 }
 // 两坐标球面距离（km），管理端首尾对比用
 function locDistanceKm(a,b){
@@ -4748,7 +4758,9 @@ async function renderEmp(){
     // 透明告知 + 静默预取定位（打卡时直接用缓存，不等待）
     html+=`<div style="max-width:420px;margin:0 0 6px;font-size:12px;color:var(--muted-light);display:flex;align-items:center;gap:6px"><svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0 1 18 0z"/><circle cx="12" cy="10" r="3"/></svg>每天第一次和最后一次打卡时会记录当前位置，两次位置自动对比供管理员核对（管理员可见）</div>`;
     ensureLocPrefetch();
-    if(_locDenied){
+    // iframe 环境（Chrome 扩展弹窗）：跨域 iframe 中定位失败是浏览器限制，不显示红色警告
+    const isIframe=window.self!==window.top;
+    if(_locDenied&&!isIframe){
       html+=`<div style="max-width:420px;margin:0 0 6px;padding:8px 10px;border:1px solid var(--danger);background:var(--danger-soft);border-radius:8px;font-size:12px;color:var(--danger);line-height:1.6">公司考勤要求开启定位：检测到你的浏览器当前拒绝了定位授权，打卡记录将被标记「未授权」并提示管理员。请在浏览器设置中允许本网站使用位置后刷新页面。</div>`;
     }
   }
