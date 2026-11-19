@@ -24,6 +24,9 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Verify deploy integrity
+        run: node verify-deploy-integrity.cjs
+
       - name: Setup Pages
         uses: actions/configure-pages@v5
 
