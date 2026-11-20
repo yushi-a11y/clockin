@@ -22,12 +22,16 @@ const requiredMarkers = [
   ['权威选班快照', "supa.rpc('picks_snapshot')"],
   ['每周 56 上限', 'const MAX_PER_WEEK=56'],
   ['单日不限口径', 'function dayValid(n){return n}'],
-  ['提前 2 分钟打卡', 'const PUNCH_EARLY_MIN=2']
+  ['提前 2 分钟打卡', 'const PUNCH_EARLY_MIN=2'],
+  ['选班逐格保存队列', 'async function drainPickWriteQueue'],
+  ['选班稳定按钮刷新', 'function patchPickView'],
+  ['选班快照待保存保护', 'function overlayPendingPicks']
 ];
 for (const [name, marker] of requiredMarkers) {
   assert(html.includes(marker), `${name}缺失`);
 }
 
+assert(!/if\s*\(\s*_pickBusy\s*\)/.test(html), '选班重新出现吞掉连续点击的全局忙锁');
 assert(!/const\s+MAX_PER_DAY\s*=/.test(html), '重新出现每日选班上限常量');
 assert(!/function\s+dayValid\s*\(n\)\s*\{\s*return\s+Math\.min/.test(html), '有效合计重新按每日上限截断');
 assert(/const\s+inSW=it=>\{[^}]*start-PUNCH_EARLY_MIN\*60000/.test(html), '打卡动作解析未使用提前 2 分钟规则');
