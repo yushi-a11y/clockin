@@ -2256,8 +2256,9 @@ function normalizePicksData(data){
 }
 // selCfg: 选班规则  openDay=开放星期(0周日..6周六) openHour=开放小时 weekStartDay=每周起始 lock=管理员锁定
 const DEF_SELCFG={openDay:5,openHour:14,weekStartDay:6,lock:false,minValid:30,retainDays:60,amShiftId:7,pmShiftId:25};
-// 选班不再限制每人每天的数量；唯一的数量约束是"整周总时段数不超过 MAX_PER_WEEK"。
-const MAX_PER_WEEK=56;  // 每人整周最多可选/计入有效的时段数
+// 选班数量约束：每人每天最多 MAX_PER_DAY 个时段，且整周合计最多 MAX_PER_WEEK 个。管理员可超额分配，不受此两项限制。
+const MAX_PER_WEEK=49;  // 每人整周最多可选/计入有效的时段数
+const MAX_PER_DAY=7;    // 每人单日最多可选的时段数
 // 结构性守卫：仅用于识别异常/损坏数据（单个日期班次数远超合理值），并非业务选班上限。
 const MAX_PER_DAY_STRUCT=64;
 let picks=normalizePicksData(ld('cp6',{}));
@@ -2319,13 +2320,13 @@ const FAQ_ENTRIES=[
   {id:'punch-history',category:'punch',title:'可以补打今天之前的卡吗？',keywords:['补卡','昨天','之前','漏打','历史'],answer:'不能直接在打卡页补打历史班次。如果已缺卡，请到「补卡」标签提交补卡申请，管理员审批通过后系统会自动写入一条打卡记录，缺卡状态会变为「已补」。'},
   {id:'pick-open',category:'pick',title:'选班什么时候开放？',keywords:['选班','开放','几点','周五','14:00','开放时间'],answer:'默认每周五 14:00 开放下一周期的选班。管理员可在后台调整「开放星期」和「开放小时」。在开放前只能查看排班表，不能选择或修改。'},
   {id:'pick-lock',category:'pick',title:'选班为什么被锁定/保存后改不了？',keywords:['锁定','保存','改不了','不能修改','冻结'],answer:'原因通常有几种：1）管理员在后台锁定了选班；2）该天已经过去；3）你已经保存过该天的选班，保存后员工端自动锁定，只能换班或让管理员在后台修改。'},
-  {id:'pick-limit',category:'pick',title:'每天/每周最多能选几个班？',keywords:['上限','最多','56','每天','每周','限制'],answer:'每人单日选班数量不限，但每周（按系统设置的周起始日计算）合计不超过 56 个时段。同一时段每人每天只能占 1 个。14:10 后的补位、换班、捡班同样受每周 56 个的限制。'},
-  {id:'pick-freeze',category:'pick',title:'每周五 14:05 和 14:10 会发生什么？',keywords:['14:05','14:10','冻结','清理','补位'],answer:'每周五 14:05 系统会冻结全表并清理超额班次：如果某周选了超过 56 个班，超额部分会被清除。14:10 之后可以自由补位空余时段，但仍受每周 56 个的限制。'},
+  {id:'pick-limit',category:'pick',title:'每天/每周最多能选几个班？',keywords:['上限','最多','49','7','每天','每周','限制'],answer:'每人每天最多选 7 个时段，每周（按系统设置的周起始日计算）合计最多 49 个时段。同一时段每人每天只能占 1 个。14:10 后的补位、换班、捡班同样受每天 7 个、每周 49 个的限制。'},
+  {id:'pick-freeze',category:'pick',title:'每周五 14:05 和 14:10 会发生什么？',keywords:['14:05','14:10','冻结','清理','补位'],answer:'每周五 14:05 系统会冻结全表并清理超额班次：如果某周选了超过 49 个班，超额部分会被清除。14:10 之后可以自由补位空余时段，但仍受每天 7 个、每周 49 个的限制。'},
   {id:'pick-full',category:'pick',title:'某个时段点不了/显示已满，为什么？',keywords:['已满','点不了','时段','满员','人数上限'],answer:'管理员可能给该时段设置了人数上限，当已选人数达到上限后，其他员工就无法再选。你可以 14:10 后尝试捡班，或联系管理员调整上限。'},
-  {id:'count-valid',category:'count',title:'「有效合计」是怎么算的？',keywords:['有效合计','怎么算','计算','每日','每周'],answer:'选班已取消每日上限，单日选多少个都全部计入；每周最多计 56 个有效班次，某周超过 56 个的部分只按 56 个计入。标红的单元格表示不足当周最低有效数。'},
+  {id:'count-valid',category:'count',title:'「有效合计」是怎么算的？',keywords:['有效合计','怎么算','计算','每日','每周'],answer:'每天最多选 7 个时段，单日选多少个都全部计入；每周最多计 49 个有效班次，某周超过 49 个的部分只按 49 个计入。标红的单元格表示不足当周最低有效数。'},
   {id:'count-am-pm',category:'count',title:'什么是早补和夜补？',keywords:['早补','夜补','早晚补','定义'],answer:'早补指选中特定早班时段（默认 07:00-08:00，时段 ID 7）的天数；夜补指选中特定夜班时段（默认次日 01:00-02:00，时段 ID 25）的天数。系统按实际选班数据自动统计，用于月度汇总。'},
   {id:'month-target',category:'month',title:'月度页面的「达标」和「未达标」是什么意思？',keywords:['达标','未达标','月度','周有效','minValid'],answer:'当某周有效班次 ≥ 后台配置的「周最低有效」值（默认 30）时，显示为「达标」；否则显示「未达标」。这是判断本周出勤强度是否达标的依据。'},
-  {id:'swap-how',category:'swap',title:'怎么发起换班？',keywords:['换班','发起','转让','给别人'],answer:'进入「换班」标签，选择日期、要转出的班次、接收人，提交后对方会收到一条待确认请求。对方同意且双方都不超出每周 56 个时段限制时，换班生效。'},
+  {id:'swap-how',category:'swap',title:'怎么发起换班？',keywords:['换班','发起','转让','给别人'],answer:'进入「换班」标签，选择日期、要转出的班次、接收人，提交后对方会收到一条待确认请求。对方同意且双方都不超出每天 7 个、每周 49 个时段限制时，换班生效。'},
   {id:'swap-expire',category:'swap',title:'换班请求多久不处理会过期？',keywords:['换班','过期','多久','48','小时'],answer:'换班请求 48 小时未处理会自动过期。过期后班次仍归原持有人。'},
   {id:'swap-status',category:'swap',title:'换班有哪些状态？',keywords:['换班状态','pending','accepted','rejected','expired','proxy'],answer:'常见状态：pending（等待确认）、accepted（已同意）、rejected（已拒绝）、cancelled（已取消）、proxy_pending（代提交待本人确认）、expired（超过 48 小时未处理自动过期）、approved（管理员后台批准）。'},
   {id:'makeup-how',category:'makeup',title:'怎么提交补卡？',keywords:['补卡','提交','缺卡','申请'],answer:'在「补卡」页选择缺卡日期、缺卡班次、实际打卡时间并填写原因后提交。只能对已经过去的班次发起补卡。提交后管理员会在「补卡审批」中处理，通过后缺卡状态变为「已补」。'},
@@ -2371,7 +2372,7 @@ async function freshSlotCount(dateStr,sid,exceptMid){
 function curMonthStr(){const d=new Date();return`${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}`}
 // 相对当前月的月份字符串：off=0 当前月, -1 上月, 1 下月
 function monthStrByOffset(off){const d=new Date();d.setDate(1);d.setMonth(d.getMonth()+off);return`${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}`}
-function dayValid(n){return n}                                         // 选班已取消每日上限，单日全部计入有效；整周封顶在调用处处理
+function dayValid(n){return n}                                         // 有效合计不因单日封顶（每天最多选7个已在选班时限制）；整周封顶在调用处处理
 // 早补=07:00-08:00 时段，夜补=次日01:00-02:00 时段。按月自动统计选中该时段的天数
 // 早补/夜补时段 id 解析（P1）：优先尊重管理员在 selCfg 中配置的 id；若该 id 已失效
 // （如导入重建班次表后消失），按标准时段开始时间（早补 07:00 / 夜补 01:00）在现存班次中
@@ -2396,9 +2397,9 @@ function memberMonthShiftCount(mid,monthStr){
   let am=0,pm=0;const amId=amShiftId(),pmId=pmShiftId();Object.keys(picks).forEach(ds=>{if(ds.slice(0,7)!==monthStr)return;const arr=picks[ds]&&picks[ds][String(mid)];if(!Array.isArray(arr))return;if(arr.includes(amId))am++;if(arr.includes(pmId))pm++});
   const result={am,pm};_mmcCache[key]=result;return result;
 }
-// 某成员整周统计：per=每日原始数, raw=选时合计(原始), valid=有效合计(整周≤56，单日不再封顶)
+// 某成员整周统计：per=每日原始数, raw=选时合计(原始), valid=有效合计(整周≤49，单日不再封顶)
 function memberWeekStats(m,weekDays){let raw=0,valid=0;const per=[];weekDays.forEach(d=>{const n=memberShifts(m,ymd(d)).length;per.push(n);raw+=n;valid+=dayValid(n)});return{per,raw,valid:Math.min(valid,MAX_PER_WEEK)}}
-// 某成员某月的有效选班合计（单日不封顶，逐周≤56 后跨整月累加；与各周单元格相加保持一致）
+// 某成员某月的有效选班合计（单日不封顶，逐周≤49 后跨整月累加；与各周单元格相加保持一致）
 function memberMonthValid(mid,monthStr){
   _checkMonthCache();
   const key=mid+'_'+monthStr;if(_mmvCache[key]!==undefined)return _mmvCache[key];
@@ -2417,8 +2418,8 @@ function draftWeekTotalExcept(dateStr){let t=0;pickWeekDaysStrOf(dateStr).forEac
 // 选班规则说明（对应线下 6 条规则）
 const SEL_RULES=[
   '选班 14:00 开放，14:05 冻结全表并清理多余班次，14:10 后可自由补位空余时段。',
-  '一次一行选班：每人整周选班合计不超过 56 个时段（单日数量不限）。',
-  '14:10 后请假 / 捡班 / 换班同样受每周 56 限制；每周最多计 56 个有效（单日不再封顶，见「有效合计」），超出不计入有效。',
+  '一次一行选班：每人每天最多 7 个时段，整周合计不超过 49 个时段。',
+  '14:10 后请假 / 捡班 / 换班同样受每天 7 个、每周 49 个限制；每周最多计 49 个有效，超出不计入有效。',
   '多占的时段须在 14:05 前放出，未放出会被标红并清除超额部分。',
   '同一时段每人限占 1 个；使用非本人工号或错误工号占位视为无效，将被清除。',
   '本周周一、周二的可选时段数与其他日期不同，选择时请留意。'
@@ -2711,6 +2712,7 @@ async function atomicAddPickCap(dateStr,mid,sid,isAdmin){
       return total+(Array.isArray(arr)?new Set(arr.map(Number).filter(Number.isFinite)).size:0);
     },0)+(alreadyExists?0:1);
     if(!isAdmin&&weekTotal>MAX_PER_WEEK)return{ok:false,reason:'weekfull',count:weekTotal-1,max:MAX_PER_WEEK};
+    if(!isAdmin){const dayCur=[...new Set((((picks[dateStr]||{})[mid])||[]).map(Number).filter(Number.isFinite))];if(!dayCur.includes(sid)&&dayCur.length+1>MAX_PER_DAY)return{ok:false,reason:'dayfull',count:dayCur.length,max:MAX_PER_DAY};}
     const cap=slotCapOf(dateStr,sid),projectedCount=slotCount(dateStr,sid)+(alreadyExists?0:1);
     if(cap>0&&!isAdmin&&projectedCount>cap)return{ok:false,reason:'full',count:projectedCount-1,cap};
     if(!alreadyExists)cur.push(sid);
@@ -5203,7 +5205,8 @@ async function drainPickWriteQueue(){
       }else if(result&&['full','dayfull','weekfull','invalid','locked','closed','past'].includes(result.reason)){
         finishPickOp(op,false);
         if(result.reason==='full')showToast(`该时段已满员（${result.count}/${result.cap}），无法选择`);
-        else if(result.reason==='weekfull'||result.reason==='dayfull')showToast(`本周最多选 ${result.max||MAX_PER_WEEK} 个时段，无法再选`);
+        else if(result.reason==='dayfull')showToast(`每天最多选 ${result.max||MAX_PER_DAY} 个时段，无法再选`);
+        else if(result.reason==='weekfull')showToast(`本周最多选 ${result.max||MAX_PER_WEEK} 个时段，无法再选`);
         else showToast('服务器拒绝该次选班，已恢复此格，请检查选班开放状态');
       }else if(await confirmPickOp(op)){
         finishPickOp(op,true); // 仅回执丢失，行表确认已保存，不重复请求
@@ -5230,6 +5233,7 @@ function togglePickSlot(dateStr,sid){
   const admin=isAdminNow(),cur=pickSel(dateStr),remove=cur.includes(sid);
   if(remove&&!admin){showToast('已选班次不可取消，如需修改请联系管理员');return}
   if(!remove&&!admin&&draftWeekTotalExcept(dateStr)+cur.length>=MAX_PER_WEEK){showToast(`本周最多选 ${MAX_PER_WEEK} 个时段`);return}
+  if(!remove&&!admin&&cur.length>=MAX_PER_DAY){showToast(`每天最多选 ${MAX_PER_DAY} 个时段`);return}
   if(!remove&&!admin&&slotCapOf(dateStr,sid)>0&&slotCount(dateStr,sid,mid)>=slotCapOf(dateStr,sid)){
     showToast('该时段已满员，请选择其他时段');return;
   }
@@ -5256,9 +5260,14 @@ async function savePicks(){
       return;
     }
   }
-  // 2) 员工端：硬性上限校验（单日数量不限；每周最多 56 个）
+  // 2) 员工端：硬性上限校验（每天最多 MAX_PER_DAY 个；每周最多 MAX_PER_WEEK 个）
   if(!admin){
-    // 整周校验：把本周所有日期（已保存的 + 草稿里的）汇总，整周 ≤ 56
+    // 单日校验：草稿里任一日期超过每天上限即拒绝
+    for(const d of dates){
+      const dc=(pickDraft[d]||[]).length;
+      if(dc>MAX_PER_DAY){showToast(`${d} 选了 ${dc} 个时段，超过每天上限 ${MAX_PER_DAY} 个，请减少后重新保存`);return}
+    }
+    // 整周校验：把本周所有日期（已保存的 + 草稿里的）汇总，整周 ≤ MAX_PER_WEEK
     const ws=weekStartOf(parseYmd(dates[0]));
     const wkDays=weekDaysArr(ws);
     let wkTotal=0;
@@ -5915,10 +5924,11 @@ async function acceptSwap(id){
   // 接收方约束校验
   const toArr=(picks[s.date]&&picks[s.date][String(s.toId)])||[];
   if(toArr.includes(swapSid)){showToast('你当天已选该时段，无法接收');return}
-  // 整周 56 上限（单日数量不限）
+  // 整周 MAX_PER_WEEK 上限 + 单日 MAX_PER_DAY 上限
   const wkDays=weekDaysArr(weekStartOf(parseYmd(s.date)));
   let wkTotal=0;wkDays.forEach(d=>{const a=(picks[ymd(d)]&&picks[ymd(d)][String(s.toId)])||[];wkTotal+=a.length});
   if(wkTotal>=MAX_PER_WEEK){showToast(`你本周已选满 ${MAX_PER_WEEK} 个时段，无法接收`);return}
+  if(toArr.length+1>MAX_PER_DAY){showToast(`你当天班次将达上限 ${MAX_PER_DAY} 个，无法接收`);return}
   // 满员校验（排除转出方，因为其将让出该班次）
   const cap=slotCapOf(s.date,swapSid);
   if(cap>0){let cnt=slotCount(s.date,swapSid,s.fromId);if(cnt>=cap){showToast('该时段已满员，无法接收');return}}
@@ -5998,6 +6008,11 @@ async function acceptExchange(id){
   if(giveWeekStr!==takeWeekStr){
     if(countWeek(selectedMember.id,giveWeekStart)>=MAX_PER_WEEK){showToast(`你给出日期所在周已满 ${MAX_PER_WEEK} 个时段，无法接收新班次`);return}
     if(countWeek(giverId,takeWeekStart)>=MAX_PER_WEEK){showToast(`对方接收日期所在周已满 ${MAX_PER_WEEK} 个时段，无法完成换班`);return}
+  }
+  // 单日 MAX_PER_DAY 上限：给出/接收为不同日期时，双方各自在接收日 +1
+  if(giveDate!==takeDate){
+    if(receiverGive.length+1>MAX_PER_DAY){showToast(`你在给出日期当天班次将达上限 ${MAX_PER_DAY} 个，无法换班`);return}
+    if(giverTake.length+1>MAX_PER_DAY){showToast(`对方在接收日期当天班次将达上限 ${MAX_PER_DAY} 个，无法完成换班`);return}
   }
   const capGive=slotCapOf(giveDate,giveSid);
   if(capGive>0){const cnt=slotCount(giveDate,giveSid,giverId);if(cnt>=capGive){showToast('你要接收的时段已满员，无法换班');return}}
@@ -7588,7 +7603,7 @@ function renderSelection(){
       h+=`</div>`;
       const wdays=weekDaysArr(mw[countDetailWeekIdx]||weekStartOf(new Date()));
       h+=`<div class="sel-grid-wrap">${buildCountTable(wdays,false,monthStr)}</div>`;
-      h+=`<div style="font-size:11px;color:var(--muted-light);margin-top:8px;line-height:1.6">分表为所选周期的每日明细。「有效合计」单日全部计入、整周最多计 56；「结果」按“周最低有效”(当前 ${minV})判定；「${mNum}月早补/夜补/合计」为${mNum}月累计(与总表一致)，随实际选班实时更新。</div>`;
+      h+=`<div style="font-size:11px;color:var(--muted-light);margin-top:8px;line-height:1.6">分表为所选周期的每日明细。「有效合计」单日全部计入、整周最多计 49；「结果」按“周最低有效”(当前 ${minV})判定；「${mNum}月早补/夜补/合计」为${mNum}月累计(与总表一致)，随实际选班实时更新。</div>`;
     }
     document.getElementById('selGridWrap').innerHTML=h;
     return;
@@ -7700,7 +7715,7 @@ async function saveCellEditor(){
       }
     }
   }
-  // 管理员后台改选班可超额分配：不受员工"每周 56 / 单日"选班次数限制，服务器 pick_set 亦不设数量上限。
+  // 管理员后台改选班可超额分配：不受员工"每周 49 / 每天 7"选班次数限制，服务器 pick_set 亦不设数量上限。
   // 管理员已确认重复模式，设置 _confirmed 标记让 atomicSetPick 跳过二次阻断
   _confirmed=true;
   try{
