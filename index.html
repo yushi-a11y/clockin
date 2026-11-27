@@ -5205,8 +5205,8 @@ async function drainPickWriteQueue(){
       }else if(result&&['full','dayfull','weekfull','invalid','locked','closed','past'].includes(result.reason)){
         finishPickOp(op,false);
         if(result.reason==='full')showToast(`该时段已满员（${result.count}/${result.cap}），无法选择`);
-        else if(result.reason==='dayfull')showToast(`每天最多选 ${result.max||MAX_PER_DAY} 个时段，无法再选`);
-        else if(result.reason==='weekfull')showToast(`本周最多选 ${result.max||MAX_PER_WEEK} 个时段，无法再选`);
+        else if(result.reason==='dayfull')showToast(`今天已选 ${result.count!=null?result.count:MAX_PER_DAY} 个，达每天上限 ${result.max||MAX_PER_DAY} 个，无法再选`);
+        else if(result.reason==='weekfull')showToast(`本周已选 ${result.count!=null?result.count:MAX_PER_WEEK} 个，达每周上限 ${result.max||MAX_PER_WEEK} 个，无法再选；如需调整请联系管理员`);
         else showToast('服务器拒绝该次选班，已恢复此格，请检查选班开放状态');
       }else if(await confirmPickOp(op)){
         finishPickOp(op,true); // 仅回执丢失，行表确认已保存，不重复请求
@@ -5232,8 +5232,8 @@ function togglePickSlot(dateStr,sid){
   }
   const admin=isAdminNow(),cur=pickSel(dateStr),remove=cur.includes(sid);
   if(remove&&!admin){showToast('已选班次不可取消，如需修改请联系管理员');return}
-  if(!remove&&!admin&&draftWeekTotalExcept(dateStr)+cur.length>=MAX_PER_WEEK){showToast(`本周最多选 ${MAX_PER_WEEK} 个时段`);return}
-  if(!remove&&!admin&&cur.length>=MAX_PER_DAY){showToast(`每天最多选 ${MAX_PER_DAY} 个时段`);return}
+  if(!remove&&!admin&&draftWeekTotalExcept(dateStr)+cur.length>=MAX_PER_WEEK){showToast(`本周已选 ${draftWeekTotalExcept(dateStr)+cur.length} 个，已达每周上限 ${MAX_PER_WEEK} 个，无法再选；如需调整请联系管理员`);return}
+  if(!remove&&!admin&&cur.length>=MAX_PER_DAY){showToast(`今天已选 ${cur.length} 个，已达每天上限 ${MAX_PER_DAY} 个，无法再选`);return}
   if(!remove&&!admin&&slotCapOf(dateStr,sid)>0&&slotCount(dateStr,sid,mid)>=slotCapOf(dateStr,sid)){
     showToast('该时段已满员，请选择其他时段');return;
   }
